@@ -96,7 +96,7 @@ export function createChatWidgetLayout(
       resolveChatSnapshotKey(host, target) !== cacheKey ||
       snapshot.sessionId !== sessionId
     ) {
-      return;
+      return undefined;
     }
     reservations ??= snapshot?.widgetHeights ?? {};
     return snapshot;
@@ -120,7 +120,7 @@ export function createChatWidgetLayout(
       rowRevision();
       const snapshot = current();
       if (!snapshot) {
-        return;
+        return undefined;
       }
       return key.startsWith("row:v1:") ? reservations?.[key] : snapshot?.widgetHeights?.[key];
     },
