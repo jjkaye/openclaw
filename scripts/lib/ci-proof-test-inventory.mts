@@ -746,7 +746,6 @@ export const PR_PROTECTED_RUNTIME_TEST_FILES: readonly string[] = [
   "extensions/signal/src/monitor/event-handler.partial-delivery.test.ts",
   "extensions/signal/src/reply-authors.test.ts",
   "extensions/signal/src/signal-ingress.approval-reaction-replay.test.ts",
-  "extensions/slack/src/actions.download-file.test.ts",
   "extensions/slack/src/actions.read.test.ts",
   "extensions/slack/src/approval-native.test.ts",
   "extensions/slack/src/channel-type.test.ts",
