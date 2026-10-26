@@ -731,21 +731,19 @@
   display: inline-flex;
 }
 
-/* The chevron owns the leading slot of the microphone control while remaining
-   out of the resting composer until approach. The host and trigger both
-   collapse to zero: hiding only the trigger leaves an invisible gap beside the
-   mic. Width is animated instead of clipping the dropdown host, so its projected
-   menu remains available while open.
-   Stretch instead of a fixed height so it always matches the voice button,
-   including the 44px mobile bump. */
+/* One owner opens the leading slot. The trigger follows that width instead of
+   running a second layout animation; its single fade starts with the opening. */
 .chat-talk-input-picker {
   display: inline-flex;
   align-self: center;
   width: 0;
-  opacity: 0;
-  transition:
-    width 190ms cubic-bezier(0.2, 0, 0, 1),
-    opacity 120ms ease-out;
+  /* A brief exit grace keeps a small pointer correction from collapsing it. */
+  transition: width var(--duration-normal) var(--ease-out) var(--duration-fast);
+}
+
+.chat-talk-input-picker > div {
+  width: 100%;
+  min-width: 0;
 }
 
 /* Focus, open, and captured-hold states reveal immediately so hover dwell never
@@ -754,15 +752,14 @@
 .chat-talk-control:has(:focus-visible) .chat-talk-input-picker,
 .chat-talk-input-picker[open] {
   width: var(--chat-microphone-picker-width);
-  opacity: 1;
+  transition: none;
 }
 
 @media (hover: hover) and (pointer: fine) {
   .chat-talk-control:hover:not(.chat-talk-control--holding):not(:has(:focus-visible))
     .chat-talk-input-picker:not([open]) {
     width: var(--chat-microphone-picker-width);
-    opacity: 1;
-    transition-delay: 750ms;
+    transition-delay: var(--chat-microphone-reveal-delay);
   }
 }
 
@@ -784,7 +781,7 @@
 }
 
 .chat-talk-input-picker__trigger {
-  width: 0;
+  width: 100%;
   min-width: 0;
   height: var(--chat-composer-control-size);
   border-radius: var(--radius-full);
@@ -792,19 +789,8 @@
   opacity: 0;
   overflow: hidden;
   pointer-events: none;
-  /* Collapsed, the glyph is parked under the microphone and slides into its
-     leading slot; without that it appeared in place while the box widened, which
-     read as a stutter rather than a reveal. */
-  transform: translateX(6px);
-  /* Width carries the layout, so it takes the longer, decelerating curve and the
-     paint follows it: opacity waits out the first half of the movement so the
-     chevron fades in as it settles instead of flashing at full strength while
-     the box is still a sliver. Collapsing runs the reverse without that wait, so
-     the row never holds a half-drawn control. */
   transition:
-    width 190ms cubic-bezier(0.2, 0, 0, 1),
-    transform 190ms cubic-bezier(0.2, 0, 0, 1),
-    opacity 120ms ease-out,
+    opacity var(--duration-fast) var(--ease-out) var(--duration-fast),
     background var(--duration-fast) ease,
     color var(--duration-fast) ease;
 }
@@ -822,17 +808,8 @@
 .chat-talk-control--holding .chat-talk-input-picker__trigger,
 .chat-talk-control:has(:focus-visible) .chat-talk-input-picker__trigger,
 .chat-talk-input-picker[open] .chat-talk-input-picker__trigger {
-  /* Wide enough to seat its glyph the way the microphone seats its own: at 16 the
-     chevron ended up a couple of pixels off the pill's leading edge while the mic
-     kept six on the other side, so the expanded control looked pushed against its
-     own frame.
-     Width alone, deliberately: a min-width here would be the used width from the
-     first frame and the box would snap to full size while the transition was
-     still running, which is the jump this reveal is meant not to have. */
-  width: var(--chat-microphone-picker-width);
   opacity: 1;
-  transform: translateX(0);
-  transition-delay: 0ms, 0ms, 70ms, 0ms, 0ms;
+  transition: none;
   pointer-events: auto;
 }
 
@@ -840,10 +817,8 @@
   .chat-talk-control:hover:not(.chat-talk-control--holding):not(:has(:focus-visible))
     .chat-talk-input-picker:not([open])
     .chat-talk-input-picker__trigger {
-    width: var(--chat-microphone-picker-width);
     opacity: 1;
-    transform: translateX(0);
-    transition-delay: 750ms, 750ms, 820ms, 0ms, 0ms;
+    transition-delay: var(--chat-microphone-reveal-delay), 0ms, 0ms;
     pointer-events: auto;
   }
 }
@@ -851,14 +826,12 @@
 @media (hover: none) {
   .chat-talk-input-picker {
     width: var(--chat-microphone-picker-width);
-    opacity: 1;
+    transition: none;
   }
 
   .chat-talk-input-picker__trigger {
-    width: var(--chat-microphone-picker-width);
     opacity: 1;
-    transform: translateX(0);
-    transition-delay: 0ms, 0ms, 70ms, 0ms, 0ms;
+    transition: none;
     pointer-events: auto;
   }
 }
@@ -1983,6 +1956,12 @@ html[dir="rtl"] .chat-attachment-loading > span {
   border-radius: var(--radius-full);
 }
 
+.agent-chat__composer-lead .chat-controls__permission-trigger {
+  justify-content: center;
+  min-width: 32px;
+  padding-inline: 6px;
+}
+
 .chat-controls__inline-select-trigger:hover,
 .chat-controls__inline-select-trigger[aria-expanded="true"],
 .chat-controls__inline-select[open] > .chat-controls__inline-select-trigger {
@@ -2012,12 +1991,6 @@ html[dir="rtl"] .chat-attachment-loading > span {
   color: var(--icon-interactive, var(--muted));
   transform: rotate(180deg);
   transition: transform var(--duration-fast) ease;
-}
-
-/* Tighten only the label-to-chevron seam; leading icons keep the shared chip
-   rhythm. Phone composers already switch the whole trigger to a 3px gap. */
-.agent-chat__input .chat-controls__model-settings .chat-controls__inline-select-chevron {
-  margin-inline-start: -2px;
 }
 
 .chat-controls__inline-select[open]
@@ -3231,10 +3204,6 @@ html[dir="rtl"] .chat-attachment-loading > span {
     padding-inline: 2px;
   }
 
-  .agent-chat__input .chat-controls__model-settings .chat-controls__inline-select-chevron {
-    margin-inline-start: 0;
-  }
-
   .agent-chat__composer-lead .chat-controls__permission-trigger {
     width: var(--chat-composer-control-size);
     justify-content: center;
@@ -3258,37 +3227,35 @@ html[dir="rtl"] .chat-attachment-loading > span {
       --chat-effort-badge-backdrop: var(--chat-effort-tint, var(--chat-composer-surface));
     }
 
-    & :is(.chat-controls__model-trigger, .chat-controls__effort-trigger) {
+    &.agent-chat__input :is(.chat-controls__model-trigger, .chat-controls__effort-trigger) {
       min-width: 44px;
       min-height: 44px;
-      background: var(--chat-effort-tint, transparent);
+      isolation: isolate;
+      background: transparent;
     }
 
     & :is(.chat-controls__model-trigger, .chat-controls__effort-trigger)::before {
       position: absolute;
-      inset: 0;
+      z-index: -1;
+      inset: 6px 0;
       border-radius: var(--radius-full);
-      background: transparent;
+      background: var(--chat-effort-tint, transparent);
       content: "";
     }
 
-    /* The text picker has a slimmer wash without shrinking its 44px touch target. */
-    & .chat-controls__model-trigger::before {
-      inset-block: 6px;
-    }
-
-    &
+    /* Both selectors keep a 44px target around the same 32px visual capsule. */
+    &.agent-chat__input
       :is(.chat-controls__model-picker, .chat-controls__effort-picker)[open]
       > :is(.chat-controls__model-trigger, .chat-controls__effort-trigger),
-    & :is(.chat-controls__model-trigger, .chat-controls__effort-trigger):hover {
-      background: var(--chat-effort-tint, transparent);
+    &.agent-chat__input :is(.chat-controls__model-trigger, .chat-controls__effort-trigger):hover {
+      background: transparent;
     }
 
     &
       :is(.chat-controls__model-picker, .chat-controls__effort-picker)[open]
       > :is(.chat-controls__model-trigger, .chat-controls__effort-trigger)::before,
     & :is(.chat-controls__model-trigger, .chat-controls__effort-trigger):hover::before {
-      background: color-mix(in srgb, var(--text) 7%, transparent);
+      background: color-mix(in srgb, var(--text) 7%, var(--chat-effort-tint, transparent));
     }
 
     & .chat-controls__effort-picker[open] > .chat-controls__effort-trigger,
@@ -3367,23 +3334,22 @@ html[dir="rtl"] .chat-attachment-loading > span {
     }
 
     & :is(.chat-controls__permission-icon, .chat-controls__permission-lock) {
-      width: var(--chat-mobile-row-muted-icon-size);
-      height: var(--chat-mobile-row-muted-icon-size);
-      flex-basis: var(--chat-mobile-row-muted-icon-size);
+      --chat-composer-icon-size: var(--chat-composer-context-icon-size);
+      width: var(--chat-composer-icon-size);
+      height: var(--chat-composer-icon-size);
+      flex-basis: var(--chat-composer-icon-size);
       color: inherit;
-      opacity: var(--chat-mobile-row-muted-opacity);
     }
 
     & .context-ring__dial {
-      width: var(--chat-mobile-row-context-icon-size);
-      height: var(--chat-mobile-row-context-icon-size);
-      flex-basis: var(--chat-mobile-row-context-icon-size);
+      width: var(--chat-composer-context-icon-size);
+      height: var(--chat-composer-context-icon-size);
+      flex-basis: var(--chat-composer-context-icon-size);
       color: inherit;
-      opacity: var(--chat-mobile-row-muted-opacity);
     }
 
     & :is(.context-ring__track, .context-ring__fill) {
-      stroke-width: var(--chat-mobile-row-icon-stroke);
+      stroke-width: var(--chat-composer-context-stroke);
     }
 
     /* Input selection remains a desktop affordance. Mobile gives the two voice
@@ -3401,8 +3367,9 @@ html[dir="rtl"] .chat-attachment-loading > span {
     &
       .agent-chat__composer-footer
       :is(.chat-controls__permission-icon svg, .chat-controls__permission-lock svg) {
-      width: var(--chat-mobile-row-muted-icon-size);
-      height: var(--chat-mobile-row-muted-icon-size);
+      width: var(--chat-composer-icon-size);
+      height: var(--chat-composer-icon-size);
+      stroke-width: var(--chat-composer-icon-stroke);
     }
   }
 }
