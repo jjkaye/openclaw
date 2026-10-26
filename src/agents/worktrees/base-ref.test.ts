@@ -547,7 +547,8 @@ describe("worktree default-base preparation", () => {
             expect(outcomes).toEqual([failure]);
           } else if (mode === "budget") {
             expect(outcomes[0]).toMatchObject({
-              message: "Worktree base recovery exhausted the creation waiting budget",
+              message:
+                "Workspace creation timed out waiting for repository preparation. Retry creating the workspace.",
             });
           } else {
             expect(outcomes).toEqual(

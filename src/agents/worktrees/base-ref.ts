@@ -322,9 +322,10 @@ export async function withWorktreeBasePreparation<T>(
             // including every replacement; native work still owns its settlement.
             waiting = startWorktreeWait(waitBudget);
             if (waiting.waitMs === 0) {
-              throw new Error("Worktree base recovery exhausted the creation waiting budget", {
-                cause: error,
-              });
+              throw new Error(
+                "Workspace creation timed out waiting for repository preparation. Retry creating the workspace.",
+                { cause: error },
+              );
             }
             const deadline = AbortSignal.timeout(waiting.waitMs);
             options.signal = signal ? AbortSignal.any([signal, deadline]) : deadline;
