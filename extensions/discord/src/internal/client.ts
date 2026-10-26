@@ -7,6 +7,7 @@ import {
   type APIInteraction,
 } from "discord-api-types/v10";
 import { createPermitPool } from "openclaw/plugin-sdk/concurrency-runtime";
+import { asOptionalObjectRecord, asRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { DiscordCommandDeployHashStore } from "../command-deploy-store.js";
 import { getGuild, getGuildMember } from "./api.guild.js";
 import { getChannel } from "./api.messages.js";
@@ -105,11 +106,12 @@ function stableComparableObject(value: unknown, pathValue: string[] = []): unkno
     }
     return normalized;
   }
-  if (!value || typeof value !== "object") {
+  const object = asOptionalObjectRecord(value);
+  if (!object) {
     return value;
   }
   return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>)
+    Object.entries(object)
       .filter(([key, entry]) => {
         if (entry === undefined) {
           return false;
@@ -312,10 +314,10 @@ export class Client {
     if (!kind) {
       return;
     }
-    const raw = data && typeof data === "object" ? (data as Record<string, unknown>) : {};
+    const raw = asRecord(data);
     if (kind === "member") {
       const guildId = raw.guild_id;
-      const user = raw.user && typeof raw.user === "object" ? (raw.user as { id?: unknown }) : {};
+      const user = asRecord(raw.user);
       if (typeof guildId === "string" && typeof user.id === "string") {
         this.entityEntries.delete(`member:${guildId}:${user.id}`);
         this.entityEntries.delete(`user:${user.id}`);
@@ -330,6 +332,7 @@ export class Client {
 
   private async fetchCachedEntity<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
     const now = Date.now();
+    // SAFETY: Each private cache key has one entity type, fixed by its fetch caller.
     const cached = this.entityEntries.get(key) as CacheEntry<T> | undefined;
     if (cached && cached.expiresAt > now) {
       return cached.value;
@@ -382,11 +385,10 @@ export class Client {
   }
 
   private async reconcileGlobalCommands(desired: SerializedCommand[]) {
-    // SAFETY: Discord's global-command list endpoint returns APIApplicationCommand[].
     const existing = (await this.requestCommandDeploy(
       "get",
       Routes.applicationCommands(this.options.clientId),
-    )) as APIApplicationCommand[];
+    )) as APIApplicationCommand[]; // SAFETY: Discord's command list returns these API rows.
     const existingByKey = new Map(existing.map((command) => [stableCommandKey(command), command]));
     const desiredCommands = desired.map((command) => ({
       command,
