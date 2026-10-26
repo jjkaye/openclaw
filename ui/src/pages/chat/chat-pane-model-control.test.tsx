@@ -1,23 +1,19 @@
 /* @vitest-environment jsdom */
 import { createSignal } from "solid-js";
 import { afterEach, expect, it, vi } from "vitest";
-import type { AgentsListResult } from "../../api/types.ts";
-import {
-  createGatewayHarness,
-  createTestSessionCapability,
-} from "../../lib/sessions/session-capability.test-support.ts";
-import { createTestGatewayClient } from "../../test-helpers/gateway-client.ts";
-import { cleanupSolid, mountSolid } from "../../test-helpers/mount-solid.ts";
+import { mountSolid } from "../../test-helpers/mount-solid.ts";
 import { flush, waitForSolid } from "../../test-helpers/solid-settle.ts";
 import { createComposerControlsFixture } from "./chat-composer.test-support.ts";
 import type { ChatHistoryResult } from "./chat-history-snapshot.ts";
-import { createTestPageState } from "./chat-page-state.test-support.ts";
 import { ChatPaneModelControl } from "./chat-pane-model-control.tsx";
+import { makeChatPageHost } from "./chat-pending-inputs.test-support.ts";
 import { refreshPageChat, retireChatMetadataRequests } from "./chat-state-refresh.ts";
 import * as catalogPresentation from "./components/chat-model-catalog-presentation.ts";
 import { cacheChatSessionSnapshot, readChatSessionSnapshot } from "./session-message-cache.ts";
 
-afterEach(cleanupSolid);
+const saved = { id: "saved", provider: "openai", name: "Saved model" };
+const sessionKey = "agent:main:restored";
+
 afterEach(() => vi.restoreAllMocks());
 
 it("reuses the saved catalog across unrelated frames and refreshes changed model facts", async () => {
@@ -45,32 +41,23 @@ it("reuses the saved catalog across unrelated frames and refreshes changed model
 it.each([true, false])(
   "retains the selection when catalog arrives before history (default: %s)",
   async (inherited) => {
-    const saved = { id: "saved", provider: "openai", name: "Saved model" };
     const catalog = {
       models: [saved, { id: "default", provider: "openai", name: "Default model" }],
     };
-    const agentsList: AgentsListResult = {
-      defaultId: "main",
-      mainKey: "main",
-      scope: "per-sender",
-      agents: [{ id: "main", model: { primary: inherited ? "openai/saved" : "openai/default" } }],
-    };
     const history = Promise.withResolvers<ChatHistoryResult>();
-    const client = createTestGatewayClient(async (method) =>
-      method === "models.list" ? catalog : method === "chat.startup" ? history.promise : {},
-    );
-    const harness = createGatewayHarness(client);
-    const sessions = createTestSessionCapability(harness.gateway, "main");
-    const sessionKey = "agent:main:restored";
-    const state = createTestPageState({
-      client,
-      sessions,
+    const state = makeChatPageHost({
+      requestHandlers: { "models.list": catalog, "chat.startup": () => history.promise },
       sessionKey,
-      connected: true,
       assistantAgentId: "main",
-      agentsList,
-      chatMessagesBySession: new Map(),
+      agentsList: {
+        defaultId: "main",
+        mainKey: "main",
+        scope: "per-sender",
+        agents: [{ id: "main", model: { primary: inherited ? "openai/saved" : "openai/default" } }],
+      },
     });
+    const composer = () =>
+      readChatSessionSnapshot(state.chatMessagesBySession, state, { sessionKey })?.composer;
     cacheChatSessionSnapshot(
       state.chatMessagesBySession,
       state,
@@ -89,9 +76,7 @@ it.each([true, false])(
         scheduleScroll: false,
       });
       await vi.waitFor(() => expect(state.chatModelCatalog).toEqual(catalog.models));
-      expect(
-        readChatSessionSnapshot(state.chatMessagesBySession, state, { sessionKey })?.composer,
-      ).toEqual(saved);
+      expect(composer()).toEqual(saved);
       history.resolve({
         sessionId: "session",
         sessionInfo: {
@@ -107,21 +92,15 @@ it.each([true, false])(
         metadata: { commands: [] },
       });
       await pending;
-      await vi.waitFor(() =>
-        expect(
-          readChatSessionSnapshot(state.chatMessagesBySession, state, { sessionKey })?.composer
-            ?.name,
-        ).toBe("Saved model"),
-      );
+      await vi.waitFor(() => expect(composer()?.name).toBe("Saved model"));
     } finally {
       retireChatMetadataRequests(state);
-      sessions.dispose();
+      state.sessions.dispose();
     }
   },
 );
 
 it("presents the saved selection before admission and replaces it with the live catalog", async () => {
-  const saved = { id: "saved", provider: "openai", name: "Saved model" };
   const [model, setModel] = createSignal<Parameters<typeof ChatPaneModelControl>[0]["model"]>({
     ...createComposerControlsFixture().model,
     snapshot: saved,
