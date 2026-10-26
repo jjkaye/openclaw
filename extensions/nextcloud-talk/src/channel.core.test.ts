@@ -5,28 +5,19 @@ import type { CoreConfig } from "./types.js";
 
 const secretRef = (id: string) => ({ source: "env", provider: "default", id });
 
-function safeParseNextcloudTalkConfig(value: unknown) {
-  const runtime = NextcloudTalkChannelConfigSchema.runtime;
-  if (!runtime) {
-    throw new Error("Nextcloud Talk runtime config schema is unavailable");
-  }
-  return runtime.safeParse(value);
-}
+const safeParseNextcloudTalkConfig = (value: unknown) =>
+  NextcloudTalkChannelConfigSchema.runtime!.safeParse(value);
+const resolveSessionRoute = (target: string) =>
+  nextcloudTalkPlugin.messaging!.resolveOutboundSessionRoute!({
+    cfg: {},
+    agentId: "main",
+    accountId: "acct-1",
+    target,
+  });
 
 describe("nextcloud talk channel core", () => {
   it("marks ambiguous room-token session routes as best-effort", () => {
-    const resolveSessionRoute = nextcloudTalkPlugin.messaging?.resolveOutboundSessionRoute;
-    if (!resolveSessionRoute) {
-      throw new Error("Nextcloud Talk outbound session routing unavailable");
-    }
-    const route = resolveSessionRoute({
-      cfg: {},
-      agentId: "main",
-      accountId: "acct-1",
-      target: "nextcloud-talk:room-123",
-    });
-
-    expect(route).toEqual({
+    expect(resolveSessionRoute("nextcloud-talk:room-123")).toEqual({
       sessionKey: "agent:main:nextcloud-talk:group:room-123",
       baseSessionKey: "agent:main:nextcloud-talk:group:room-123",
       recipientSessionExact: false,
@@ -38,13 +29,7 @@ describe("nextcloud talk channel core", () => {
   });
 
   it("returns null when the target cannot be normalized to a room id", () => {
-    const resolveSessionRoute = nextcloudTalkPlugin.messaging?.resolveOutboundSessionRoute;
-    if (!resolveSessionRoute) {
-      throw new Error("Nextcloud Talk outbound session routing unavailable");
-    }
-    expect(
-      resolveSessionRoute({ cfg: {}, agentId: "main", accountId: "acct-1", target: "" }),
-    ).toBeNull();
+    expect(resolveSessionRoute("")).toBeNull();
   });
 
   it.each([
@@ -72,36 +57,21 @@ describe("nextcloud talk channel core", () => {
     }
   });
 
-  it("accepts SecretRef botSecret and apiPassword at top-level", () => {
-    const result = safeParseNextcloudTalkConfig({
+  it.each(["root", "account"])("accepts SecretRef credentials at %s", (scope) => {
+    const credentials = {
       baseUrl: "https://cloud.example.com",
       botSecret: secretRef("NEXTCLOUD_TALK_BOT_SECRET"),
       apiUser: "bot",
       apiPassword: secretRef("NEXTCLOUD_TALK_API_PASSWORD"),
-    });
-    expect(result.success).toBe(true);
-  });
-
-  it("accepts SecretRef botSecret and apiPassword on account", () => {
-    const result = safeParseNextcloudTalkConfig({
-      accounts: {
-        main: {
-          baseUrl: "https://cloud.example.com",
-          botSecret: secretRef("NEXTCLOUD_TALK_MAIN_BOT_SECRET"),
-          apiUser: "bot",
-          apiPassword: secretRef("NEXTCLOUD_TALK_MAIN_API_PASSWORD"),
-        },
-      },
-    });
-    expect(result.success).toBe(true);
+    };
+    expect(
+      safeParseNextcloudTalkConfig(
+        scope === "root" ? credentials : { accounts: { main: credentials } },
+      ).success,
+    ).toBe(true);
   });
 
   it("normalizes comparisons without rewriting pairing mutation keys", () => {
-    const resolveDmPolicy = nextcloudTalkPlugin.security?.resolveDmPolicy;
-    if (!resolveDmPolicy) {
-      throw new Error("resolveDmPolicy unavailable");
-    }
-
     const cfg = {
       channels: {
         "nextcloud-talk": {
@@ -113,16 +83,12 @@ describe("nextcloud talk channel core", () => {
       },
     } as CoreConfig;
 
-    const result = resolveDmPolicy({
+    const result = nextcloudTalkPlugin.security!.resolveDmPolicy!({
       cfg,
       account: nextcloudTalkPlugin.config.resolveAccount(cfg, "default"),
-    });
-    if (!result) {
-      throw new Error("nextcloud-talk resolveDmPolicy returned null");
-    }
+    })!;
 
-    expect(result.policy).toBe("allowlist");
-    expect(result.allowFrom).toEqual(["  nc:User-Id  "]);
+    expect(result).toMatchObject({ policy: "allowlist", allowFrom: ["  nc:User-Id  "] });
     expect(result.normalizeEntry?.("  nc:User-Id  ")).toBe("users/user-id");
     expect(result.normalizeEntry?.("  nc:Users/User-Id  ")).toBe("users/user-id");
     expect(

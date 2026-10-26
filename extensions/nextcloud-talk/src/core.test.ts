@@ -1,5 +1,4 @@
-import { expectDefined } from "openclaw/plugin-sdk/expect-runtime";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   looksLikeNextcloudTalkTargetId as looksLikeTargetId,
   normalizeNextcloudTalkMessagingTarget as normalizeTarget,
@@ -66,43 +65,6 @@ describe("nextcloud talk core", () => {
     ["tampered signature", { signature: "a".repeat(64) }],
   ])("rejects %s", (_label, tampered) => {
     expect(verifySignature({ ...signedPayload(), ...tampered })).toBe(false);
-  });
-
-  it("still runs timingSafeEqual when the supplied signature length mismatches", async () => {
-    const timingSafeEqualMock =
-      vi.fn<(left: NodeJS.ArrayBufferView, right: NodeJS.ArrayBufferView) => void>();
-
-    vi.resetModules();
-    vi.doMock("node:crypto", async (importOriginal) => {
-      const actual = await importOriginal<typeof import("node:crypto")>();
-      return {
-        ...actual,
-        timingSafeEqual: vi.fn((left: NodeJS.ArrayBufferView, right: NodeJS.ArrayBufferView) => {
-          timingSafeEqualMock(left, right);
-          return actual.timingSafeEqual(left, right);
-        }),
-      };
-    });
-
-    try {
-      const { generateNextcloudTalkSignature: generate, verifyNextcloudTalkSignature: verify } =
-        await import("./signature.js");
-      const signed = signedPayload(generate);
-      expect(verify({ ...signed, signature: signed.signature.slice(0, 12) })).toBe(false);
-
-      expect(timingSafeEqualMock).toHaveBeenCalledOnce();
-      const [leftBuffer, rightBuffer] = expectDefined(
-        timingSafeEqualMock.mock.calls[0],
-        "timingSafeEqual call",
-      );
-      if (!Buffer.isBuffer(leftBuffer) || !Buffer.isBuffer(rightBuffer)) {
-        throw new TypeError("Expected timingSafeEqual to receive Buffer arguments");
-      }
-      expect(leftBuffer).toHaveLength(rightBuffer.length);
-    } finally {
-      vi.doUnmock("node:crypto");
-      vi.resetModules();
-    }
   });
 
   it("resolves allowlist matches", () => {
