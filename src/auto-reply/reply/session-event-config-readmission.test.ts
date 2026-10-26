@@ -8,19 +8,13 @@ import {
   createDeferred,
   withinTest,
 } from "../../../test/helpers/promise.js";
-import {
-  createAdmittedRunOperatorAuthority,
-  readAdmittedRunOperatorAuthority,
-  type AdmittedRunOperatorAuthority,
-} from "../../agents/admitted-run-context.js";
+import { createAdmittedRunOperatorAuthority } from "../../agents/admitted-run-context.js";
 import { completionConfig } from "../../agents/bash-tools.lifecycle.test-support.js";
 import type { RunEmbeddedAgentInternalParams } from "../../agents/embedded-agent-runner/run/internal-params.js";
 import type { RunEmbeddedAgentParams } from "../../agents/embedded-agent-runner/run/params.js";
 import { runEmbeddedAgent } from "../../agents/embedded-agent.js";
 import { FailoverError } from "../../agents/failover-error.js";
-import { createAgentHarnessHostCapabilities } from "../../agents/harness/host-capability.js";
 import { createMessageTool } from "../../agents/tools/message-tool-execution.js";
-import { resolveAttemptWorkspaceSandbox } from "../../agents/workspace-sandbox.js";
 import type { ChannelOutboundAdapter } from "../../channels/plugins/outbound.types.js";
 import type { ChannelPlugin } from "../../channels/plugins/types.public.js";
 import { setRuntimeConfigSnapshot } from "../../config/runtime-snapshot.js";
@@ -34,6 +28,8 @@ import { captureCronInferenceBinding } from "../../cron/inference-binding.runtim
 import { TEST_SCHEDULED_TURN } from "../../cron/scheduled-occurrence.test-support.js";
 import { runCronSessionTurn } from "../../cron/session-run.js";
 import { peekSystemEventEntries, resetSystemEventsForTest } from "../../infra/system-events.js";
+import { createOwnedTestInstance } from "../../plugins/plugin-instance.test-support.js";
+import { PluginInvocationScope } from "../../plugins/plugin-invocation-scope.js";
 import {
   captureActivePluginRegistrySnapshot,
   restoreActivePluginRegistrySnapshot,
@@ -53,7 +49,10 @@ import {
   captureSessionEventTargetForHost,
   enqueueSessionEventForHost,
 } from "./session-event-handoff.js";
-import { createEventManagedTools } from "./session-event.test-support.js";
+import {
+  attemptSessionEventManagedWrite,
+  startEmbeddedTurn,
+} from "./session-event.test-support.js";
 // mock-isolation: Synthetic model decisions; admission, queue and real tool writes stay real.
 vi.mock("../../agents/embedded-agent-runner/run.js", () => ({
   runEmbeddedAgent: vi.fn(),
@@ -67,66 +66,69 @@ await Promise.all([
   ),
 ]);
 
-async function startRun(params: RunEmbeddedAgentParams) {
-  const admitted = expectDefined(
-    await params.preparedRunAdmission?.admit("gateway", params.runId),
-    "reply admission",
-  );
-  params.onExecutionPhase?.({ phase: "model_call_started" });
-  await params.onExecutionStarted?.();
-  await params.onAgentEvent?.({ stream: "lifecycle", data: { phase: "start" } });
-  return admitted;
-}
-
-/** Uses the real managed write tool; the model decision alone is mocked. */
-async function attemptRealWrite(
-  params: RunEmbeddedAgentParams,
-  filePath: string,
-  operatorAuthority?: AdmittedRunOperatorAuthority,
-) {
-  const admittedRunContext = await startRun(params);
-  if (operatorAuthority) {
-    expect(readAdmittedRunOperatorAuthority(admittedRunContext)?.profileId).toBe("original-guest");
-  }
-  const workspace = await resolveAttemptWorkspaceSandbox({ ...params, admittedRunContext });
-  const host = createAgentHarnessHostCapabilities({
-    attempt: {
-      admittedRunContext,
-      runId: params.runId,
-      abortSignal: params.abortSignal,
-      config: params.config,
-      agentId: params.agentId,
-      sessionId: params.sessionId,
-      sessionKey: params.sessionKey,
-      sessionTarget: params.sessionTarget,
-      permissionMode: params.permissionMode,
-      requireWorkspaceOnly: params.requireWorkspaceOnly,
-      sessionRoot: workspace.sessionPermissionRoot,
-      workspaceDir: params.workspaceDir,
-      cwd: params.cwd,
-      toolExecutionAllow: params.toolExecutionAllow,
-      toolsAllow: params.toolsAllow,
-      trigger: params.trigger,
-      senderIsOwner: params.senderIsOwner,
+it("executes a recovery event after its producer's plugin scope closes", async ({ signal }) => {
+  await withOpenClawTestState(
+    { label: "session-event-plugin-readmission", env: { OPENCLAW_TEST_FAST: "0" } },
+    async (state) => {
+      const config = completionConfig(state.workspaceDir);
+      setRuntimeConfigSnapshot(config);
+      await state.writeConfig(config);
+      openOpenClawStateDatabase();
+      const target = { agentId: "main", sessionKey: "agent:main:plugin-readmission" };
+      await replaceSessionEntry(target, {
+        sessionId: "plugin-readmission",
+        lifecycleRevision: "original",
+        permissionMode: "full",
+        updatedAt: Date.now(),
+      });
+      const plugin = createOwnedTestInstance("event-source");
+      const invocations = new PluginInvocationScope(plugin.owner!.registry!, [plugin], {
+        retained: true,
+      });
+      const assertSourceCurrent = plugin.wrap(() => signal.throwIfAborted());
+      const oldCallback = invocations.wrap(assertSourceCurrent);
+      const filePath = path.join(state.workspaceDir, "recovery-event.txt");
+      runEmbeddedAgentMock.mockReset().mockImplementation(async (params) => {
+        await attemptSessionEventManagedWrite(params, filePath);
+        return { payloads: [{ text: "NO_REPLY" }], meta: { durationMs: 1 } };
+      });
+      let receipt: ReturnType<typeof enqueueSessionEventForHost> | undefined;
+      try {
+        const expectedTarget = await captureSessionEventTargetForHost(
+          target.agentId,
+          target.sessionKey,
+        );
+        receipt = invocations.run(() =>
+          enqueueSessionEventForHost("Resume required work", {
+            ...target,
+            source: "restart",
+            expectedTarget,
+            assertCurrent: assertSourceCurrent,
+            abortSignal: signal,
+            deliver: false,
+          }),
+        );
+        invocations.release();
+        expect(() => oldCallback()).toThrow("Plugin event-source consumer is closed");
+        // Publication before admission forces the rejection handler to re-admit the occurrence.
+        setRuntimeConfigSnapshot({ ...config, tools: { deny: ["exec"] } });
+        const outcome = await withinTest(receipt.settled, signal);
+        expect(outcome, outcome.error).toMatchObject({
+          status: "completed",
+          executionStarted: true,
+        });
+        expect(await fs.readFile(filePath, "utf8")).toBe("written\n");
+        expect(runEmbeddedAgentMock).toHaveBeenCalledOnce();
+        expect(runEmbeddedAgentMock.mock.calls[0]?.[0].config?.tools?.deny).toEqual(["exec"]);
+      } finally {
+        invocations.release();
+        await Promise.allSettled([receipt?.settled]);
+        await drainGlobalSingletonLifecycleState("restart");
+        resetSystemEventsForTest();
+      }
     },
-    pluginId: "openclaw",
-  });
-  try {
-    const tools = createEventManagedTools(
-      params,
-      workspace,
-      expectDefined(host.capabilities.createToolSurface, "managed tool surface"),
-    );
-    const write = tools.find((tool) => tool.name === "write");
-    if (write) {
-      await write
-        .execute("readmission-write", { path: filePath, content: "written\n" })
-        .catch(() => undefined);
-    }
-  } finally {
-    host.close();
-  }
-}
+  );
+});
 
 it.for([
   "published-deny",
@@ -276,12 +278,12 @@ it.for([
           .mockImplementation(async (params: RunEmbeddedAgentParams) => {
             prompts.push(params.prompt);
             if (prompts.length === 1) {
-              await startRun(params);
+              await startEmbeddedTurn(params, "reply admission");
               firstStarted.resolve();
               await releaseFirst.promise;
             } else if (scheduledSubagent && prompts.length === 2) {
               if (scenario === "scheduled-subagent-locked") {
-                await startRun(params);
+                await startEmbeddedTurn(params, "reply admission");
               }
               throw new FailoverError("Synthetic scheduled primary unavailable", {
                 reason: "model_not_found",
@@ -302,7 +304,7 @@ it.for([
                 binding.assertCurrent();
                 expect(params.allowAuthProfileFallback).toBe(false);
               }
-              await attemptRealWrite(params, filePath, operatorAuthority);
+              await attemptSessionEventManagedWrite(params, filePath, operatorAuthority);
             }
             return { payloads: [{ text: "NO_REPLY" }], meta: { durationMs: 1 } };
           });
@@ -611,7 +613,7 @@ it("rebuilds queued Gmail content under the readmitted external-content policy",
       const prompts: string[] = [];
       runEmbeddedAgentMock.mockReset().mockImplementation(async (params) => {
         prompts.push(params.prompt);
-        await startRun(params);
+        await startEmbeddedTurn(params, "reply admission");
         if (prompts.length === 1) {
           firstStarted.resolve();
           await releaseFirst.promise;
@@ -749,7 +751,7 @@ it.for(["changed", "unchanged", "no-delivery"] as const)(
         runEmbeddedAgentMock
           .mockReset()
           .mockImplementation(async (params: RunEmbeddedAgentInternalParams) => {
-            await startRun(params);
+            await startEmbeddedTurn(params, "reply admission");
             if (++nativeCalls === 1) {
               firstStarted.resolve();
               await releaseFirst.promise;
@@ -885,7 +887,7 @@ it.for(["transport", "agent", "context-overflow"] as const)(
           error: "transport unavailable",
         });
         runEmbeddedAgentMock.mockReset().mockImplementation(async (params) => {
-          await startRun(params);
+          await startEmbeddedTurn(params, "reply admission");
           if (failureKind === "context-overflow") {
             return {
               payloads: [],

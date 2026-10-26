@@ -1,5 +1,9 @@
 import { expectDefined } from "@openclaw/normalization-core/expect";
-import type { TestContext } from "vitest";
+import { expect, type TestContext } from "vitest";
+import {
+  readAdmittedRunOperatorAuthority,
+  type AdmittedRunOperatorAuthority,
+} from "../../agents/admitted-run-context.js";
 import {
   applyEmbeddedAttemptToolsAllow,
   resolveEmbeddedAttemptToolConstructionPlan,
@@ -7,7 +11,8 @@ import {
 import { buildEmbeddedAttemptToolRunContext } from "../../agents/embedded-agent-runner/run/attempt-tool-run-context.js";
 import type { RunEmbeddedAgentParams } from "../../agents/embedded-agent-runner/run/params.js";
 import type { AgentHarnessHostCapabilities } from "../../agents/harness/host-capability-types.js";
-import type { resolveAttemptWorkspaceSandbox } from "../../agents/workspace-sandbox.js";
+import { createAgentHarnessHostCapabilities } from "../../agents/harness/host-capability.js";
+import { resolveAttemptWorkspaceSandbox } from "../../agents/workspace-sandbox.js";
 import { setRuntimeConfigSnapshot } from "../../config/runtime-snapshot.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { openOpenClawStateDatabase } from "../../state/openclaw-state-db.js";
@@ -91,4 +96,54 @@ export function createEventManagedTools(
     }),
     construction.runtimeToolAllowlist,
   );
+}
+
+/** Uses the real managed write tool; the model decision alone is mocked. */
+export async function attemptSessionEventManagedWrite(
+  params: RunEmbeddedAgentParams,
+  filePath: string,
+  operatorAuthority?: AdmittedRunOperatorAuthority,
+) {
+  const admittedRunContext = await startEmbeddedTurn(params, "reply admission");
+  if (operatorAuthority) {
+    expect(readAdmittedRunOperatorAuthority(admittedRunContext)?.profileId).toBe("original-guest");
+  }
+  const workspace = await resolveAttemptWorkspaceSandbox({ ...params, admittedRunContext });
+  const host = createAgentHarnessHostCapabilities({
+    attempt: {
+      admittedRunContext,
+      runId: params.runId,
+      abortSignal: params.abortSignal,
+      config: params.config,
+      agentId: params.agentId,
+      sessionId: params.sessionId,
+      sessionKey: params.sessionKey,
+      sessionTarget: params.sessionTarget,
+      permissionMode: params.permissionMode,
+      requireWorkspaceOnly: params.requireWorkspaceOnly,
+      sessionRoot: workspace.sessionPermissionRoot,
+      workspaceDir: params.workspaceDir,
+      cwd: params.cwd,
+      toolExecutionAllow: params.toolExecutionAllow,
+      toolsAllow: params.toolsAllow,
+      trigger: params.trigger,
+      senderIsOwner: params.senderIsOwner,
+    },
+    pluginId: "openclaw",
+  });
+  try {
+    const tools = createEventManagedTools(
+      params,
+      workspace,
+      expectDefined(host.capabilities.createToolSurface, "managed tool surface"),
+    );
+    const write = tools.find((tool) => tool.name === "write");
+    if (write) {
+      await write
+        .execute("readmission-write", { path: filePath, content: "written\n" })
+        .catch(() => undefined);
+    }
+  } finally {
+    host.close();
+  }
 }
