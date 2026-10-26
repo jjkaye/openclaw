@@ -220,6 +220,8 @@ const repositoryScriptEntries = [
   "scripts/lib/gateway-bench-transport-preload.ts!",
   "scripts/perf/async-store-measure.mjs!",
   "scripts/perf/code-mode-store-measure.ts!",
+  // Its header documents the long-history session-store replay benchmark.
+  "scripts/perf/code-mode-store-replay-measure.ts!",
   "scripts/perf/gateway-agent-event-measure.ts!",
   "scripts/perf/transcript-hydration-counts-preload.ts!",
   // The performance guide and retained package-integrity rerun invoke these benchmarks by path.
