@@ -158,6 +158,8 @@ describe("production lint suppressions", () => {
         // Thread assembly orders fresh Map-spread arrays without mutating posts or caller inputs.
         "extensions/x/src/thread.ts|unicorn/no-array-reverse|1",
         "extensions/x/src/thread.ts|unicorn/no-array-sort|2",
+        // The Talk readiness probe calls the saved media method with its original receiver.
+        "scripts/bench-control-ui-talk.ts|typescript/unbound-method|1",
         // The fault observer preserves methods for restoration and supplies each database receiver through .call.
         "scripts/e2e/lib/upgrade-survivor/package-activation-fault.mjs|typescript/unbound-method|2",
         "scripts/e2e/lib/upgrade-survivor/probe-volume-gateway.mjs|no-underscore-dangle|1",
@@ -171,6 +173,8 @@ describe("production lint suppressions", () => {
         "scripts/lib/sqlite-reliability-process.ts|typescript/prefer-promise-reject-errors|1",
         // The copy-count probe restores the native method after measurement.
         "scripts/perf/agent-fresh-array-copy-measure.ts|no-extend-native|2",
+        // The owner probe executes its selected trusted source expression rather than a copied implementation.
+        "scripts/perf/attempt-stream-options-measure.ts|typescript/no-implied-eval|1",
         // The avatar dispatch probe forwards the original pool receiver and restores the method.
         "scripts/perf/avatar-inline-measure.ts|typescript/unbound-method|1",
         // The load probe forwards native WebSocket.send with its original socket receiver.
