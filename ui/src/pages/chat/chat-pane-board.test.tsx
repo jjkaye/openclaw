@@ -485,7 +485,7 @@ describe("chat pane board shell", () => {
     pane.connectedClient = client;
 
     const pending = pane.createSession();
-    await Promise.resolve();
+    await vi.waitFor(() => expect(pane.resetConfirmation.pending).toBeDefined());
     pane.settleResetConfirmation(true);
 
     await expect(pending).resolves.toBe(true);
@@ -501,7 +501,7 @@ describe("chat pane board shell", () => {
     } as ApplicationContext["gateway"]["snapshot"]["hello"];
 
     const pending = pane.createSession();
-    await Promise.resolve();
+    await vi.waitFor(() => expect(pane.resetConfirmation.pending).toBeDefined());
     pane.context.gateway.snapshot.hello = {
       auth: { role: "operator", scopes: ["operator.write"] },
       features: { methods: ["sessions.reset"] },
@@ -518,7 +518,7 @@ describe("chat pane board shell", () => {
     const { pane, sessions, reset } = resetPane();
 
     const pending = pane.createSession();
-    await Promise.resolve();
+    await vi.waitFor(() => expect(pane.resetConfirmation.pending).toBeDefined());
     pane.state.chatRunId = "run-started-during-confirmation";
     pane.settleResetConfirmation(true);
 
@@ -531,7 +531,7 @@ describe("chat pane board shell", () => {
     const { pane, sessions } = resetPane();
 
     const pending = pane.createSession();
-    await Promise.resolve();
+    await vi.waitFor(() => expect(pane.resetConfirmation.pending).toBeDefined());
     pane.state.sessionKey = "agent:main:other";
     pane.commitRender();
 

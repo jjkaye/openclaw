@@ -120,6 +120,7 @@ const SESSIONS_PATCH_WRITE_SCOPE_MUTATIONS: ReadonlySet<string> = new Set([
   "model",
   "agentRuntime",
   "thinkingLevel",
+  "cyberAccessProgram",
   "fastMode",
   "permissionMode",
   "communication",
