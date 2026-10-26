@@ -121,7 +121,7 @@ it.each([
 );
 
 it("presents the saved selection before admission and replaces it with the live catalog", async () => {
-  const saved = {
+  const savedWithEffort = {
     id: "saved",
     provider: "openai",
     name: "Saved model",
@@ -132,7 +132,7 @@ it("presents the saved selection before admission and replaces it with the live 
   };
   const [model, setModel] = createSignal<Parameters<typeof ChatPaneModelControl>[0]["model"]>({
     ...createComposerControlsFixture().model,
-    snapshot: saved,
+    snapshot: savedWithEffort,
   });
   const view = mountSolid(() => <ChatPaneModelControl model={model()} />);
   const trigger = () => view.container.querySelector<HTMLElement>("[data-chat-model-select]");
