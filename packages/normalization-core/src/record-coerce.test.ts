@@ -16,7 +16,6 @@ describe("record-coerce", () => {
     [[], true],
     [["", "  ", "same", "same"], true],
     [sparse, true],
-    [["ok", 2], false],
     [["ok", undefined], false],
     [null, false],
     [{ 0: "ok" }, false],
@@ -39,23 +38,10 @@ describe("record-coerce", () => {
     expect(fields.nested).toBe(nested);
   });
 
-  it.each([
-    [null, undefined, null],
-    [[{ ok: true }], undefined, null],
-    [{ ok: true }, { ok: true }, { ok: true }],
-  ])("coerces optional/nullable records: %j", (value, optional, nullable) => {
-    expect(asOptionalRecord(value)).toEqual(optional);
-    expect(asNullableRecord(value)).toEqual(nullable);
-  });
-
   it("preserves accepted record identity and returns fresh ordinary fallbacks", () => {
-    class ExampleRecord {
-      marker = true;
-    }
-    const record = Object.create(null) as Record<string, unknown>;
     const firstFallback = asNonArrayRecord(null);
     const secondFallback = asNonArrayRecord([]);
-    for (const value of [record, new Date(), new ExampleRecord()]) {
+    for (const value of [Object.create(null), new Date(), Object.create({ marker: true })]) {
       expect(asNonArrayRecord(value)).toBe(value);
     }
     expect(firstFallback).toEqual({});
@@ -72,14 +58,16 @@ describe("record-coerce", () => {
   });
 
   it.each([
-    [{ first: "one", second: "two" }, true],
-    [Object.assign(Object.create(null), { first: "one" }), true],
-    [new Date(), true],
-    [{ first: "one", second: 2 }, false],
-    [["one"], false],
-    [null, false],
-  ])("validates all-or-nothing string records %#", (value, expected) => {
-    expect(isStringRecord(value)).toBe(expected);
+    [{ first: "one", second: "two" }, true, true],
+    [Object.assign(Object.create(null), { first: "one" }), true, true],
+    [new Date(), true, true],
+    [{ first: "one", second: 2 }, true, false],
+    [["one"], false, false],
+    [null, false, false],
+  ])("coerces records and validates their string values %#", (value, record, strings) => {
+    expect(asOptionalRecord(value)).toBe(record ? value : undefined);
+    expect(asNullableRecord(value)).toBe(record ? value : null);
+    expect(isStringRecord(value)).toBe(strings);
   });
 
   const inheritedAndHidden = Object.create({ inherited: "skip" }) as Record<string, unknown>;

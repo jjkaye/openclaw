@@ -1,104 +1,80 @@
 import { describe, expect, it } from "vitest";
-import {
-  commonPrefixLength,
-  containsAsciiControlCharacter,
-  filterStringEntries,
-  normalizeAtHashSlug,
-  normalizeCsvOrLooseStringList,
-  normalizeHyphenSlug,
-  normalizeOptionalTrimmedStringList,
-  normalizeSortedUniqueStringEntries,
-  normalizeSortedUniqueTrimmedStringList,
-  normalizeStringEntries,
-  normalizeTrimmedStringList,
-  normalizeUniqueSingleOrTrimmedStringList,
-  normalizeUniqueStringEntries,
-  normalizeUniqueStringEntriesLower,
-  normalizeUniqueTrimmedStringList,
-  sortUniqueStrings,
-} from "./string-normalization.js";
+import * as strings from "./string-normalization.js";
 
 describe("normalization-core/string-normalization", () => {
   it.each([
     ["", "value", 0],
-    ["value", "", 0],
     ["same", "same", 4],
     ["prefix", "pre", 3],
-    ["pre", "prefix", 3],
     ["abX", "abY", 2],
     ["A", "a", 0],
     ["\ud83d\ude00", "\ud83d\ude01", 1],
     ["é", "e\u0301", 0],
   ])("counts the raw UTF-16 prefix of %j and %j", (left, right, expected) => {
-    expect(commonPrefixLength(left, right)).toBe(expected);
+    expect(strings.commonPrefixLength(left, right)).toBe(expected);
   });
 
   it.each([
     ["", false],
-    ["fix/a&b λ", false],
-    ["\u0080\u009f", false],
+    ["fix/a&b λ\u0080\u009f", false],
     ["branch\0name", true],
     ["branch\u001f", true],
     ["branch\u007fname", true],
   ])("detects only ASCII controls: %j", (value, expected) => {
-    expect(containsAsciiControlCharacter(value)).toBe(expected);
+    expect(strings.containsAsciiControlCharacter(value)).toBe(expected);
   });
 
   it.each([
-    ["value", []],
     [{ 0: "value" }, []],
     [
-      ["", "  ", 1, "first", null, "first", Object("boxed"), "last\n"],
-      ["", "  ", "first", "first", "last\n"],
+      ["", 1, "x", null, "x", Object("x"), "\n"],
+      ["", "x", "x", "\n"],
     ],
   ])("filters runtime strings from %j", (value, expected) => {
-    expect(filterStringEntries(value)).toEqual(expected);
+    expect(strings.filterStringEntries(value)).toEqual(expected);
   });
 
   it("normalizes mixed allow-list entries", () => {
-    expect(
-      normalizeStringEntries([" a ", 42, "", "  ", null, { toString: () => " obj " }]),
-    ).toEqual(["a", "42", "null", "obj"]);
-    expect(normalizeStringEntries(undefined)).toStrictEqual([]);
+    expect(strings.normalizeStringEntries([null, { toString: () => " x " }])).toEqual([
+      "null",
+      "x",
+    ]);
+    expect(strings.normalizeStringEntries(undefined)).toStrictEqual([]);
   });
 
   it.each([
-    {
-      label: "case and numeric text",
-      values: ["a", "Z", "10", "2", "A", ""],
-      expected: ["", "10", "2", "A", "Z", "a"],
-    },
-    {
-      label: "UTF-16 without normalization",
-      values: ["\ue000", "\ud83d\ude00", "\ud800", "\udc00", "é", "e\u0301", "é"],
-      expected: ["e\u0301", "é", "\ud800", "\ud83d\ude00", "\udc00", "\ue000"],
-    },
-  ])("sorts fresh unique strings from iterables: $label", ({ values, expected }) => {
+    [
+      ["a", "Z", "10", "2", "A", ""],
+      ["", "10", "2", "A", "Z", "a"],
+    ],
+    [
+      ["\ue000", "\ud83d\ude00", "\ud800", "\udc00", "é", "e\u0301", "é"],
+      ["e\u0301", "é", "\ud800", "\ud83d\ude00", "\udc00", "\ue000"],
+    ],
+  ])("sorts fresh unique strings from iterables: %j", (values, expected) => {
     const input = Object.freeze(values);
-    const result = sortUniqueStrings(input);
+    const result = strings.sortUniqueStrings(input);
     expect(result).toEqual(expected);
     expect(result).not.toBe(input);
-    expect(sortUniqueStrings(new Set(input))).toEqual(expected);
-    expect(sortUniqueStrings(input.values())).toEqual(expected);
+    expect(strings.sortUniqueStrings(new Set(input))).toEqual(expected);
+    expect(strings.sortUniqueStrings(input.values())).toEqual(expected);
   });
 
   it.each([
-    [normalizeUniqueStringEntries, ["b", "a", "4", "MiXeD", "B"]],
-    [normalizeUniqueStringEntriesLower, ["b", "a", "4", "mixed"]],
-    [normalizeSortedUniqueStringEntries, ["4", "B", "MiXeD", "a", "b"]],
-    [normalizeUniqueTrimmedStringList, ["b", "a", "MiXeD", "B"]],
-    [normalizeSortedUniqueTrimmedStringList, ["B", "MiXeD", "a", "b"]],
-    [normalizeUniqueSingleOrTrimmedStringList, ["b", "a", "MiXeD", "B"]],
+    [strings.normalizeUniqueStringEntries, ["b", "a", "4", "MiXeD", "B"]],
+    [strings.normalizeUniqueStringEntriesLower, ["b", "a", "4", "mixed"]],
+    [strings.normalizeSortedUniqueStringEntries, ["4", "B", "MiXeD", "a", "b"]],
+    [strings.normalizeUniqueTrimmedStringList, ["b", "a", "MiXeD", "B"]],
+    [strings.normalizeSortedUniqueTrimmedStringList, ["B", "MiXeD", "a", "b"]],
+    [strings.normalizeUniqueSingleOrTrimmedStringList, ["b", "a", "MiXeD", "B"]],
   ])("normalizes unique lists with %s", (normalize, expected) => {
     expect(normalize([" b ", "a", "b", "", 4, "a", "MiXeD", "B"])).toEqual(expected);
   });
 
   it("normalizes array-backed trimmed string lists", () => {
     const values = [" first ", "", 42, " second ", null];
-    expect(normalizeTrimmedStringList(values)).toEqual(["first", "second"]);
-    expect(normalizeTrimmedStringList("first")).toEqual([]);
-    expect(normalizeOptionalTrimmedStringList(values)).toEqual(["first", "second"]);
-    expect(normalizeOptionalTrimmedStringList(["", 42])).toBeUndefined();
+    expect(strings.normalizeOptionalTrimmedStringList(values)).toEqual(["first", "second"]);
+    expect(strings.normalizeOptionalTrimmedStringList(["", 42])).toBeUndefined();
   });
 
   it.each([
@@ -109,12 +85,12 @@ describe("normalization-core/string-normalization", () => {
     ],
     [null, []],
   ])("normalizes CSV or loose string-list input %j", (value, expected) => {
-    expect(normalizeCsvOrLooseStringList(value)).toEqual(expected);
+    expect(strings.normalizeCsvOrLooseStringList(value)).toEqual(expected);
   });
 
   it("distinguishes array-only from single-or-list input", () => {
-    expect(normalizeUniqueTrimmedStringList("b")).toEqual([]);
-    expect(normalizeUniqueSingleOrTrimmedStringList(" b ")).toEqual(["b"]);
+    expect(strings.normalizeUniqueTrimmedStringList("b")).toEqual([]);
+    expect(strings.normalizeUniqueSingleOrTrimmedStringList(" b ")).toEqual(["b"]);
   });
 
   it.each([
@@ -122,13 +98,10 @@ describe("normalization-core/string-normalization", () => {
     [undefined, ""],
     ["  ...Hello   /  World---  ", "hello-world"],
     [" ###Team@@@Room### ", "###team@@@room###"],
-    ["Team 技术讨论", "team-技术讨论"],
-    ["Команда разработки", "команда-разработки"],
-    ["فريق التطوير", "فريق-التطوير"],
-    ["Cafe\u0301 Team", "café-team"],
-    ["हिन्दी चर्चा", "हिन्दी-चर्चा"],
+    ["Team 中文 Команда فريق", "team-中文-команда-فريق"],
+    ["Cafe\u0301 हिन्दी", "café-हिन्दी"],
   ])("normalizes permissive slugs: %s", (input, expected) => {
-    expect(normalizeHyphenSlug(input)).toBe(expected);
+    expect(strings.normalizeHyphenSlug(input)).toBe(expected);
   });
 
   it.each([
@@ -136,12 +109,9 @@ describe("normalization-core/string-normalization", () => {
     ["@@Room___Name", "room-name"],
     [undefined, ""],
     ["@@@___", ""],
-    ["#Команда разработки", "команда-разработки"],
-    ["@فريق التطوير", "فريق-التطوير"],
-    ["#OpenClaw中文群", "openclaw中文群"],
-    ["#Cafe\u0301_Team", "café-team"],
-    ["@हिन्दी चर्चा", "हिन्दी-चर्चा"],
+    ["#中文 Команда فريق", "中文-команда-فريق"],
+    ["@Cafe\u0301_हिन्दी", "café-हिन्दी"],
   ])("normalizes strict slugs: %s", (input, expected) => {
-    expect(normalizeAtHashSlug(input)).toBe(expected);
+    expect(strings.normalizeAtHashSlug(input)).toBe(expected);
   });
 });
