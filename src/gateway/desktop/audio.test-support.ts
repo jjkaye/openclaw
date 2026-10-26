@@ -14,15 +14,8 @@ export function createDesktopSupervisor(
 ) {
   const inputs: ChildInput[] = [];
   const runs: Array<Supervisor.ManagedRun & { settle(exit: Supervisor.RunExit): void }> = [];
-  const completions = new Map<number, ReturnType<typeof createDeferred<void>>>();
-  const completion = (count: number) => {
-    let pending = completions.get(count);
-    if (!pending) {
-      pending = createDeferred();
-      completions.set(count, pending);
-    }
-    return pending;
-  };
+  const completions: ReturnType<typeof createDeferred<void>>[] = [];
+  const completion = (count: number) => (completions[count] ??= createDeferred());
   const inScope = (scope: string) => runs.filter((_, index) => inputs[index]?.scopeKey === scope);
   const supervisor: Supervisor.ProcessSupervisor = {
     acquireScopeCleanup: (scope) => async () => {

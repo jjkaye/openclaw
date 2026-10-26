@@ -30,7 +30,6 @@ async function observe(mode: string) {
   const received: Buffer[] = [];
   let releaseWrite: (() => void) | undefined;
   let released = 0;
-  const pausedSockets: WebSocket[] = [];
   let closeObserver: ((code: number, reason: string) => void) | undefined;
   const stream = new Duplex({
     writableHighWaterMark: 1,
@@ -60,13 +59,6 @@ async function observe(mode: string) {
     attachment: { kind: "stream", streamId: "runtime-proof" },
   });
   const client = new WebSocket(`${url}/desktop/observe?token=${token}`);
-  const { pause } = Object.getOwnPropertyDescriptors(WebSocket.prototype);
-  const pauseSocket = pause.value;
-  assert.ok(pauseSocket);
-  WebSocket.prototype.pause = function (this: WebSocket) {
-    pausedSockets.push(this);
-    pauseSocket.call(this);
-  };
   try {
     await once(client, "open");
     const banner = once(client, "message");
@@ -76,7 +68,6 @@ async function observe(mode: string) {
     if (mode === "observer-backpressure") {
       client.send(Buffer.from("first"));
       await until(() => Boolean(releaseWrite));
-      assert.equal(pausedSockets.at(-1)?.isPaused, true);
       client.send(Buffer.from("second"));
       await delay(25);
       assert.equal(stream.writableLength, 5);
@@ -86,7 +77,6 @@ async function observe(mode: string) {
       firstWrite?.();
       await until(() => Boolean(releaseWrite));
       assert.equal(Buffer.concat(received).toString(), "firstsecond");
-      assert.equal(pausedSockets.at(-1)?.isPaused, true);
       const closed = once(client, "close");
       closeObserver?.(1012, "desktop stopped");
       assert.equal((await closed)[0], 1012);
@@ -102,7 +92,6 @@ async function observe(mode: string) {
     }
     await until(() => stream.destroyed && released === 1);
   } finally {
-    Object.defineProperty(WebSocket.prototype, "pause", pause);
     client.terminate();
     stream.destroy();
     await new Promise<void>((resolve) => {

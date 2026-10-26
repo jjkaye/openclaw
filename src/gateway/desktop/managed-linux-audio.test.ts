@@ -41,13 +41,10 @@ describe("managed Linux private audio", () => {
     expect(f.inputs[1]?.argv).toEqual([
       "parec",
       "--server=" + f.env.PULSE_SERVER,
-      "--device=openclaw_desktop.monitor",
-      "--raw",
-      "--format=s16le",
-      "--rate=48000",
-      "--channels=2",
-      "--channel-map=front-left,front-right",
-      "--latency-msec=40",
+      ...(
+        "--device=openclaw_desktop.monitor --raw --format=s16le --rate=48000 " +
+        "--channels=2 --channel-map=front-left,front-right --latency-msec=40"
+      ).split(" "),
     ]);
     expect(f.inputs[1]?.captureOutput).toBe(false);
     expect(capture.stream.read()).toEqual(Buffer.from([0, 128, 255, 127]));
