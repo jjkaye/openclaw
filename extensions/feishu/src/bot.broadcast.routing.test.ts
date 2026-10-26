@@ -77,11 +77,11 @@ describe("broadcast routing", () => {
         ]);
         const recordedRoutes = recordSession.mock.calls
           .map(([{ updateLastRoute: last }]) => [last?.sessionKey, last?.channel, last?.to])
-          .toSorted();
+          .toSorted((a, b) => String(a[0]).localeCompare(String(b[0])));
         expect(recordedRoutes).toEqual(
           [targetSessionKey, observerSessionKey]
             .map((key) => [key, "feishu", "chat:oc-broadcast-group"])
-            .toSorted(),
+            .toSorted((a, b) => String(a[0]).localeCompare(String(b[0]))),
         );
         const routeMetadataKeys = Object.getOwnPropertySymbols(route);
         expect(routeMetadataKeys).not.toHaveLength(0);

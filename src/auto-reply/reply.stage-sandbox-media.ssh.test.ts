@@ -34,6 +34,7 @@ vi.mock("../infra/device-identity-async.js", async (importOriginal) => ({
 const remoteSourceMocks = vi.hoisted(() => ({
   runCommandWithTimeout: vi.fn(),
 }));
+// mock-isolation: SSH staging uses synthetic remote roots without reading account state.
 vi.mock("../media/channel-inbound-roots.js", () => ({
   resolveChannelRemoteInboundAttachmentRoots: () => ["/remote/inbound"],
 }));

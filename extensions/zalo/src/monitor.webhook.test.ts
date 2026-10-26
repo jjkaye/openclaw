@@ -11,6 +11,7 @@ import { ZaloWebhookPayloadError } from "./webhook-spool.js";
 
 const {
   clearZaloWebhookSecurityStateForTest,
+  getZaloWebhookStatusCounterSizeForTest,
   handleZaloWebhookRequest,
   registerZaloWebhookTarget,
 } = zaloWebhookRuntime;
@@ -36,27 +37,37 @@ function register(
     }),
   );
 }
-type Post = (body?: string, headers?: Record<string, string>, suffix?: string) => Promise<Response>;
-const secretHeader = "x-bot-api-secret-token";
-function withWebhook(run: (post: Post) => Promise<void>) {
+type Headers = { secret?: string; contentType?: string; forwardedFor?: string };
+function withWebhook(
+  run: (
+    post: (body?: string, headers?: Headers, suffix?: string) => Promise<Response>,
+  ) => Promise<void>,
+) {
   return withServer(
-    async (req, res) => {
-      if (!(await handleZaloWebhookRequest(req, res))) {
-        res.statusCode = 404;
-        res.end("not found");
-      }
+    (req, res) => {
+      void handleZaloWebhookRequest(req, res).then((handled) => {
+        if (!handled) {
+          res.statusCode = 404;
+          res.end("not found");
+        }
+      });
     },
     (baseUrl) =>
-      run((body = "{}", headers = {}, suffix = "") =>
-        fetch(`${baseUrl}/hook${suffix}`, {
-          method: "POST",
-          headers: {
-            [secretHeader]: "secret",
-            "content-type": "application/json",
-            ...headers,
-          },
-          body,
-        }),
+      run(
+        (
+          body = "{}",
+          { secret = "secret", contentType = "application/json", forwardedFor }: Headers = {},
+          suffix = "",
+        ) =>
+          fetch(`${baseUrl}/hook${suffix}`, {
+            method: "POST",
+            headers: {
+              "x-bot-api-secret-token": secret,
+              "content-type": contentType,
+              ...(forwardedFor ? { "x-forwarded-for": forwardedFor } : {}),
+            },
+            body,
+          }),
       ),
   );
 }
@@ -86,11 +97,11 @@ describe("Zalo webhook HTTP boundary", () => {
   });
   it.each([
     ["invalid admission payload", "null", {}, 400],
-    ["non-JSON content type", "{}", { "content-type": "text/plain" }, 415],
+    ["non-JSON content type", "{}", { contentType: "text/plain" }, 415],
     [
       "invalid secret before content type",
       "not-json",
-      { [secretHeader]: "invalid-token", "content-type": "text/plain" },
+      { secret: "invalid-token", contentType: "text/plain" },
       401,
     ],
   ] as const)("rejects %s", async (_name, body, headers, status) => {
@@ -151,16 +162,14 @@ describe("Zalo webhook HTTP boundary", () => {
     await withWebhook(async (post) => {
       expect(
         await reachesRateLimit(
-          (i) =>
-            post(
-              "{}",
-              { [secretHeader]: unauthorized ? "invalid-token" : "secret" },
-              `?nonce=${i}`,
-            ),
+          (i) => post("{}", { secret: unauthorized ? "invalid-token" : "secret" }, `?nonce=${i}`),
           unauthorized ? 200 : 130,
           unauthorized,
         ),
       ).toBe(true);
+      if (unauthorized) {
+        expect(getZaloWebhookStatusCounterSizeForTest()).toBe(2);
+      }
     });
   });
   it("isolates authenticated traffic from floods by trusted forwarded client IP", async () => {
@@ -171,14 +180,16 @@ describe("Zalo webhook HTTP boundary", () => {
           post(
             "{}",
             {
-              [secretHeader]: "invalid-token",
-              "x-forwarded-for": "203.0.113.10",
+              secret: "invalid-token",
+              forwardedFor: "203.0.113.10",
             },
             `?nonce=${i}`,
           ),
         130,
       );
-      const response = await post("{}", { "x-forwarded-for": "198.51.100.20" });
+      const response = await post(JSON.stringify({ event_name: "message.unsupported.received" }), {
+        forwardedFor: "198.51.100.20",
+      });
       expect(response.status).toBe(200);
     });
   });

@@ -238,7 +238,9 @@ export const runDiscoveryRecoveryTests = () =>
         await expect(
           client.sendMessage(missing, { msgtype: "m.text", body: "must not escape" }),
         ).rejects.toThrow("Encrypted Matrix room is not ready");
-        expect(fetch.mock.calls.some(([input]) => /\/send\//.test(requestUrl(input)))).toBe(false);
+        expect(fetch.mock.calls.some(([input]) => requestUrl(input).includes("/send/"))).toBe(
+          false,
+        );
         const backend = client.sdk.getCrypto();
         assert(backend instanceof RustCrypto);
         await client.stopWithoutPersist();

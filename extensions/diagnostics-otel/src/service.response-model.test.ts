@@ -82,9 +82,11 @@ test("exports the provider-reported response model on model.call spans only", as
   expect(usage[0]?.attributes).toMatchObject({ "gen_ai.request.model": "gpt-5.4" });
   expect(usage[0]?.attributes).not.toHaveProperty("gen_ai.response.model");
 
-  const points = (await collectTestMetrics(reader)).flatMap((metric) => metric.dataPoints);
-  expect(points).not.toHaveLength(0);
-  for (const { attributes } of points) {
-    expect(attributes).not.toHaveProperty("gen_ai.response.model");
+  const metrics = await collectTestMetrics(reader);
+  expect(metrics.some((metric) => metric.dataPoints.length > 0)).toBe(true);
+  for (const metric of metrics) {
+    for (const { attributes } of metric.dataPoints) {
+      expect(attributes).not.toHaveProperty("gen_ai.response.model");
+    }
   }
 });

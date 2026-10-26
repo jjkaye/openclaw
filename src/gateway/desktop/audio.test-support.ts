@@ -1,4 +1,3 @@
-import assert from "node:assert/strict";
 import { vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import * as binaryDetection from "../../infra/detect-binary.js";
@@ -15,8 +14,15 @@ export function createDesktopSupervisor(
 ) {
   const inputs: ChildInput[] = [];
   const runs: Array<Supervisor.ManagedRun & { settle(exit: Supervisor.RunExit): void }> = [];
-  const completions: ReturnType<typeof createDeferred<void>>[] = [];
-  const completion = (count: number) => (completions[count] ??= createDeferred());
+  const completions = new Map<number, ReturnType<typeof createDeferred<void>>>();
+  const completion = (count: number) => {
+    let pending = completions.get(count);
+    if (!pending) {
+      pending = createDeferred();
+      completions.set(count, pending);
+    }
+    return pending;
+  };
   const inScope = (scope: string) => runs.filter((_, index) => inputs[index]?.scopeKey === scope);
   const supervisor: Supervisor.ProcessSupervisor = {
     acquireScopeCleanup: (scope) => async () => {
@@ -25,7 +31,9 @@ export function createDesktopSupervisor(
       onScopeCleaned(scope);
     },
     async spawn(input) {
-      assert(input.mode === "child", "expected native child");
+      if (input.mode !== "child") {
+        throw new Error("expected native child");
+      }
       input.assertCurrent?.();
       const count = inputs.push(input);
       const result = createDeferred<Supervisor.RunExit>();
@@ -56,7 +64,9 @@ export function createDesktopSupervisor(
   };
   const exit = (index: number, stderr = "") => {
     const run = runs[index];
-    assert(run && !run.activity.resultSettled, `fake run ${index} is unavailable`);
+    if (!run || run.activity.resultSettled) {
+      throw new Error(`fake run ${index} is unavailable`);
+    }
     run.settle(runExit({ exitCode: 1, durationMs: 1, stderr }));
   };
   return {
@@ -72,11 +82,16 @@ export function createDesktopSupervisor(
   };
 }
 
-export const assertAudioCurrent = (current: boolean) => assert(current, "viewer retired");
+export function assertAudioCurrent(current: boolean) {
+  if (!current) {
+    throw new Error("viewer retired");
+  }
+}
 
 export function createAudioFixture(
   tempDir: string,
   options: {
+    missing?: string;
     silentServer?: boolean;
     silentCapture?: boolean;
     captureFailure?: boolean;
@@ -107,7 +122,9 @@ export function createAudioFixture(
             input.assertCurrent?.();
           }
           events.captureAdmitted();
-          assert(!options.captureFailure, "parec spawn failed");
+          if (options.captureFailure) {
+            throw new Error("parec spawn failed");
+          }
           if (!options.silentCapture) {
             input.onStdoutRaw?.(Buffer.from([0, 128, 255, 127]));
           }
@@ -121,7 +138,14 @@ export function createAudioFixture(
     events.scopeCleaned,
   );
   const env = { PULSE_SERVER: "unix:/unrelated/native", ...managedLinuxAudioEnv(tempDir) };
-  vi.spyOn(binaryDetection, "detectBinary").mockResolvedValue(true);
-  const owner = createManagedLinuxAudio({ supervisor, tempDir, env, assertCurrent() {} });
+  vi.spyOn(binaryDetection, "detectBinary").mockImplementation(
+    async (binary) => binary !== options.missing,
+  );
+  const owner = createManagedLinuxAudio({
+    supervisor,
+    tempDir,
+    env,
+    assertCurrent() {},
+  });
   return { owner, inputs, runs, env, tempDir, ...events };
 }

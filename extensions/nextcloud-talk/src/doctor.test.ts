@@ -6,6 +6,7 @@ import type { CoreConfig, NextcloudTalkAccountConfig } from "./types.js";
 
 const probe = vi.hoisted(() => vi.fn());
 
+// mock-isolation: Callback guidance must not probe a live Nextcloud server.
 vi.mock("./bot-preflight.js", () => ({
   probeNextcloudTalkBotResponseFeature: probe,
 }));

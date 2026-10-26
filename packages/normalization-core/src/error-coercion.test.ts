@@ -135,7 +135,7 @@ describe("formatErrorMessage", () => {
       withCause("request", { status: 503, code: "E", id: "a" }),
       'request | {"status":503,"code":"E","id":"a"}',
     ],
-  ])("formats error details without implicit redaction: %j", (value, expected) => {
+  ])("formats error details without implicit redaction: case %#", (value, expected) => {
     expect(format(value)).toBe(expected);
   });
 

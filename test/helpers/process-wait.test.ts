@@ -19,7 +19,14 @@ function cancellation(signal: AbortSignal) {
     abort: () => controller.abort(reason),
   };
 }
-afterEach(() => vi.restoreAllMocks());
+const fileError = (file: string, cause: Error) => ({
+  message: expect.stringContaining(file),
+  cause,
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 const fileWaits = [
   { name: "file", wait: waitForFile, expected: undefined },
@@ -57,7 +64,7 @@ it.for(["file", "PID", "injected delay", "live process"] as const)(
     const diagnostic =
       kind === "live process"
         ? { message: `process still alive: ${process.pid}`, cause: cancelled.reason }
-        : { message: expect.stringContaining(file), cause: cancelled.reason };
+        : fileError(file, cancelled.reason);
     const rejected = expect(wait()).rejects.toMatchObject(diagnostic);
     cancelled.abort();
     await rejected;
@@ -99,13 +106,27 @@ it("observes real process death before and after abort", async ({ signal, onTest
   ).resolves.toBeUndefined();
 });
 
+it("stops waiting when a Linux process is a zombie", async ({ signal }) => {
+  vi.spyOn(process, "platform", "get").mockReturnValue("linux");
+  vi.spyOn(process, "kill").mockImplementation(() => true);
+  vi.spyOn(fsSync, "readFileSync").mockImplementation((filePath) => {
+    if (String(filePath) === "/proc/42/status") {
+      return "Name:\tworker\nState:\tZ (zombie)\nPid:\t42\nThreads:\t1\n";
+    }
+    throw new Error(`unexpected read: ${String(filePath)}`);
+  });
+
+  await expect(waitForDead(42, signal)).resolves.toBeUndefined();
+});
+
 it.for(["borrower completion", "persistent file"] as const)(
   "observes readiness from %s without a file-watch event",
   async (observation, { signal }) => {
-    const filename = fixturePath();
+    const filename = path.join(tempDirs.make("openclaw-process-receipt-"), "ready");
     const { promise: completion, resolve: finish } = createDeferred();
     const watchFile = fsSync.watchFile;
-    // Suppress notifications to retain the missed-initial-stat regression guard.
+    // A successful initial stat establishes a baseline without notifying Node's
+    // watchFile listener. A receipt created during that stat must still be seen.
     const watcher = vi
       .spyOn(fsSync, "watchFile")
       .mockImplementation((target, ...args) =>

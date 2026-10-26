@@ -2,13 +2,21 @@ import { expect, it } from "vitest";
 import { createRfbClientMessageFilter } from "./rfb-view-only-filter.js";
 
 const VERSION = Buffer.from("RFB 003.008\n", "ascii");
+const NONE_HANDSHAKE = Buffer.concat([VERSION, Buffer.from([1, 1])]);
 const FRAMEBUFFER_REQUEST = Buffer.from([3, 1, 0, 0, 0, 0, 0, 64, 0, 64]);
-const hex = (bytes: string) => Buffer.from(bytes, "hex");
+const KEY_EVENT = Buffer.from([4, 1, 0, 0, 0, 0, 0, 65]);
+const PIXEL_FORMAT = Buffer.alloc(20);
+
+function encodings(count: number) {
+  const message = Buffer.alloc(4 + count * 4);
+  message[0] = 2;
+  message.writeUInt16BE(count, 2);
+  return message;
+}
 
 function enterMessagePhase() {
   const filter = createRfbClientMessageFilter();
-  const handshake = Buffer.concat([VERSION, Buffer.from([1, 1])]);
-  expect(filter.filter(handshake)).toEqual({ forward: handshake });
+  expect(filter.filter(NONE_HANDSHAKE)).toEqual({ forward: NONE_HANDSHAKE });
   return filter;
 }
 
@@ -18,40 +26,78 @@ it("forwards a complete VncAuth handshake byte-identically", () => {
   expect(createRfbClientMessageFilter().filter(handshake)).toEqual({ forward: handshake });
 });
 
-it("filters fragmented input and preserves display/flow control", () => {
-  const filter = enterMessagePhase();
-  // Independent protocol fixtures: forwarding is expected only for display/flow control.
-  const messages = [
-    [hex("0401000000000041"), false], // KeyEvent
-    [Buffer.alloc(20), true], // SetPixelFormat
-    [hex("0501000a0014"), false], // PointerEvent
-    [hex("0580000a001401"), false], // Extended PointerEvent
-    [Buffer.concat([hex("02000018"), Buffer.alloc(96)]), true], // SetEncodings
-    [hex("0600000000000003616263"), false], // ClientCutText
-    [Buffer.concat([Buffer.of(251), Buffer.alloc(23)]), false], // SetDesktopSize
-    [Buffer.concat([Buffer.of(255), Buffer.alloc(11)]), false], // QEMU key
-    [FRAMEBUFFER_REQUEST, true],
-    [hex("f8000000000000000100"), true], // ClientFence
-    [hex("06000000fffffff80000000000000000"), false], // Extended clipboard
-    [hex("96010000000000400040"), true], // EnableContinuousUpdates after skipped clipboard
-  ] as const;
-  const captured = Buffer.concat(messages.map(([bytes]) => bytes));
-  const forwarded = Array.from(captured, (byte) => {
-    const result = filter.filter(Buffer.of(byte));
-    if ("error" in result) {
-      throw new Error(result.error);
-    }
-    return result.forward;
+it("rewrites an exclusive ClientInit batched with the following message", () => {
+  const filter = createRfbClientMessageFilter();
+  const prefix = Buffer.concat([VERSION, Buffer.from([1])]);
+  expect(filter.filter(prefix)).toEqual({ forward: prefix });
+  expect(filter.filter(Buffer.concat([Buffer.from([0]), FRAMEBUFFER_REQUEST]))).toEqual({
+    forward: Buffer.concat([Buffer.from([1]), FRAMEBUFFER_REQUEST]),
   });
-  expect(Buffer.concat(forwarded)).toEqual(
-    Buffer.concat(messages.filter(([, forward]) => forward).map(([bytes]) => bytes)),
-  );
 });
+
+it("starts at ClientInit after server-side authentication without forwarding input", () => {
+  const filter = createRfbClientMessageFilter({ startPhase: "clientInit" });
+  expect(filter.filter(Buffer.concat([Buffer.from([0]), KEY_EVENT, FRAMEBUFFER_REQUEST]))).toEqual({
+    forward: Buffer.concat([Buffer.from([1]), FRAMEBUFFER_REQUEST]),
+  });
+});
+
+it.each([false, true])(
+  "filters input and preserves display/flow control (fragmented: %s)",
+  (fragmented) => {
+    const filter = enterMessagePhase();
+    const setEncodings = encodings(24);
+    const clientFence = Buffer.from([248, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+    const enableContinuousUpdates = Buffer.from([150, 1, 0, 0, 0, 0, 0, 64, 0, 64]);
+    const cutText = Buffer.alloc(16);
+    cutText[0] = 6;
+    cutText.writeInt32BE(-8, 4);
+    const display = [
+      PIXEL_FORMAT,
+      setEncodings,
+      FRAMEBUFFER_REQUEST,
+      clientFence,
+      enableContinuousUpdates,
+    ];
+    const capturedSequence = Buffer.concat([
+      KEY_EVENT,
+      PIXEL_FORMAT,
+      Buffer.from([5, 1, 0, 10, 0, 20]),
+      Buffer.from([5, 0x80, 0, 10, 0, 20, 1]),
+      setEncodings,
+      Buffer.from([6, 0, 0, 0, 0, 0, 0, 3, 97, 98, 99]),
+      Buffer.concat([Buffer.of(251), Buffer.alloc(23)]),
+      Buffer.concat([Buffer.of(255), Buffer.alloc(11)]),
+      FRAMEBUFFER_REQUEST,
+      clientFence,
+      enableContinuousUpdates,
+      cutText,
+      enableContinuousUpdates,
+    ]);
+    const forwarded: Buffer[] = [];
+    const chunks = fragmented
+      ? Array.from(capturedSequence, (byte) => Buffer.of(byte))
+      : [capturedSequence];
+    for (const chunk of chunks) {
+      const result = filter.filter(chunk);
+      if ("error" in result) {
+        throw new Error(result.error);
+      }
+      forwarded.push(result.forward);
+    }
+
+    expect(Buffer.concat(forwarded)).toEqual(Buffer.concat([...display, enableContinuousUpdates]));
+  },
+);
 
 it.each([
   [false, Buffer.concat([VERSION, Buffer.of(30)]), "unsupported RFB security type 30"],
   [true, Buffer.of(254), "unsupported RFB client message type 254"],
-  [true, hex("0600000000010000"), "RFB client message exceeds the 64 KiB buffer limit"],
+  [
+    true,
+    Buffer.from([6, 0, 0, 0, 0, 1, 0, 0]),
+    "RFB client message exceeds the 64 KiB buffer limit",
+  ],
 ] as const)("fails closed (message phase: %s): %s -> %s", (messagePhase, frame, error) => {
   const filter = messagePhase ? enterMessagePhase() : createRfbClientMessageFilter();
   expect(filter.filter(frame)).toEqual({ error });

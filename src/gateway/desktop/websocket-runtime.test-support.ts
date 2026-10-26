@@ -91,7 +91,7 @@ async function observe(mode: string) {
   } finally {
     client.terminate();
     stream.destroy();
-    await promisify(server.close).call(server);
+    await promisify(server.close.bind(server))();
   }
 }
 
@@ -146,7 +146,7 @@ async function nodeStream(kind: "desktop" | "portal") {
     client.terminate();
     stream?.destroy();
     ticket.cancel();
-    await promisify(server.close).call(server);
+    await promisify(server.close.bind(server))();
   }
 }
 

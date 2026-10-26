@@ -2,6 +2,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import type { CoreConfig, NextcloudTalkAccountConfig } from "./types.js";
 
 const sendReactionNextcloudTalk = vi.hoisted(() => vi.fn());
+// mock-isolation: Message actions stop at the send boundary without making HTTP requests.
 vi.mock("./send.js", () => ({ sendReactionNextcloudTalk }));
 const { nextcloudTalkMessageActions: actions } = await import("./message-actions.js");
 const configured = { baseUrl: "https://nc.example.com", botSecret: "bot-secret" };

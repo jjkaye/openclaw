@@ -67,7 +67,11 @@ describe("zalo send", () => {
         ...(photo ? { mediaUrl } : {}),
       });
       expect(fetcher).toHaveBeenCalledOnce();
-      expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({
+      const body = fetcher.mock.calls[0]?.[1]?.body;
+      if (typeof body !== "string") {
+        throw new Error("Expected a JSON request body");
+      }
+      expect(JSON.parse(body)).toEqual({
         chat_id: "chat",
         [photo ? "photo" : "text"]: photo ? mediaUrl : "a".repeat(1999),
         ...(photo && text ? { caption: "a".repeat(1999) } : {}),

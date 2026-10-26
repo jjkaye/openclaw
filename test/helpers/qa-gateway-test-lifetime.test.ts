@@ -1,22 +1,32 @@
 import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { expect, it, type TestContext } from "vitest";
+import { createVitestResourceOwner } from "../../scripts/lib/vitest-resource-ownership.mts";
+import { withEnvAsync } from "../../src/test-utils/env.js";
 import { createDeferred, withTestTimeout } from "./promise.js";
 import { runQaGatewayTestFixture } from "./qa-gateway-test-lifetime.js";
 
-const record = (events: string[], event: string) => () => events.push(event);
+const record = (events: string[], event: string) => () => {
+  events.push(event);
+};
 
 function testOwner(signal: AbortSignal, events: string[] = []) {
-  let cleanup!: Parameters<TestContext["onTestFinished"]>[0];
+  const hooks: Array<Parameters<TestContext["onTestFinished"]>[0]> = [];
   return {
     context: {
       signal,
-      onTestFinished: (hook: typeof cleanup) => {
+      onTestFinished: (hook: Parameters<TestContext["onTestFinished"]>[0]) => {
         events.push("registered");
-        cleanup = hook;
+        hooks.push(hook);
       },
     },
-    finish: async (context: TestContext) => cleanup(context),
+    finish: async (context: TestContext) => {
+      for (const hook of hooks) {
+        await hook(context);
+      }
+    },
   };
 }
 
@@ -82,10 +92,43 @@ it("joins the actual cancelled body and ordered cleanup before finishing the tes
   }
 });
 
-it("refuses an already-cancelled body", async (context) => {
+it("retains acquisition rollback failure even before a resource reaches the caller", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "qa-test-rollback-owner-"));
+  context.onTestFinished(() => fs.rm(root, { recursive: true, force: true }));
+  const resource = createVitestResourceOwner(root);
+  const failure = new Error("acquisition rollback failed");
+  const events: string[] = [];
+  await withEnvAsync({ TMPDIR: root, TEMP: root, TMP: root }, async () => {
+    const owner = testOwner(new AbortController().signal, events);
+    const run = runQaGatewayTestFixture(
+      owner.context,
+      async ({ verifyCleanup }) => {
+        await verifyCleanup(async () => {
+          events.push("rollback");
+          throw failure;
+        });
+      },
+      record(events, "final-cleanup"),
+    );
+    await expect(run).rejects.toBe(failure);
+    await expect(owner.finish(context)).rejects.toMatchObject({
+      errors: expect.arrayContaining([failure]),
+    });
+    expect(events).toEqual(["registered", "rollback", "final-cleanup"]);
+    expect(() => resource.assertReleased()).toThrow("Unreleased Vitest resource claim");
+  });
+});
+
+it("preserves successful values and refuses an already-cancelled body", async (context) => {
+  const controller = new AbortController();
+  const owner = testOwner(controller.signal);
+  const value = { fixture: "result" };
+  await expect(runQaGatewayTestFixture(owner.context, async () => value)).resolves.toBe(value);
+  await owner.finish(context);
   const reason = new Error("cancelled before body admission");
+  controller.abort(reason);
   let entered = false;
-  const cancelledOwner = testOwner(AbortSignal.abort(reason));
+  const cancelledOwner = testOwner(controller.signal);
   await expect(
     runQaGatewayTestFixture(cancelledOwner.context, async () => {
       entered = true;

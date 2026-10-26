@@ -18,7 +18,7 @@ export async function listenLoopback(server: Server) {
 }
 
 export async function closeServer(server: Server) {
-  await promisify(server.close).call(server);
+  await promisify(server.close.bind(server))();
 }
 
 export function waitForClose(emitter: EventEmitter) {
