@@ -175,12 +175,19 @@ observer.disconnect();
 let stringifyCalls = 0;
 let valueStringifies = 0;
 const stringify = JSON.stringify;
-JSON.stringify = function (...args: Parameters<typeof JSON.stringify>) {
+JSON.stringify = (value: unknown, replacer, space) => {
   stringifyCalls++;
-  if (args[0]?.syntheticReplay === true) {
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    "syntheticReplay" in value &&
+    value.syntheticReplay === true
+  ) {
     valueStringifies++;
   }
-  return stringify(...args);
+  return typeof replacer === "function"
+    ? stringify(value, replacer, space)
+    : stringify(value, replacer, space);
 };
 try {
   await replay();
