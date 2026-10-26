@@ -19,14 +19,7 @@ function cancellation(signal: AbortSignal) {
     abort: () => controller.abort(reason),
   };
 }
-const fileError = (file: string, cause: Error) => ({
-  message: expect.stringContaining(file),
-  cause,
-});
-
-afterEach(() => {
-  vi.restoreAllMocks();
-});
+afterEach(() => vi.restoreAllMocks());
 
 const fileWaits = [
   { name: "file", wait: waitForFile, expected: undefined },
@@ -64,7 +57,7 @@ it.for(["file", "PID", "injected delay", "live process"] as const)(
     const diagnostic =
       kind === "live process"
         ? { message: `process still alive: ${process.pid}`, cause: cancelled.reason }
-        : fileError(file, cancelled.reason);
+        : { message: expect.stringContaining(file), cause: cancelled.reason };
     const rejected = expect(wait()).rejects.toMatchObject(diagnostic);
     cancelled.abort();
     await rejected;
@@ -122,11 +115,10 @@ it("stops waiting when a Linux process is a zombie", async ({ signal }) => {
 it.for(["borrower completion", "persistent file"] as const)(
   "observes readiness from %s without a file-watch event",
   async (observation, { signal }) => {
-    const filename = path.join(tempDirs.make("openclaw-process-receipt-"), "ready");
+    const filename = fixturePath();
     const { promise: completion, resolve: finish } = createDeferred();
     const watchFile = fsSync.watchFile;
-    // A successful initial stat establishes a baseline without notifying Node's
-    // watchFile listener. A receipt created during that stat must still be seen.
+    // Suppress notifications to retain the missed-initial-stat regression guard.
     const watcher = vi
       .spyOn(fsSync, "watchFile")
       .mockImplementation((target, ...args) =>
