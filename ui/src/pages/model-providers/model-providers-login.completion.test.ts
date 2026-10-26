@@ -26,17 +26,13 @@ it("shows distinct verification and activation phases before offering the named 
   const completion = deferred<WizardNextResult>();
   const loginRequest = request.getMockImplementation()!;
   let nextRequests = 0;
+  const steps = new Map([
+    [3, activation.promise],
+    [4, completion.promise],
+  ]);
   request.mockImplementation(async (method) => {
-    if (method === "wizard.next") {
-      nextRequests += 1;
-      if (nextRequests === 3) {
-        return activation.promise;
-      }
-      if (nextRequests === 4) {
-        return completion.promise;
-      }
-    }
-    return loginRequest(method);
+    const step = method === "wizard.next" ? steps.get(++nextRequests) : undefined;
+    return step ?? loginRequest(method);
   });
   context.runtimeConfig.runExternalMutation = async (task) => {
     const value = await task(context.gateway.snapshot.client!);

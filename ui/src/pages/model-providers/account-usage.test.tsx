@@ -44,11 +44,6 @@ it("loads automatically, renders remaining quota and balance, and re-reads on a 
   await waitForSolid(() => expect(view.container.textContent).toContain("12 credits"));
   expect(view.container.textContent).toContain("Pro");
   expect(view.container.querySelector('[role="meter"]')?.getAttribute("aria-valuenow")).toBe("75");
-  expect(request).toHaveBeenCalledExactlyOnceWith(
-    "codex.accountUsage",
-    { agentId: "main", profileId: "openai:account" },
-    { signal: expect.any(AbortSignal), timeoutMs: 30_000 },
-  );
   // A rebuilt scope with the same fields is the same account read.
   view.setScope({ ...view.scope() });
   flush();

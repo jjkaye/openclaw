@@ -44,18 +44,21 @@ it("offers only decision models, even without a chat provider, and retains an un
 
 it("retains a saved unavailable model without offering it for another default setting", async () => {
   const onUtilityChange = vi.fn();
+  const onUtilityFallbackChange = vi.fn();
   const container = mount(
     props({
       configuredModels: [
         { provider: "fixture", id: "ready", name: "Ready", available: true },
         { provider: "fixture", id: "blocked", name: "Blocked", available: false },
+        { provider: "fixture", id: "last", name: "Last", available: true },
       ],
       defaultModels: {
         primary: "fixture/ready",
         fallbacks: ["fixture/blocked"],
-        utilityModel: "fixture/blocked",
+        utilityModel: { primary: "fixture/blocked", fallbacks: ["fixture/ready", "fixture/last"] },
       },
       onUtilityChange,
+      onUtilityFallbackChange,
     }),
   );
   await updatePickers(container);
@@ -75,32 +78,11 @@ it("retains a saved unavailable model without offering it for another default se
   expect(onUtilityChange).not.toHaveBeenCalled();
   await choosePickerValue(utility, "__openclaw_automatic_utility__");
   expect(onUtilityChange).toHaveBeenCalledExactlyOnceWith(null);
-});
-
-it("shows utility chain selections and edits their fallback independently", async () => {
-  const onUtilityFallbackChange = vi.fn();
-  const container = mount(
-    props({
-      configuredModels: [
-        { provider: "fixture", id: "utility", name: "Utility" },
-        { provider: "fixture", id: "backup", name: "Backup" },
-        { provider: "fixture", id: "last", name: "Last" },
-      ],
-      defaultModels: {
-        primary: "fixture/chat",
-        fallbacks: [],
-        utilityModel: { primary: "fixture/utility", fallbacks: ["fixture/backup", "fixture/last"] },
-      },
-      onUtilityFallbackChange,
-    }),
-  );
-  await updatePickers(container);
-  expect(trigger(container, "utility").textContent).toContain("Utility");
   const row = settingsRow(container, "Utility Fallback Model");
   expect(row.textContent).toContain("1 more fallback after this one");
   const picker = row.querySelector<HTMLButtonElement>(".picker-select__trigger")!;
-  expect(picker.textContent).toContain("Backup");
-  expect(row.querySelector(optionSelector("utility"))).toBeNull();
+  expect(picker.textContent).toContain("Ready");
+  expect(row.querySelector(optionSelector("blocked"))).toBeNull();
   await choosePickerValue(picker, "fixture/last");
   expect(onUtilityFallbackChange).toHaveBeenLastCalledWith("fixture/last");
 });
