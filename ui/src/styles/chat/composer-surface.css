@@ -1456,6 +1456,14 @@
   }
 }
 
+/* Keep the separate control targets reachable when a side panel leaves only
+   a phone-narrow composer. Spend the outer inset before shrinking controls. */
+@container chat-composer (max-width: 320px) {
+  .agent-chat__input--mobile-toolbar .agent-chat__composer-footer {
+    padding-inline: 4px;
+  }
+}
+
 /* Short panes spend height on a complete editor line and the action row first.
    Context keeps its existing scrollport; neither region overflows the chat clip. */
 @container chat-conversation (max-height: 320px) {
