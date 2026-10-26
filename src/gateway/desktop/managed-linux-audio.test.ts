@@ -55,15 +55,9 @@ describe("managed Linux private audio", () => {
     expectCaptureStopped(f);
   });
 
-  it.each(["missing server", "missing recorder", "server timeout"])(
+  it.each(["pulseaudio", "parec", undefined])(
     "reaps unavailable audio setup: %s",
-    async (failure) => {
-      const missing =
-        failure === "server timeout"
-          ? undefined
-          : failure === "missing server"
-            ? "pulseaudio"
-            : "parec";
+    async (missing) => {
       vi.useFakeTimers();
       const f = fixture(missing ? { missing } : { silentServer: true });
       if (!missing) {
