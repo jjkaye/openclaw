@@ -83,12 +83,9 @@ function resolveNextCooldownModel(
  * shorten it. Without usable timing the profile stays available, and
  * lastRateLimitAt lets session recovery return to it after a fallback.
  */
-function computeRateLimitUsageStats(params: {
-  existing: ProfileUsageStats;
-  now: number;
-  modelId?: string;
-  retryAfterMs?: number;
-}): ProfileUsageStats {
+function computeRateLimitUsageStats(
+  params: Parameters<typeof computeNextProfileUsageStats>[0],
+): ProfileUsageStats {
   const { existing, now } = params;
   const providerUntil = resolveUsageWindowUntil(now, params.retryAfterMs ?? 0);
   if (providerUntil <= now) {

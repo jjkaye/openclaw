@@ -158,13 +158,9 @@ export {
   wrapProviderSimpleCompletionStreamFn,
 };
 
-function resolveProviderPluginsForCatalogHooks(params: {
-  providerIds?: readonly string[];
-  config?: OpenClawConfig;
-  workspaceDir?: string;
-  env?: NodeJS.ProcessEnv;
-  metadataSnapshot?: PluginMetadataSnapshot;
-}): ProviderPlugin[] {
+function resolveProviderPluginsForCatalogHooks(
+  params: Parameters<typeof augmentModelCatalogWithProviderPlugins>[0],
+): ProviderPlugin[] {
   const workspaceDir =
     params.workspaceDir ??
     params.metadataSnapshot?.workspaceDir ??

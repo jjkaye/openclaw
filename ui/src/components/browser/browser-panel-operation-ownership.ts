@@ -31,8 +31,6 @@ type BrowserPanelInvocation = {
   isCurrent(): boolean;
 };
 
-export type BrowserPanelSnapshotOutcome = "accepted" | "rejected" | "failed";
-
 /** Synchronous admission for tab snapshots, navigation, capture and input operations. */
 export function createBrowserPanelOperations(host: BrowserPanelHost) {
   let lifecycleEpoch = 0;

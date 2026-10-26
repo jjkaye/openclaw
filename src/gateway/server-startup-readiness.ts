@@ -1,4 +1,3 @@
-import type { GatewayStartupTrace } from "./server-startup-trace.js";
 import type { ReadinessChecker } from "./server/readiness.js";
 
 type GatewayReadinessLog = {
@@ -10,19 +9,4 @@ export function logGatewayReady(params: GatewayReadinessLog, message = "gateway 
   if (params.getReadiness().ready) {
     params.log.info(message);
   }
-}
-
-export function logGatewaySidecarsReady(
-  params: GatewayReadinessLog & {
-    startupTrace?: GatewayStartupTrace;
-    loadedPluginCount: number;
-    postReadySidecarCount: number;
-  },
-): void {
-  params.startupTrace?.detail("sidecars.ready", [
-    ["loadedPluginCount", params.loadedPluginCount],
-    ["postReadySidecarCount", params.postReadySidecarCount],
-  ]);
-  params.startupTrace?.mark("sidecars.ready");
-  logGatewayReady(params);
 }

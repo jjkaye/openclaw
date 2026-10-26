@@ -36,13 +36,9 @@ const internalSourceReplyPersistenceLeases = createKeyedFifoLeaseRegistry(
   Symbol.for("openclaw.internalSourceReplyPersistenceLeases"),
 );
 
-async function completePersistedInternalSourceReply(params: {
-  cfg: OpenClawConfig;
-  sessionKey: string;
-  expectedSessionId?: string;
-  agentId?: string;
-  idempotencyKey?: string;
-}): Promise<boolean> {
+async function completePersistedInternalSourceReply(
+  params: Parameters<typeof persistInternalSourceReply>[0],
+): Promise<boolean> {
   if (!params.expectedSessionId || !params.idempotencyKey) {
     return false;
   }

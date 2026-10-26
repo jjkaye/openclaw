@@ -101,6 +101,47 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+it.each(["pending", "loaded"] as const)(
+  "retires %s channel plugin metadata when read access is revoked",
+  async (phase) => {
+    const result = {
+      plugins: [plugin("slack", "Private workspace", { hasIcon: false })],
+      diagnostics: [],
+      mutationAllowed: false,
+    };
+    const pending = createDeferred<typeof result>();
+    const read = vi.fn().mockReturnValueOnce(pending.promise).mockResolvedValue(result);
+    const gateway = createGateway(["operator.read"], {
+      "plugins.list": read,
+      "channels.status": () => channelStatus("slack", "slack", true),
+    });
+    const source = createContext(gateway);
+    source.channels.state.channelsSnapshot = channelStatus("slack", "slack", true);
+    const request = vi.spyOn(gateway.snapshot.client!, "request");
+    const page = mountPage(source.context);
+    await waitForSolid(() => expect(read).toHaveBeenCalledOnce());
+    const firstRead =
+      request.mock.results[request.mock.calls.findIndex(([method]) => method === "plugins.list")]!
+        .value;
+    if (phase === "loaded") {
+      pending.resolve(result);
+      await waitForSolid(() =>
+        expect(text(page, ".settings-row__title")).toBe("Private workspace"),
+      );
+    }
+    setGatewayScopes(gateway, []);
+    await waitForSolid(() => expect(page.textContent).not.toContain("Private workspace"));
+    pending.resolve(result);
+    await firstRead;
+    await settle();
+    expect(page.textContent).not.toContain("Private workspace");
+    expect(read).toHaveBeenCalledOnce();
+    setGatewayScopes(gateway, ["operator.read"]);
+    await waitForSolid(() => expect(text(page, ".settings-row__title")).toBe("Private workspace"));
+    expect(read).toHaveBeenCalledTimes(2);
+  },
+);
+
 describe("ChannelsPage lifecycle", () => {
   it.each(["answer", "close"])(
     "keeps a held wizard answer with its %s outcome",

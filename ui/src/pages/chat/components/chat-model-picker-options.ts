@@ -97,12 +97,3 @@ export type ChatModelPickerOptionProps = {
   onSelect: (entry: ChatModelPickerOption, event: MouseEvent) => void;
   onModelSetup?: () => void;
 };
-
-export type ChatModelPickerTargetOptionProps = {
-  disabled: boolean;
-  entry: ChatModelPickerTargetGroup["options"][number];
-  groupId: string;
-  groupLabel: string;
-  index: number;
-  onSelect: (groupId: string, value: string, event: MouseEvent) => void;
-};

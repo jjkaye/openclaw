@@ -296,13 +296,7 @@ export function createTranscriptUpdateBroadcastHandler(params: {
 }
 
 async function handleTranscriptUpdateBroadcast(
-  params: {
-    broadcastToConnIds: GatewayBroadcastToConnIdsFn;
-    sessionEventSubscribers: SessionEventSubscribers;
-    sessionMessageSubscribers: SessionMessageSubscribers;
-    getSessionRowProjection?: () => SessionRowProjection | undefined;
-    resolveGatewayContext?: GatewayContextResolver;
-  },
+  params: Parameters<typeof createTranscriptUpdateBroadcastHandler>[0],
   update: InternalSessionTranscriptUpdate,
   capturedAgentScope: SessionEventAgentScope | undefined,
   projection: SessionRowProjection | undefined,

@@ -314,13 +314,9 @@ function mountTargetCoversPodmanInit(target: string): boolean {
   );
 }
 
-function assertPodmanMachineBindSourcesSupported(params: {
-  cfg: SandboxDockerConfig;
-  workspaceDir: string;
-  workspaceAccess: SandboxWorkspaceAccess;
-  agentWorkspaceDir: string;
-  readOnlyWorkspaceSkillMounts: readonly ReadOnlyWorkspaceSkillMount[];
-}): void {
+function assertPodmanMachineBindSourcesSupported(
+  params: Parameters<typeof resolvePodmanSandboxCreatePolicy>[0],
+): void {
   const hostHome = resolveSandboxHostPathViaExistingAncestor(path.resolve(os.homedir()));
   const sources = new Set<string>([params.workspaceDir]);
   if (params.workspaceAccess !== "none" && params.workspaceDir !== params.agentWorkspaceDir) {

@@ -56,13 +56,7 @@ function projectCodeModeNode(node: NodeListNode) {
   };
 }
 
-async function runNodesBridge(params: {
-  runtime: ToolSearchRuntime;
-  parentToolCallId: string;
-  request: PendingBridgeRequest;
-  signal?: AbortSignal;
-  onUpdate?: AgentToolUpdateCallback;
-}): Promise<unknown> {
+async function runNodesBridge(params: Parameters<typeof runBridgeRequest>[0]): Promise<unknown> {
   const call = (input: Record<string, unknown>) =>
     params.runtime.callValue(CODE_MODE_NODES_TOOL_ID, input, {
       includeMcp: false,

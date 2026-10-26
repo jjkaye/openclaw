@@ -12,15 +12,9 @@ import { catalogSessionActions } from "./session-catalog-node-adoption.js";
 import { CatalogParamsError, CODEX_LOCAL_SESSION_HOST_ID } from "./session-catalog-parsing.js";
 import type { CodexSessionCatalogControl } from "./session-catalog-types.js";
 
-async function assertNoPendingSupervisionBranch(params: {
-  agentId: string;
-  bindingStore: CodexAppServerBindingStore;
-  config: OpenClawConfig;
-  runtime: PluginRuntime;
-  threadId: string;
-  sourceHomeId?: string;
-  allowLegacy?: boolean;
-}): Promise<void> {
+async function assertNoPendingSupervisionBranch(
+  params: Parameters<typeof archiveLocalCodexSession>[0],
+): Promise<void> {
   const agentIds = [
     params.agentId,
     ...listAgentIds(params.config).filter((agentId) => agentId !== params.agentId),

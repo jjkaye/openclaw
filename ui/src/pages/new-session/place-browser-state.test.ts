@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { FsListDirResult } from "../../../../packages/gateway-protocol/src/index.js";
+import type {
+  FsDirEntry,
+  FsListDirResult,
+} from "../../../../packages/gateway-protocol/src/index.js";
 import { createDeferred } from "../../../../test/helpers/promise.ts";
 import { GatewayRequestError } from "../../api/gateway-connect-errors.ts";
 import { PlaceBrowserState, PICKER_INPUT_DEBOUNCE_MS } from "./place-browser-state.ts";
@@ -220,5 +223,62 @@ describe("PlaceBrowserState", () => {
       expect(browser.draft).toBe(draft);
       expect(browser.listing).toBe(workspace);
     }
+  });
+});
+
+describe("filterBrowserEntries", () => {
+  const entries = [
+    { name: "App", path: "/workspace/App" },
+    { name: "app-old", path: "/workspace/app-old" },
+    { name: "app", path: "/workspace/app" },
+    { name: "old-packages", path: "/workspace/old-packages" },
+    { name: "Packages", path: "/workspace/Packages" },
+    { name: "tools", path: "/workspace/tools" },
+    { name: "package-tools", path: "/workspace/package-tools" },
+    { name: "my-packages", path: "/workspace/my-packages" },
+    { name: ".packages", path: "/workspace/.packages", hidden: true },
+  ] satisfies FsDirEntry[];
+
+  const filteredEntries = (prefix: string) => {
+    browser.listing = { path: "/workspace", home: "/", entries };
+    browser.draft = `/workspace/${prefix}`;
+    browser.loading = false;
+    return browser.view().entries;
+  };
+
+  it.each([
+    ["PA", ["Packages", "package-tools", "old-packages", "my-packages"]],
+    ["app", ["app", "App", "app-old"]],
+  ])("ranks spelled, exact, prefix, then substring matches for %s", (prefix, expectedNames) => {
+    expect(filteredEntries(prefix).map((entry) => entry.name)).toEqual(expectedNames);
+  });
+});
+
+describe("resolvePlaceBrowserView", () => {
+  const entries = [{ name: "packages", path: "/workspace/packages" }];
+  const listing = { path: "/workspace", home: "/home/user", entries } satisfies FsListDirResult;
+
+  it.each([["unmatched prefix", listing, "/workspace/zzz", false, [], "no-matches"]])(
+    "resolves %s",
+    (_name, currentListing, draft, loading, expectedEntries, empty) => {
+      browser.listing = currentListing;
+      browser.draft = draft;
+      browser.loading = loading;
+      expect(browser.view()).toEqual({
+        entries: expectedEntries,
+        empty,
+      });
+    },
+  );
+
+  it("matches Windows directory spellings before filtering", () => {
+    const windowsListing = { path: "C:\\Workspace\\", home: "C:\\", entries };
+    browser.listing = windowsListing;
+    browser.draft = "c:/workspace/pa";
+    browser.loading = false;
+    expect(browser.view()).toEqual({
+      entries,
+      empty: "none",
+    });
   });
 });

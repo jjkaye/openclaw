@@ -247,26 +247,6 @@ function expandJsonSchemaTypeArray(schema: Record<string, unknown>): Record<stri
   };
 }
 
-function normalizeAdditionalPropertiesSchema(
-  schema: Record<string, unknown>,
-): Record<string, unknown> {
-  if (
-    !isRecord(schema.additionalProperties) ||
-    isRecord(schema.properties) ||
-    isRecord(schema.patternProperties)
-  ) {
-    return schema;
-  }
-  const { additionalProperties, ...rest } = schema;
-  return {
-    ...rest,
-    patternProperties: {
-      ".*": additionalProperties,
-    },
-    additionalProperties: false,
-  };
-}
-
 function isJsonValue(
   value: unknown,
   active = new WeakSet<object>(),
@@ -353,9 +333,21 @@ export function normalizeJsonSchemaForTypeBox(
       !node.enum.some((entry) => entry === null)
         ? { ...node, enum: [...node.enum, null] }
         : node;
-    const normalizedSchema = normalizeAdditionalPropertiesSchema(
-      expandJsonSchemaTypeArray(schemaWithNullableEnum),
-    );
+    let normalizedSchema = expandJsonSchemaTypeArray(schemaWithNullableEnum);
+    if (
+      isRecord(normalizedSchema.additionalProperties) &&
+      !isRecord(normalizedSchema.properties) &&
+      !isRecord(normalizedSchema.patternProperties)
+    ) {
+      const { additionalProperties, ...rest } = normalizedSchema;
+      normalizedSchema = {
+        ...rest,
+        patternProperties: {
+          ".*": additionalProperties,
+        },
+        additionalProperties: false,
+      };
+    }
     return Object.fromEntries(
       Object.entries(normalizedSchema)
         .filter(([key]) => key !== "format" || options.format !== "annotation")

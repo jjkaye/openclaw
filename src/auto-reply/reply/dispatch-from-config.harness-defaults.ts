@@ -127,16 +127,9 @@ export async function resolveVisibleRepliesPolicy(params: {
   return { configuredVisibleReplies, harnessDefaultVisibleReplies };
 }
 
-async function resolveHarnessSourceVisibleRepliesDefault(params: {
-  cfg: OpenClawConfig;
-  ctx: FinalizedMsgContext;
-  entry?: SessionEntry;
-  sessionAgentId: string;
-  sessionKey?: string;
-  sessionStore?: Record<string, SessionEntry>;
-  turnModelOverride?: string;
-  metadataSnapshot?: PluginMetadataSnapshot;
-}): Promise<HarnessSourceVisibleRepliesDefault | undefined> {
+async function resolveHarnessSourceVisibleRepliesDefault(
+  params: Parameters<typeof resolveVisibleRepliesPolicy>[0],
+): Promise<HarnessSourceVisibleRepliesDefault | undefined> {
   if (isNativeCommandTurn(resolveCommandTurnContext(params.ctx))) {
     return undefined;
   }

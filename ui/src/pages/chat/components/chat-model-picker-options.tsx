@@ -11,7 +11,7 @@ import {
   isModelPickerOptionSelected,
   modelPickerOptionKey,
   type ChatModelPickerOptionProps,
-  type ChatModelPickerTargetOptionProps,
+  type ChatModelPickerTargetGroup,
 } from "./chat-model-picker-options.ts";
 import { handleModelOptionMouseEnter } from "./chat-model-picker-search-view.ts";
 import { ChatModelSearchContext, type ChatModelSearchRow } from "./chat-model-picker-search.ts";
@@ -227,7 +227,14 @@ export function ChatModelPickerOption(props: ChatModelPickerOptionProps) {
   );
 }
 
-export function ChatModelPickerTargetOption(props: ChatModelPickerTargetOptionProps) {
+export function ChatModelPickerTargetOption(props: {
+  disabled: boolean;
+  entry: ChatModelPickerTargetGroup["options"][number];
+  groupId: string;
+  groupLabel: string;
+  index: number;
+  onSelect: (groupId: string, value: string, event: MouseEvent) => void;
+}) {
   const search = useContext(ChatModelSearchContext);
   const key = createMemo(() => `target:${props.groupId}:${props.entry.value}`);
   const rank = createMemo(() => search?.row(key())?.rank);

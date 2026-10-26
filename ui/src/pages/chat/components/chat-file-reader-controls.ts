@@ -2,22 +2,12 @@ import type { MarkdownRenderOptions } from "../../../components/markdown-render-
 import type { EditorId } from "../../../lib/editor-links.ts";
 import type { FileCopyAction, FileCopyFeedback } from "./chat-file-copy.ts";
 import type { FileHtmlPreviewControls } from "./chat-html-preview.ts";
-import type {
-  AttachmentSidebarRuntime,
-  FileSidebarContent,
-  MobileFileBack,
-} from "./chat-sidebar-content-types.ts";
+import type { MobileFileBack } from "./chat-sidebar-content-types.ts";
 import type { FileReaderWorkspace } from "./chat-sidebar-view-types.ts";
 
 export type MobileFileFindCloseReason = "close" | "escape" | "outside";
 
 export type FileReadingMode = "preview" | "highlighted" | "plain";
-
-export type FileReaderChromeProps = {
-  content: FileSidebarContent;
-  controls: FileViewControls;
-  runtime?: AttachmentSidebarRuntime;
-};
 
 export type FileViewControls = {
   fileAttachment?: import("./chat-file-session-attachment.ts").FileSessionAttachment;

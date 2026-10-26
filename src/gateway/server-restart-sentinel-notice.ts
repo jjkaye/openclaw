@@ -261,12 +261,7 @@ async function enqueueRestartSentinelNoticeClaimed(
 }
 
 async function drainFailedRestartSentinelNotice(
-  params: {
-    cfg: OpenClawConfig;
-    queueId: string;
-    sessionKey: string;
-    summary: string;
-  },
+  params: Parameters<typeof deliverRestartSentinelNotice>[0],
   context: DeliveryQueueStateContext,
 ): Promise<void> {
   for (let cycle = 1; cycle <= RESTART_NOTICE_RECOVERY_MAX_CYCLES; cycle += 1) {

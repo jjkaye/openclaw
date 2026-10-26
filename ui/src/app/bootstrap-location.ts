@@ -46,14 +46,9 @@ function isPersistedSessionLanding(location: RouteLocation, basePath: string): b
   );
 }
 
-async function normalizeReleasedSessionQueryLocation(params: {
-  location: RouteLocation;
-  basePath: string;
-  gateway: Pick<ApplicationGateway, "snapshot" | "subscribe">;
-  agentsList: () => AgentsListResult | null;
-  selectedAgentId?: string | null;
-  signal: AbortSignal;
-}): Promise<RouteLocation | null> {
+async function normalizeReleasedSessionQueryLocation(
+  params: Parameters<typeof resolveInitialApplicationLocation>[0],
+): Promise<RouteLocation | null> {
   const released = releasedSessionQuery(params.location, params.basePath);
   if (!released) {
     return null;

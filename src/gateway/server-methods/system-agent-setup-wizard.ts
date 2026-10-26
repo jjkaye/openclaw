@@ -38,13 +38,7 @@ const authWizardRequests = new WeakMap<
 >();
 
 async function createSetupActivationSession(
-  params: {
-    sessionId: string;
-    ownerKey?: string;
-    assertCurrent?: () => void;
-    activation: SetupActivation;
-    context: GatewayRequestContext;
-  },
+  params: Parameters<typeof startSetupActivationWizard>[0],
   createSession: () => WizardSession,
 ): Promise<WizardSession | undefined> {
   const { ownerKey, activation } = params;
