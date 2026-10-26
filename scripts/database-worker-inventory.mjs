@@ -1870,7 +1870,7 @@ const reviewedOperations = new Map([
       },
       {
         tier: "W",
-        operations: ["readCursor", "readMaterialCursors"],
+        operations: ["readCursor", "readMaterialCursors", "updateMaterialCursor"],
         evidence:
           "Watch commands and event recording execute only in session-state-events.worker.ts and subagent-registry.store.worker.ts",
       },

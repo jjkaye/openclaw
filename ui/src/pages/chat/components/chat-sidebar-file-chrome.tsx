@@ -12,9 +12,8 @@ import { EDITOR_IDS, EDITOR_LABELS } from "../../../lib/editor-links.ts";
 import "../../../styles/session-panel-rail.css";
 import { registerEnglishCatalog, t } from "../../../lib/reactive/i18n.ts";
 import { FileDownloadButton } from "./chat-file-download-button.tsx";
-import type { FileViewControls } from "./chat-file-reader-controls.ts";
+import type { FileReaderChromeProps, FileViewControls } from "./chat-file-reader-controls.ts";
 import { WorkspaceBreadcrumb } from "./chat-session-workspace-breadcrumb.tsx";
-import type { AttachmentSidebarRuntime, FileSidebarContent } from "./chat-sidebar-content-types.ts";
 import type { FileReaderWorkspace } from "./chat-sidebar-view-types.ts";
 
 registerEnglishCatalog(registerChatSessionEnglish);
@@ -87,11 +86,7 @@ export function DesktopFileNavigation(props: {
   );
 }
 
-export function DesktopFileChrome(props: {
-  content: FileSidebarContent;
-  controls: FileViewControls;
-  runtime?: AttachmentSidebarRuntime;
-}) {
+export function DesktopFileChrome(props: FileReaderChromeProps) {
   const id = createUniqueId();
   const searchMenus: Partial<Record<"wide" | "compact", MenuHandle>> = {};
   // Resolve on Escape: container layout can change while Find is open.

@@ -227,6 +227,60 @@ export function upsertSeedCursor(params: {
   publishSqliteDatabaseAdmission(params.db, emptyWatchedSessionUpstreamLinksAdmission, undefined);
 }
 
+function updateMaterialCursor(params: {
+  db: EngineConnection;
+  current: SessionWatchCursorRow | undefined;
+  watcherSessionKey: string;
+  watcherStorePath?: string;
+  targetSessionKey: string;
+  sequence: number;
+  now: number;
+}): { lastSeenSequence: number; queueOnly: boolean; watcherStorePath: string | null } {
+  const { current } = params;
+  const watcherStorePath = current
+    ? (current.watcher_store_path ?? null)
+    : (params.watcherStorePath ?? null);
+  const lastSeen = normalizeOptionalSqliteNumber(current?.last_seen_sequence) ?? 0;
+  if (
+    current &&
+    params.watcherStorePath !== undefined &&
+    params.watcherStorePath !== watcherStorePath
+  ) {
+    return { lastSeenSequence: lastSeen, queueOnly: false, watcherStorePath: null };
+  }
+  ensureWatcherStoreColumn(params.db);
+  const notified = normalizeOptionalSqliteNumber(current?.notified_sequence) ?? 0;
+  const frozenNotified = notified === lastSeen ? params.sequence : notified;
+  executeSqliteQuerySync(
+    params.db,
+    getSessionStateKysely(params.db)
+      .insertInto("session_watch_cursors")
+      .values({
+        watcher_session_key: params.watcherSessionKey,
+        watcher_store_path: watcherStorePath,
+        target_session_key: params.targetSessionKey,
+        last_seen_sequence: lastSeen,
+        notified_sequence: frozenNotified,
+        material_sequence: params.sequence,
+        provenance: SESSION_WATCH_PROVENANCE_EXPLICIT,
+        updated_at: params.now,
+      })
+      .onConflict((conflict) =>
+        conflict.columns(["watcher_session_key", "target_session_key"]).doUpdateSet({
+          notified_sequence: frozenNotified,
+          material_sequence: params.sequence,
+          updated_at: params.now,
+        }),
+      ),
+  );
+  publishSqliteDatabaseAdmission(params.db, emptyWatchedSessionUpstreamLinksAdmission, undefined);
+  return {
+    lastSeenSequence: lastSeen,
+    queueOnly: isAmbientGroupWatchCursor(current),
+    watcherStorePath,
+  };
+}
+
 const SESSION_STATE_OCCURRED_AT_MAX_SKEW_MS = 24 * 60 * 60_000;
 
 // Upstream-sourced event times are display/history truth only. Bookkeeping clocks
@@ -329,62 +383,23 @@ export function recordSessionStateEventsInDatabase(
       if (!NOTIFY_BY_KIND[input.kind] || input.actorId === watcherSessionKey) {
         continue;
       }
-      const current = cursors
-        ? cursors.get(watcherSessionKey)
-        : readCursor(db, watcherSessionKey, input.sessionKey);
-      const requestedWatcherStorePath = input.watcherStorePaths?.[watcherSessionKey];
-      const materialTargetSessionKey = input.sessionKey;
-      const watcherStorePath = current
-        ? (current.watcher_store_path ?? null)
-        : (requestedWatcherStorePath ?? null);
-      const lastSeen = normalizeOptionalSqliteNumber(current?.last_seen_sequence) ?? 0;
-      if (
-        current &&
-        requestedWatcherStorePath !== undefined &&
-        requestedWatcherStorePath !== watcherStorePath
-      ) {
-        notices.push({
-          watcherSessionKey,
-          watcherStorePath: null,
-          targetSessionKey: input.sessionKey,
-          lastSeenSequence: lastSeen,
-          queueOnly: false,
-        });
-        continue;
-      }
-      ensureWatcherStoreColumn(db);
-      const notified = normalizeOptionalSqliteNumber(current?.notified_sequence) ?? 0;
-      const frozenNotified = notified === lastSeen ? insertedSequence : notified;
-      executeSqliteQuerySync(
+      const materialCursor = updateMaterialCursor({
         db,
-        getSessionStateKysely(db)
-          .insertInto("session_watch_cursors")
-          .values({
-            watcher_session_key: watcherSessionKey,
-            watcher_store_path: watcherStorePath,
-            target_session_key: materialTargetSessionKey,
-            last_seen_sequence: lastSeen,
-            notified_sequence: frozenNotified,
-            material_sequence: insertedSequence,
-            provenance: SESSION_WATCH_PROVENANCE_EXPLICIT,
-            updated_at: now,
-          })
-          .onConflict((conflict) =>
-            conflict.columns(["watcher_session_key", "target_session_key"]).doUpdateSet({
-              notified_sequence: frozenNotified,
-              material_sequence: insertedSequence,
-              updated_at: now,
-            }),
-          ),
-      );
-      publishSqliteDatabaseAdmission(db, emptyWatchedSessionUpstreamLinksAdmission, undefined);
-      const queueOnly = isAmbientGroupWatchCursor(current);
+        current: cursors
+          ? cursors.get(watcherSessionKey)
+          : readCursor(db, watcherSessionKey, input.sessionKey),
+        watcherSessionKey,
+        watcherStorePath: input.watcherStorePaths?.[watcherSessionKey],
+        targetSessionKey: input.sessionKey,
+        sequence: insertedSequence,
+        now,
+      });
       notices.push({
         watcherSessionKey,
-        watcherStorePath,
+        watcherStorePath: materialCursor.watcherStorePath,
         targetSessionKey: input.sessionKey,
-        lastSeenSequence: lastSeen,
-        queueOnly,
+        lastSeenSequence: materialCursor.lastSeenSequence,
+        queueOnly: materialCursor.queueOnly,
       });
     }
   }

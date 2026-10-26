@@ -175,6 +175,49 @@ function isServerUiPrefReady(
   return isNavigationPref(key) ? navigationReady : appearanceReady || !isAppearancePref(key);
 }
 
+function serverPrefsLocalPatch(
+  prefs: ServerUiPrefs,
+  settings: UiSettings,
+  publishNavigationReset: boolean,
+): Partial<UiSettings> | null {
+  const patch: Partial<UiSettings> = {};
+  for (const key of SYNCED_PREF_KEYS) {
+    const specification = SYNCED_PREFS[key];
+    const serverValue = prefs[key];
+    const forcePublish = publishNavigationReset && isNavigationPref(key);
+    if (serverValue === undefined) {
+      continue;
+    }
+    if (serverValue === null) {
+      const resetPatch = specification.write?.(undefined);
+      if (resetPatch) {
+        if (forcePublish) {
+          Object.assign(patch, resetPatch);
+        } else {
+          applyChangedSettingsPatch(patch, settings, resetPatch);
+        }
+      }
+      continue;
+    }
+    if (!forcePublish && prefValuesEqual(serverValue, specification.local(settings))) {
+      continue;
+    }
+    if (
+      specification.canApply &&
+      // SAFETY: the preference map and descriptor use the same key, preserving canApply input type.
+      !(specification.canApply as (value: unknown, settings: UiSettings) => boolean)(
+        serverValue,
+        settings,
+      )
+    ) {
+      continue;
+    }
+    // SAFETY: SYNCED_PREFS keys are UiSettings keys with matching extracted values.
+    (patch as Record<string, unknown>)[key] = serverValue;
+  }
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
 function retainPendingAppearanceSnapshot(
   prefs: ServerUiPrefs,
   lastSeen: ServerUiPrefs,
@@ -377,43 +420,12 @@ export function applyServerUiPrefs(
   }
   // Adopting identity changes the read fallback before application snapshots are notified.
   // Publish navigation resets on first adoption too, even if that fallback equals the new defaults.
-  const settings = loadSettings(gatewayScope || undefined);
-  const patch: Partial<UiSettings> = {};
-  for (const key of SYNCED_PREF_KEYS) {
-    const specification = SYNCED_PREFS[key];
-    const serverValue = changed[key];
-    const forcePublish = navigationIdentityChanged && isNavigationPref(key);
-    if (serverValue === undefined) {
-      continue;
-    }
-    if (serverValue === null) {
-      const resetPatch = specification.write?.(undefined);
-      if (resetPatch) {
-        if (forcePublish) {
-          Object.assign(patch, resetPatch);
-        } else {
-          applyChangedSettingsPatch(patch, settings, resetPatch);
-        }
-      }
-      continue;
-    }
-    if (!forcePublish && prefValuesEqual(serverValue, specification.local(settings))) {
-      continue;
-    }
-    if (
-      specification.canApply &&
-      // SAFETY: the preference map and descriptor use the same key, preserving canApply input type.
-      !(specification.canApply as (value: unknown, settings: UiSettings) => boolean)(
-        serverValue,
-        settings,
-      )
-    ) {
-      continue;
-    }
-    // SAFETY: SYNCED_PREFS keys are UiSettings keys with matching extracted values.
-    (patch as Record<string, unknown>)[key] = serverValue;
-  }
-  if (Object.keys(patch).length === 0) {
+  const patch = serverPrefsLocalPatch(
+    changed,
+    loadSettings(gatewayScope || undefined),
+    navigationIdentityChanged,
+  );
+  if (!patch) {
     return false;
   }
   sync.applyServerPrefsPatch(patch);

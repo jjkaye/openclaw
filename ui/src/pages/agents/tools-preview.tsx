@@ -6,126 +6,10 @@ import {
   SettingsEmpty,
   SettingsLoadingSkeleton,
 } from "../../components/solid/settings-ui.tsx";
-import { registerToolDiagnosticsEnglish } from "../../i18n/locales/en-tool-diagnostics.ts";
 import type { AgentToolEntry, AgentToolSection } from "../../lib/agents/tool-catalog.ts";
 import { formatUiExternalText } from "../../lib/format-error.ts";
 import { t } from "../../lib/reactive/i18n.ts";
-import { renderAgentPanelFacts } from "./panel-ui.tsx";
-
-type ToolAccessDiagnostics = NonNullable<ToolsEffectiveResult["toolAccess"]>;
-type ToolAccessEntry = ToolAccessDiagnostics["tools"][number];
-
-function renderProfileInheritance(profiles: ToolAccessDiagnostics["profiles"]) {
-  const baseProfiles = profiles.filter(
-    (entry) => entry.source === "tools.profile" || entry.source.endsWith(".tools.profile"),
-  );
-  const providerProfiles = profiles.filter((entry) => !baseProfiles.includes(entry));
-  const renderEntry = (entry: ToolAccessDiagnostics["profiles"][number], label: string) => (
-    <>
-      <div class="agent-profile-tree__label">{label}</div>
-      <div class="agent-profile-tree__details">
-        <div class="agent-profile-tree__value">
-          <code>{entry.profile}</code>
-          {entry.active ? <span class="chip">{t("agentTools.activeProfile")}</span> : undefined}
-        </div>
-        <div class="agent-profile-tree__source">
-          <code>
-            <For each={entry.source.split(".")}>
-              {(segment, index) => (
-                <>
-                  {index() > 0 ? (
-                    <>
-                      .<wbr />
-                    </>
-                  ) : undefined}
-                  {segment}
-                </>
-              )}
-            </For>
-          </code>
-        </div>
-      </div>
-    </>
-  );
-  return (
-    <ul class="agent-profile-tree" role="list">
-      <For each={[baseProfiles, providerProfiles]}>
-        {(entries) => {
-          const global = entries.find((entry) => entry.source.startsWith("tools."));
-          const agent = entries.find((entry) => !entry.source.startsWith("tools."));
-          const root = global ?? agent;
-          if (!root) {
-            return undefined;
-          }
-          const suffix = entries === baseProfiles ? "" : "Provider";
-          return (
-            <li class={{ "agent-profile-tree__branch": Boolean(global && agent) }}>
-              {renderEntry(root, t(`agentTools.profile${global ? "Global" : "Agent"}${suffix}`))}
-              {global && agent && (
-                <ul role="list">
-                  <li>{renderEntry(agent, t(`agentTools.profileAgent${suffix}Override`))}</li>
-                </ul>
-              )}
-            </li>
-          );
-        }}
-      </For>
-    </ul>
-  );
-}
-
-const TOOL_STATUS_LABELS = new Map([
-  ["excluded", "agentTools.off"],
-  ["allowed", "agentTools.allowedByConfig"],
-  ["unavailable", "agentTools.notListed"],
-  ["available", "agentTools.inPreview"],
-]);
-
-function renderToolPolicyDetails(
-  diagnostic: ToolAccessEntry | null,
-  toolAccess: ToolAccessDiagnostics | null,
-) {
-  if (!diagnostic || !toolAccess) {
-    return undefined;
-  }
-  return (
-    <div class="agent-tool-policy">
-      {renderAgentPanelFacts([
-        [
-          "agentTools.checked",
-          t(
-            toolAccess.checked === "live-session"
-              ? "agentTools.checkedLive"
-              : "agentTools.checkedLocal",
-          ),
-        ],
-        diagnostic.reasons.length > 0
-          ? [
-              "agentTools.policySources",
-              <For each={diagnostic.reasons}>
-                {(reason) => (
-                  <div>
-                    {formatUiExternalText(reason.label)}
-                    {reason.source ? (
-                      <>
-                        {" "}
-                        · <code>{reason.source}</code>
-                      </>
-                    ) : undefined}
-                  </div>
-                )}
-              </For>,
-            ]
-          : null,
-        toolAccess.profiles.length > 0
-          ? ["agentTools.profileInheritance", renderProfileInheritance(toolAccess.profiles)]
-          : null,
-      ])}
-    </div>
-  );
-}
-
-registerToolDiagnosticsEnglish();
+import { resolveToolAvailability, renderToolPolicyDetails } from "./tool-access-diagnostics.tsx";
 
 export function renderToolMetaBadges(labels: string[]) {
   if (labels.length === 0) {
@@ -324,32 +208,7 @@ export function ToolPreview(props: {
       ? null
       : (props.preview.facts?.diagnostics.get(normalizeToolPolicyName(props.tool.id)) ?? null);
   const availability = createMemo(
-    () => {
-      const diagnosticValue = diagnostic();
-      const activeEntryValue = activeEntry();
-      const unverifiedReasonValue = unverifiedReason();
-      const previewStatusValue = status();
-      return {
-        summary:
-          previewStatusValue ||
-          t(
-            unverifiedReasonValue
-              ? "agentTools.unverified"
-              : activeEntryValue?.deniedBySession
-                ? "agentTools.off"
-                : ((diagnosticValue && TOOL_STATUS_LABELS.get(diagnosticValue.status)) ??
-                  (activeEntryValue ? "agentTools.inPreview" : "agentTools.notListed")),
-          ),
-        reason: previewStatusValue
-          ? undefined
-          : (unverifiedReasonValue ??
-            (activeEntryValue?.deniedBySession
-              ? t("agentTools.sessionRestricted")
-              : diagnosticValue?.reasons
-                  .map((reason) => formatUiExternalText(reason.label))
-                  .join(" · "))),
-      };
-    },
+    () => resolveToolAvailability(diagnostic(), activeEntry(), unverifiedReason(), status()),
     { lazy: true },
   );
   const label = () => {

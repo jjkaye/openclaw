@@ -137,9 +137,12 @@ export async function loadCostUsageSummaryCached(params: {
   });
 }
 
-async function loadAllAgentCostUsageSummary(
-  params: Parameters<typeof loadCostUsageSummaryCached>[0],
-): Promise<CostUsageSummary> {
+async function loadAllAgentCostUsageSummary(params: {
+  startMs: number;
+  endMs: number;
+  dayBucket?: UsageDailyBucket;
+  config: OpenClawConfig;
+}): Promise<CostUsageSummary> {
   return readWithSessionStoreTopology(async () => {
     // Same agent universe as discoverAllSessionsForUsage: enumerating configured
     // ids only would list system-agent sessions whose cost never reaches totals.

@@ -33,7 +33,7 @@ import {
   createGatewayStartupOutcomeRecorder,
   formatGatewayStartupOutcomes,
 } from "./server-startup-outcomes.js";
-import { logGatewayReady } from "./server-startup-readiness.js";
+import { logGatewayReady, logGatewaySidecarsReady } from "./server-startup-readiness.js";
 import {
   schedulePostReadySidecarTask,
   type GatewayPostReadySidecarHandle,
@@ -449,20 +449,17 @@ export async function startGatewayPostAttachRuntime(params: {
           );
           params.onGatewayLifetimeSidecars(...newGatewayLifetimeSidecars);
           params.log.info(formatGatewayStartupOutcomes(startupOutcomes.snapshot()));
-          params.startupTrace?.detail("sidecars.ready", [
-            [
-              "loadedPluginCount",
-              pluginRegistry.plugins.filter((plugin) => plugin.status === "loaded").length,
-            ],
-            [
-              "postReadySidecarCount",
+          logGatewaySidecarsReady({
+            log: params.log,
+            getReadiness: params.getReadiness,
+            startupTrace: params.startupTrace,
+            loadedPluginCount: pluginRegistry.plugins.filter((plugin) => plugin.status === "loaded")
+              .length,
+            postReadySidecarCount:
               postReadySidecarCount +
-                newGatewayLifetimeSidecars.length +
-                (controlUiAssetsSidecar ? 1 : 0),
-            ],
-          ]);
-          params.startupTrace?.mark("sidecars.ready");
-          logGatewayReady(params);
+              newGatewayLifetimeSidecars.length +
+              (controlUiAssetsSidecar ? 1 : 0),
+          });
           return pluginRegistry;
         });
   // Track original startup producers and their post-ready continuation so close

@@ -43,9 +43,12 @@ function resolveSessionKeyGroupId(sessionKey: string): string | undefined {
   return conversation.rawId;
 }
 
-function resolveTrustedGroupMetadata(
-  params: Parameters<typeof resolveAgentSessionGroup>[0],
-): TrustedGroupMetadata {
+function resolveTrustedGroupMetadata(params: {
+  sessionKey: string;
+  spawnedBy?: string;
+  stored: TrustedGroupMetadata;
+  inherited?: TrustedGroupMetadata;
+}): TrustedGroupMetadata {
   return {
     // Group trust can be inherited from the parent run or recovered from conversation-shaped keys.
     groupId:

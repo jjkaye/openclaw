@@ -12,6 +12,7 @@ import type { BrowserPanelNative } from "./browser-panel-native-owner.ts";
 import type {
   BrowserPanelHost,
   BrowserPanelOperations,
+  BrowserPanelSnapshotOutcome,
 } from "./browser-panel-operation-ownership.ts";
 import type { BrowserPanelPendingInput } from "./browser-panel-pending-input.ts";
 import type { BrowserPanelStateWriter } from "./browser-panel-state.ts";
@@ -83,7 +84,7 @@ export function createBrowserPanelSnapshot(controller: BrowserPanelSnapshotHost)
   async function refreshTabs(
     client: BrowserRequestClient,
     current: () => boolean,
-  ): Promise<"accepted" | "rejected" | "failed"> {
+  ): Promise<BrowserPanelSnapshotOutcome> {
     const invocation = controller.operations.beginSnapshot(client);
     try {
       const snapshot = await listTabs(client);

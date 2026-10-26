@@ -4,6 +4,8 @@ import type { TerminalConnection } from "./terminal-connection.ts";
 const MAX_PENDING_INPUT_CHARS = 8 * 1024;
 const TERMINAL_INPUT_DECODER = new TextDecoder();
 
+export type StartupInputBuffer = BoundedBuffer<string>;
+
 export function createTerminalStartupInput(
   connection: Pick<TerminalConnection, "input" | "resize">,
   getSessionId: () => string | undefined,
