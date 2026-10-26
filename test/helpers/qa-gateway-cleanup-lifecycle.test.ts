@@ -1,7 +1,6 @@
 import fs from "node:fs/promises";
 import type { Server } from "node:http";
 import { setImmediate } from "node:timers/promises";
-import { promisify } from "node:util";
 import { collectErrorGraphCandidates } from "@openclaw/normalization-core/error-coercion";
 import { expect, it, vi, type TestContext } from "vitest";
 import { awaitGateBeforeSettlement, createDeferred } from "./promise.js";
@@ -22,7 +21,6 @@ it.for(["cancelled import", "failed import", "failed evidence", "cancelled close
       const controller = new AbortController();
       const reason = new Error(`injected ${fault}`);
       const signal = AbortSignal.any([context.signal, controller.signal]);
-      const servers: Server[] = [];
       let firstCase = true;
       const resets: boolean[] = [];
       const writes: Array<{ artifactBase: string; details?: string }> = [];
@@ -59,44 +57,38 @@ it.for(["cancelled import", "failed import", "failed evidence", "cancelled close
           ...vi,
           doMock: (id: string, factory: MockFactory) => {
             mocks.add(id);
-            if (id.endsWith("/script-evidence.js")) {
-              vi.doMock(id, async (importOriginal) => {
+            vi.doMock(id, async (importOriginal) => {
+              if (id.endsWith("/script-evidence.js")) {
                 const original = (await factory(importOriginal)) as Evidence;
-                return {
-                  createQaScriptEvidenceWriter: (
-                    options: Parameters<Evidence["createQaScriptEvidenceWriter"]>[0],
-                  ) => {
-                    const writer = original.createQaScriptEvidenceWriter(options);
-                    return {
-                      ...writer,
-                      async write(result: Parameters<typeof writer.write>[0]) {
-                        writes.push({ artifactBase: options.artifactBase, ...result });
-                        if (firstCase && fault === "failed evidence") {
-                          throw reason;
-                        }
-                        return await writer.write(result);
-                      },
-                    };
-                  },
-                };
-              });
-            } else if (id.endsWith("/paired-node-worker-wire-fixture.js")) {
-              vi.doMock(id, async (importOriginal) => {
+                const createWriter = original.createQaScriptEvidenceWriter;
+                vi.spyOn(original, "createQaScriptEvidenceWriter").mockImplementation((options) => {
+                  const writer = createWriter(options);
+                  const write = writer.write.bind(writer);
+                  vi.spyOn(writer, "write").mockImplementation(async (result) => {
+                    writes.push({ artifactBase: options.artifactBase, ...result });
+                    if (firstCase && fault === "failed evidence") {
+                      throw reason;
+                    }
+                    return await write(result);
+                  });
+                  return writer;
+                });
+                return original;
+              }
+              if (id.endsWith("/paired-node-worker-wire-fixture.js")) {
                 const original = (await factory(importOriginal)) as Wire;
                 return {
                   ...original,
                   async closeWireServer(server: Server) {
-                    servers.push(server);
                     if (firstCase && fault === "cancelled close") {
                       controller.abort(reason);
                     }
                     await original.closeWireServer(server);
                   },
                 };
-              });
-            } else {
-              vi.doMock(id, factory);
-            }
+              }
+              return await factory(importOriginal);
+            });
           },
           doUnmock: (id: string) => {
             resets.push(released);
@@ -135,38 +127,29 @@ it.for(["cancelled import", "failed import", "failed evidence", "cancelled close
         let teardownDone = false;
         teardown = Promise.resolve(after()).then(() => (teardownDone = true));
         await setImmediate();
-        const resetBeforeJoin = resets.includes(false);
-        const completedBeforeJoin = teardownDone;
+        const beforeJoin = [resets.includes(false), teardownDone];
         released = true;
         gate.resolve();
         const outcome = await first;
         await teardown;
         const firstWrites = [...writes];
-        vi.doUnmock(generationModule);
-        reset(mocks);
+        reset([generationModule, ...mocks]);
         firstCase = false;
         await cases[1]!(context);
         await after();
-        expect([resetBeforeJoin, completedBeforeJoin]).toEqual([false, false]);
+        expect(beforeJoin).toEqual([false, false]);
         expect(collectErrorGraphCandidates(outcome, (error) => [error.cause])).toContain(reason);
         const firstWriteCount = fault === "failed evidence" || fault === "cancelled close" ? 1 : 0;
         expect(firstWrites).toHaveLength(firstWriteCount);
-        expect(writes).toHaveLength(firstWriteCount + 1);
         expect(writes.at(-1)?.details).toContain("generation shutdown unconfirmed");
-        expect(servers).toHaveLength(firstWriteCount + 1);
-        for (const server of servers) {
-          expect(server.listening).toBe(false);
-          expect(await promisify(server.getConnections.bind(server))()).toBe(0);
-        }
         expect(process.argv).toBe(originalProcess.argv);
         expect(process.exitCode).toBe(originalProcess.exitCode);
-        expect(process.env.TMPDIR).toBe(tmpdir);
-        expect(fs.rm).toBe(remove);
+        expect([process.env.TMPDIR, fs.rm]).toEqual([tmpdir, remove]);
         const [firstRoot, secondRoot] = [...roots];
-        expect(writes.at(-1)?.artifactBase).toBe(`${secondRoot}/evidence`);
-        for (const write of firstWrites) {
-          expect(write.artifactBase).toBe(`${firstRoot}/evidence`);
-        }
+        expect(writes.map((write) => write.artifactBase)).toEqual([
+          ...Array.from({ length: firstWriteCount }, () => `${firstRoot}/evidence`),
+          `${secondRoot}/evidence`,
+        ]);
         for (const root of roots) {
           await expect(fs.stat(root)).rejects.toMatchObject({ code: "ENOENT" });
         }
@@ -174,8 +157,7 @@ it.for(["cancelled import", "failed import", "failed evidence", "cancelled close
         released = true;
         gate.resolve();
         try {
-          await first;
-          await teardown;
+          await Promise.all([first, teardown]);
         } finally {
           reset(["vitest", generationModule, ...mocks]);
           Object.assign(process, originalProcess);

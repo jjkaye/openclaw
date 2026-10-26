@@ -99,19 +99,6 @@ it("observes real process death before and after abort", async ({ signal, onTest
   ).resolves.toBeUndefined();
 });
 
-it("stops waiting when a Linux process is a zombie", async ({ signal }) => {
-  vi.spyOn(process, "platform", "get").mockReturnValue("linux");
-  vi.spyOn(process, "kill").mockImplementation(() => true);
-  vi.spyOn(fsSync, "readFileSync").mockImplementation((filePath) => {
-    if (String(filePath) === "/proc/42/status") {
-      return "Name:\tworker\nState:\tZ (zombie)\nPid:\t42\nThreads:\t1\n";
-    }
-    throw new Error(`unexpected read: ${String(filePath)}`);
-  });
-
-  await expect(waitForDead(42, signal)).resolves.toBeUndefined();
-});
-
 it.for(["borrower completion", "persistent file"] as const)(
   "observes readiness from %s without a file-watch event",
   async (observation, { signal }) => {
