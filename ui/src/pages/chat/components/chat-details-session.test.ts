@@ -274,8 +274,11 @@ it("uses the current PR renderer and preserves CI session identity and branch di
   );
   const link = element.querySelector(".chat-pr__link")!;
   expect(link.getAttribute("href")).toBe("https://github.com/example/project/pull/7");
-  const automation = element.querySelector("openclaw-chat-ci-automation");
-  expect(automation).toHaveProperty("sessionId", "incarnation-7");
+  const automation = await waitForSolid(() => {
+    const control = element.querySelector("openclaw-chat-ci-automation");
+    expect(control).toHaveProperty("sessionId", "incarnation-7");
+    return control;
+  });
   expect(automation).toHaveProperty("presented", false);
   element.querySelector<HTMLButtonElement>(".chat-pr__actions button")!.click();
   flush();
