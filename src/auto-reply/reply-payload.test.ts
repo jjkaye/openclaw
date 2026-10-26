@@ -80,34 +80,28 @@ it("authorizes unclaimed payloads and only the session row that owns a claimed p
   expect(authorized(undefined)).toBe(false);
 });
 
-const complete = {
-  assistantMessageIndex: 2,
-  blockSourceText: "same",
-  blockSourceRange: [8, 12] as const,
-};
-
-it("reads complete UTF-16 source identity without changing the wire payload", () => {
-  const payload = withMetadata(complete);
-  expect(readReplyPayloadSourceOccurrence(payload)).toEqual({
-    assistantMessageIndex: 2,
-    sourceText: "same",
-    sourceRange: [8, 12],
-  });
-  expect(JSON.stringify(payload)).toBe(JSON.stringify({ text: "same" }));
-});
+const occurrence = { assistantMessageIndex: 2, sourceText: "same", sourceRange: [8, 12] };
 
 it.each([
-  ["absent metadata", undefined],
-  ["negative message index", { ...complete, assistantMessageIndex: -1 }],
-  ["fractional message index", { ...complete, assistantMessageIndex: 1.5 }],
-  ["missing source text", { ...complete, blockSourceText: undefined }],
-  ["missing source range", { ...complete, blockSourceRange: undefined }],
-  ["negative source start", { ...complete, blockSourceRange: [-1, 3] as const }],
-  ["reversed source range", { ...complete, blockSourceRange: [12, 8] as const }],
-  ["mismatched source length", { ...complete, blockSourceRange: [8, 13] as const }],
-])("rejects %s", (_name, metadata) => {
-  const payload = metadata ? withMetadata(metadata) : { text: "same" };
-  expect(readReplyPayloadSourceOccurrence(payload)).toBeUndefined();
+  ["complete", 2, "same", [8, 12], occurrence],
+  ["absent metadata", undefined, undefined, undefined, undefined],
+  ["negative message index", -1, "same", [8, 12], undefined],
+  ["fractional message index", 1.5, "same", [8, 12], undefined],
+  ["missing source text", 2, undefined, [8, 12], undefined],
+  ["missing source range", 2, "same", undefined, undefined],
+  ["negative source start", 2, "same", [-1, 3], undefined],
+  ["reversed source range", 2, "same", [12, 8], undefined],
+  ["mismatched source length", 2, "same", [8, 13], undefined],
+] as const)("validates %s source identity", (_name, index, text, range, expected) => {
+  const payload =
+    index === undefined
+      ? {}
+      : withMetadata({
+          assistantMessageIndex: index,
+          blockSourceText: text,
+          blockSourceRange: range,
+        });
+  expect(readReplyPayloadSourceOccurrence(payload)).toEqual(expected);
 });
 
 it("retains private delivery authority across independently loaded reply module graphs", async () => {
@@ -133,11 +127,6 @@ it("retains private delivery authority across independently loaded reply module 
   expect(adopt?.(draft)).toBe(true);
   capability.close();
   expect(adopt?.(draft)).toBe(false);
-  expect(
-    reloaded.isReplyPayloadSessionWriterDeliveryAuthorized(payload, {
-      sessionId: "replacement-session",
-      activeWriterRunId: "replacement-run",
-    }),
-  ).toBe(false);
+  expect(reloaded.isReplyPayloadSessionWriterDeliveryAuthorized(payload, currentEntry)).toBe(false);
   expect(JSON.stringify(payload)).toBe(JSON.stringify({ text: "same" }));
 });

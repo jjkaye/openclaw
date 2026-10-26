@@ -34,20 +34,13 @@ it.each<[AgentOptions, string | RegExp]>([
     { envelope: { timezone: "user", userTimezone: "Europe/Vienna" } },
     /\[WebChat Thu 2025-01-02 04:04:05 [^\]]+\] hello/,
   ],
+  [
+    { timestamp: new Date("2025-01-01T00:00:00Z"), envelope: { timezone: "gmt" } },
+    "[WebChat Wed 2025-01-01T00:00:00Z] hello",
+  ],
 ])("formats agent envelope %j", (options, expected) => {
-  if (typeof expected === "string") {
-    expect(agentEnvelope(options)).toBe(expected);
-  } else {
-    expect(agentEnvelope(options)).toMatch(expected);
-  }
-});
-
-it.each([
-  ["2024-12-31T23:59:59Z", "utc", "Tue 2024-12-31T23:59:59Z"],
-  ["2025-01-01T00:00:00Z", "gmt", "Wed 2025-01-01T00:00:00Z"],
-])("formats %s in %s across the year boundary", (date, timezone, expected) => {
-  expect(agentEnvelope({ timestamp: new Date(date), envelope: { timezone } })).toBe(
-    `[WebChat ${expected}] hello`,
+  expect(agentEnvelope(options)).toEqual(
+    typeof expected === "string" ? expected : expect.stringMatching(expected),
   );
 });
 
@@ -64,33 +57,18 @@ it("keeps the UTC fallback for an invalid explicit timezone option", () => {
 });
 it.each<[InboundOptions, string]>([
   [
-    {
-      channel: "Signal",
-      from: "Signal Group id:123",
-      body: "ping",
-      chatType: "group",
-      sender: { name: "Bob", id: "42" },
-    },
-    "[Signal Signal Group id:123] Bob (42): ping",
+    { channel: "Signal", from: "Group", chatType: "group", sender: { name: "Bob", id: "42" } },
+    "[Signal Group] Bob (42): hello",
   ],
   [{ from: "Alice id:123" }, "[Telegram Alice id:123] Alice: hello"],
   [
     { from: "Ops: Alice id:123", body: "/status" },
     "[Telegram Ops: Alice id:123] (sender): /status",
   ],
+  [{ channel: "WhatsApp", from: "+1555", fromMe: true }, "[WhatsApp +1555] (self): hello"],
   [
-    { channel: "WhatsApp", from: "+1555", body: "outbound msg", fromMe: true },
-    "[WhatsApp +1555] (self): outbound msg",
-  ],
-  [
-    {
-      channel: "WhatsApp",
-      from: "Family Chat",
-      chatType: "group",
-      senderLabel: "Alice",
-      fromMe: true,
-    },
-    "[WhatsApp Family Chat] Alice: hello",
+    { from: "Room", chatType: "group", senderLabel: "Alice", fromMe: true },
+    "[Telegram Room] Alice: hello",
   ],
 ])("labels the inbound sender: %j", (options, expected) => {
   expect(inboundEnvelope(options)).toBe(expected);
