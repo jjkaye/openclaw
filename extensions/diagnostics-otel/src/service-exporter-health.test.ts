@@ -24,23 +24,6 @@ function createObservedExporter(signal: ExporterHealthUpdate["signal"]) {
   return { exporter, exportItems, shutdown };
 }
 
-function expectPrivateFailure(
-  signal: ExporterHealthUpdate["signal"],
-  reason: ExporterHealthUpdate["reason"],
-  privateMessage: string,
-) {
-  expect(events).toEqual([
-    expect.objectContaining({
-      signal,
-      transport: "otlp-http-protobuf",
-      status: "failure",
-      reason,
-      errorCategory: "TypeError",
-    }),
-  ]);
-  expect(JSON.stringify(events)).not.toContain(privateMessage);
-}
-
 it("coalesces matching failures without publishing recovery", () => {
   const emit = createPublicExporterHealthEventEmitter(publish);
   const base = {
@@ -98,7 +81,16 @@ it("records and rethrows a synchronous dependency export failure once", () => {
 
   expect(() => exporter.export([], vi.fn())).toThrow("private serialization details");
   expect(() => exporter.export([], vi.fn())).toThrow("private serialization details");
-  expectPrivateFailure("logs", "export_failed", "private serialization details");
+  expect(events).toEqual([
+    expect.objectContaining({
+      signal: "logs",
+      transport: "otlp-http-protobuf",
+      status: "failure",
+      reason: "export_failed",
+      errorCategory: "TypeError",
+    }),
+  ]);
+  expect(JSON.stringify(events)).not.toContain("private serialization details");
 });
 
 it("does not misclassify a synchronous consumer callback failure", () => {

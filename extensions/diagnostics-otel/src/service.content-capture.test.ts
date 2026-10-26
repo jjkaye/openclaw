@@ -7,6 +7,7 @@ import { installRealOtelSdkTestHarness } from "./service.real-sdk.test-support.j
 import { CHILD_SPAN_ID, createTestTrace, startOtelService } from "./service.test-helpers.js";
 
 const sdk = installRealOtelSdkTestHarness({ replaceTraceProvider: true });
+const emit = emitTrustedDiagnosticEventWithPrivateData;
 
 const finishedSpanAttributes = (name: string) =>
   sdk.exporter.getFinishedSpans().find((span) => span.name === name)?.attributes;
@@ -33,33 +34,33 @@ async function finish({ service, ctx }: Awaited<ReturnType<typeof startOtelServi
   await service.stop?.(ctx);
 }
 
-function expectContent(name: string) {
-  expect(finishedSpanAttributes(name)).toMatchObject({
-    "input.value": content.userPrompt,
-    "output.value": content.finalResponse,
-  });
-}
-
-function expectNoContent(name: string) {
-  const attributes = finishedSpanAttributes(name) ?? {};
-  expect(Object.hasOwn(attributes, "input.value")).toBe(false);
-  expect(Object.hasOwn(attributes, "output.value")).toBe(false);
+function expectContent(name: string, captured = true) {
+  const attributes = finishedSpanAttributes(name);
+  if (captured) {
+    expect(attributes).toMatchObject({
+      "input.value": content.userPrompt,
+      "output.value": content.finalResponse,
+    });
+  } else {
+    expect(Object.hasOwn(attributes ?? {}, "input.value")).toBe(false);
+    expect(Object.hasOwn(attributes ?? {}, "output.value")).toBe(false);
+  }
 }
 
 function emitHarnessContent(startupPrompt = true) {
-  emitTrustedDiagnosticEventWithPrivateData(
+  emit(
     { type: "harness.run.started", ...harness },
     startupPrompt ? { harnessContent: { userPrompt: content.userPrompt } } : undefined,
   );
-  emitTrustedDiagnosticEventWithPrivateData(
+  emit(
     { type: "harness.run.completed", ...harness, durationMs: 100, outcome: "completed" },
     { harnessContent: startupPrompt ? { finalResponse: content.finalResponse } : content },
   );
 }
 
 function emitRunContent() {
-  emitTrustedDiagnosticEventWithPrivateData({ type: "run.started", ...run }, undefined);
-  emitTrustedDiagnosticEventWithPrivateData(
+  emit({ type: "run.started", ...run }, undefined);
+  emit(
     { type: "run.completed", ...run, durationMs: 60, outcome: "completed" },
     { messageContent: content },
   );
@@ -67,7 +68,7 @@ function emitRunContent() {
 
 const captures = {
   message: () => {
-    emitTrustedDiagnosticEventWithPrivateData(message, { messageContent: content });
+    emit(message, { messageContent: content });
     return "openclaw.message.processed";
   },
   harness: () => {
@@ -90,11 +91,7 @@ test.each([
   const started = await startOtelService({ traces: true, captureContent });
   const name = captures[kind]();
   await finish(started);
-  if (captureContent) {
-    expectContent(name);
-  } else {
-    expectNoContent(name);
-  }
+  expectContent(name, captureContent);
 });
 
 test("consumes the completion-time prompt on harness spans when startup carried none", async () => {
@@ -107,11 +104,8 @@ test("consumes the completion-time prompt on harness spans when startup carried 
 test("exports captured harness response on harness error spans under captureContent", async () => {
   const started = await startOtelService({ traces: true, captureContent: true });
   const failedHarness = { ...harness, runId: "run-capture-error" };
-  emitTrustedDiagnosticEventWithPrivateData(
-    { type: "harness.run.started", ...failedHarness },
-    undefined,
-  );
-  emitTrustedDiagnosticEventWithPrivateData(
+  emit({ type: "harness.run.started", ...failedHarness }, undefined);
+  emit(
     {
       type: "harness.run.error",
       ...failedHarness,
