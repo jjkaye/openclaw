@@ -604,7 +604,7 @@ it("keeps the Skills filter reactive across clearing and retained panel/agent ro
     control.dispatchEvent(new Event("input", { bubbles: true }));
   };
   try {
-    await waitForSolid(() => expect(titles().sort()).toEqual(["Main other", "Main shared"]));
+    await waitForSolid(() => expect(titles().toSorted()).toEqual(["Main other", "Main shared"]));
     const retainedPage = mounted.container.querySelector("openclaw-agents-page");
     const initialFilter = filter();
     enter("shared");
@@ -613,7 +613,7 @@ it("keeps the Skills filter reactive across clearing and retained panel/agent ro
     expect(filter().value).toBe("shared");
 
     enter("");
-    await waitForSolid(() => expect(titles().sort()).toEqual(["Main other", "Main shared"]));
+    await waitForSolid(() => expect(titles().toSorted()).toEqual(["Main other", "Main shared"]));
     expect(filter()).toBe(initialFilter);
     expect(filter().value).toBe("");
     enter("shared");
