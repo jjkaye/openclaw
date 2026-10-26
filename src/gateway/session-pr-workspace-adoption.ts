@@ -8,10 +8,7 @@ import { resolveCanonicalWorkspacePath } from "../agents/workspace-state-identit
 import { requireGit } from "../agents/worktrees/git.js";
 import { readSessionTranscriptAnchorsAsync } from "../config/sessions/session-transcript-anchor-read.js";
 import type { InternalSessionEntry } from "../config/sessions/types.js";
-import {
-  hasSessionControllerQueuedWork,
-  isCompetingSessionControllerWorkActive,
-} from "../sessions/session-controller.context.js";
+import { isCompetingSessionControllerWorkActive } from "../sessions/session-controller.context.js";
 import {
   captureSessionTarget,
   runSessionMutation,
@@ -71,8 +68,8 @@ export async function adoptUnboundPullRequestWorkspace(params: {
     params.signal?.throwIfAborted();
     params.assertCurrent();
     assertWorkspaceCurrent();
+    // The handoff holds queued follow-ups; only competing execution blocks adoption.
     const busy =
-      hasSessionControllerQueuedWork(target.storePath, identities, target.agentId) ||
       isCompetingSessionControllerWorkActive(target.storePath, identities, target.agentId) ||
       isCompetingSessionControllerWorkActive(
         `agent:${target.agentId}`,
@@ -112,7 +109,7 @@ export async function adoptUnboundPullRequestWorkspace(params: {
       );
     if (busy) {
       throw new Error(
-        "This conversation still has queued input, background work, a child or a terminal. Finish or observe that work, then retry workspace preparation; nothing was stopped or moved.",
+        "This conversation still has background work, a child or a terminal. Finish or observe that work, then retry workspace preparation; nothing was stopped or moved.",
       );
     }
   };

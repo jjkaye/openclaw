@@ -24,7 +24,6 @@ import { ensureCanonicalUserProfileForEmail } from "../state/user-profile-writes
 import { prepareGitHubPublicationSession } from "./github-publication-availability.js";
 import {
   createRequesterPublicationFixture,
-  createGitHubPublicationRequesterFixture,
   guestScopes,
 } from "./github-publication-requester.test-support.js";
 import type { OperatorScope } from "./operator-scopes.js";
@@ -65,19 +64,9 @@ describe("local checkout publication", () => {
       const f = await createFixture();
       const source = f.local!;
       const scope = { agentId: "main", sessionKey: SESSION_KEY };
-      const scopes: OperatorScope[] = ["operator.read", "operator.write"];
       setRuntimeConfigSnapshot({
         ...f.config,
         agents: { entries: { main: { workspace: root } } },
-        gateway: {
-          roles: {
-            default: "writer",
-            definitions: {
-              ...f.config.gateway!.roles!.definitions,
-              writer: { scopes, agents: ["main"], sessions: { others: "none" } },
-            },
-          },
-        },
       });
       await deleteRegistryWorktree(process.env, loadSessionEntryReadOnly(scope)!.worktree!.id);
       await upsertSessionEntryCore(scope, {
@@ -123,11 +112,7 @@ describe("local checkout publication", () => {
       await manager.appendMessageAsync(
         makeUserMessage("Implement this change and publish its PR", 1),
       );
-      const requester = await createGitHubPublicationRequesterFixture({
-        ...scope,
-        profileId: f.guestProfile,
-        scopes,
-      });
+      const requester = f.guestSource;
       const context = {
         ...createDirectChatContext({ getRuntimeConfig }),
         workerSessionPlacementService: f.placements,

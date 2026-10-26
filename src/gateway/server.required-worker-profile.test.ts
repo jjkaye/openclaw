@@ -579,10 +579,10 @@ test.each(["unchanged", "caller", "runtime"] as const)(
           spawnedCwd: worktree.path,
         });
       } else {
-        await expect(pending).rejects.toMatchObject(
+        await expect(pending).rejects.toThrow(
           change === "runtime"
-            ? { name: "SqliteSessionMutationConflictError", operationLabel: "session-entry.patch" }
-            : { message: expect.stringContaining("Session changed during worker admission") },
+            ? "SQLite session state changed while preparing session-entry.patch"
+            : "Session changed during worker admission",
         );
         expect(dispatch).not.toHaveBeenCalled();
         const entry = loadSessionEntry({ ...identity, storePath });

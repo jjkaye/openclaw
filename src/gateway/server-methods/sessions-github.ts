@@ -14,7 +14,6 @@ import { GitHubIdentityError } from "../../agents/github-read-identity.js";
 import { canRefreshGitHubPublicationBase } from "../../agents/sandbox/github-publication.js";
 import { getGatewayToolCallerIdentity } from "../../agents/tools/gateway-caller-context.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
-import { roleScopesAllow } from "../../shared/operator-scope-compat.js";
 import { OpenClawStateLeaseAcquisitionError } from "../../state/openclaw-state-lease-error.js";
 import { createControlUiSessionPrRead } from "../control-ui-session-pr-read.js";
 import { performSessionGitHubPreparation } from "../github-pr-workspace-preparation.js";
@@ -327,15 +326,8 @@ export const sessionsGitHubHandlers: GatewayRequestHandlers = {
       using _ = { [Symbol.dispose]: () => admitted.release() };
 
       if (params.workspacePath !== undefined) {
-        if (
-          caller?.workspacePrAdoptionSessionId !== loaded.entry.sessionId ||
-          !roleScopesAllow({
-            role: "operator",
-            requestedScopes: ["operator.write"],
-            allowedScopes: admitted.requester.snapshot.scopes,
-          })
-        ) {
-          throw new Error("Local checkout publication requires a write-authorized agent handoff.");
+        if (caller?.workspacePrAdoptionSessionId !== loaded.entry.sessionId) {
+          throw new Error("Local checkout publication requires an agent handoff.");
         }
         const source = await prepareSessionCreateRequestedCwd({
           cfg: context.getRuntimeConfig(),
