@@ -4,9 +4,9 @@ import { createRouter, definePage } from "@openclaw/uirouter";
 import { createSignal } from "solid-js";
 import { afterEach, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
+import type { SkillStatusReport } from "../../api/types.ts";
 import type { RouteId } from "../../app-route-paths.ts";
 import type { SolidRouteProps } from "../../app-route-types.tsx";
-import type { SkillStatusReport } from "../../api/types.ts";
 import type { ApplicationContext } from "../../app/context.ts";
 import { RouterOutlet } from "../../app/router-outlet.tsx";
 import { createAgentCapability } from "../../lib/agents/index.ts";
@@ -593,8 +593,8 @@ it("keeps the Skills filter reactive across clearing and retained panel/agent ro
     );
   });
   const titles = () =>
-    [...mounted.container.querySelectorAll(".agent-skill-row .settings-row__title")].map(
-      (node) => node.textContent?.trim(),
+    [...mounted.container.querySelectorAll(".agent-skill-row .settings-row__title")].map((node) =>
+      node.textContent?.trim(),
     );
   const filter = () => mounted.getByRole<HTMLInputElement>("textbox", { name: "Filter" });
   const enter = (value: string) => {
@@ -634,6 +634,5 @@ it("keeps the Skills filter reactive across clearing and retained panel/agent ro
     expect(mounted.container.querySelector("openclaw-agents-page")).toBe(retainedPage);
   } finally {
     mounted.unmount();
-    context.settingsAgentSelection.dispose();
   }
 });
