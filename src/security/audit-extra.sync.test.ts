@@ -32,7 +32,9 @@ it.each<[string, boolean | undefined, string[] | undefined, string, string?]>([
   const [finding] = collectSmallModelRiskFindings({
     cfg: {
       agents: { defaults: { model: { primary: "ollama/mistral-8b" } } },
-      tools: { web: { fetch: { enabled: false }, ...(searchKey ? { search: { apiKey: searchKey } } : {}) } },
+      tools: {
+        web: { fetch: { enabled: false }, ...(searchKey ? { search: { apiKey: searchKey } } : {}) },
+      },
       browser: { enabled },
       plugins: { allow },
     },
@@ -42,6 +44,8 @@ it.each<[string, boolean | undefined, string[] | undefined, string, string?]>([
   expect(finding).toMatchObject({
     checkId: "models.small_params",
     severity,
-    detail: expect.stringContaining(unsafe ? (searchKey ? "web=[web_search]" : "web=[browser]") : "web=[off]"),
+    detail: expect.stringContaining(
+      unsafe ? (searchKey ? "web=[web_search]" : "web=[browser]") : "web=[off]",
+    ),
   });
 });
