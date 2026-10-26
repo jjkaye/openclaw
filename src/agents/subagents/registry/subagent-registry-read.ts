@@ -272,8 +272,9 @@ export function getSubagentChildControllerSessionKey(
   }
   const candidates = getSubagentChildSessionCandidates(key);
   let latest: SubagentRunRecord | undefined;
-  for (let index = 0; index < candidates.length; index++) {
-    const candidate = candidates[index]!;
+  let index = 0;
+  while (index < candidates.length) {
+    const candidate = candidates[index++]!;
     if (
       (isSubagentRunLive(candidate) || isSubagentRunQueued(candidate)) &&
       getRecordedSubagentChildAuthority(candidate).status !== "mismatch" &&

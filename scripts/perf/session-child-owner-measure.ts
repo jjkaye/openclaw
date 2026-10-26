@@ -251,7 +251,7 @@ const resident =
 const { parseAgentSessionKey } = await import("../../src/sessions/session-key-utils.js");
 const ownerRows = rows.map((row) => ({ ...row, parsedKey: parseAgentSessionKey(row.key) }));
 const requesterRoots = [
-  ...new Set(Array.from(snapshot.values(), (run) => run.requesterSessionKey)),
+  ...new Set(Array.from(snapshot.values(), (entry) => entry.requesterSessionKey)),
 ];
 const lookup = memory.getSubagentSessionReadLookup(memory.subagentRuns);
 let previousTopology = lookup.captureTopology();
@@ -290,8 +290,9 @@ function updateRun() {
 
 // Named declarations remain visible in V8 allocation stacks for anonymous query closures.
 function readActiveDescendants(index: SubagentRunReadIndex<SubagentRunReadRecord>): void {
-  for (let root = 0; root < requesterRoots.length; root++) {
-    checksum += index.countActiveDescendantRuns(requesterRoots[root]!);
+  let rootIndex = 0;
+  while (rootIndex < requesterRoots.length) {
+    checksum += index.countActiveDescendantRuns(requesterRoots[rootIndex++]!);
   }
   descendantQueries += requesterRoots.length;
 }
@@ -438,18 +439,26 @@ try {
         childOwner ||
         name === "resolveSessionChildOwners" ||
         name === "resolveSessionChildController";
-      controller ||=
-        name === "resolveSessionChildController" || name === "getSubagentChildControllerSessionKey";
-      descendant ||= name === "readActiveDescendants";
+      const inController =
+        controller ||
+        name === "resolveSessionChildController" ||
+        name === "getSubagentChildControllerSessionKey";
+      const inDescendant = descendant || name === "readActiveDescendants";
       allocation.total += node.selfSize;
       if (owner) {
         allocation.childOwner += node.selfSize;
       }
-      if (controller) allocation.controller += node.selfSize;
-      if (descendant) allocation.descendant += node.selfSize;
-      if (controller || descendant) allocation.union += node.selfSize;
+      if (inController) {
+        allocation.controller += node.selfSize;
+      }
+      if (inDescendant) {
+        allocation.descendant += node.selfSize;
+      }
+      if (inController || inDescendant) {
+        allocation.union += node.selfSize;
+      }
       for (const child of node.children) {
-        visit(child, owner, controller, descendant);
+        visit(child, owner, inController, inDescendant);
       }
     };
     visit(profile.head);
