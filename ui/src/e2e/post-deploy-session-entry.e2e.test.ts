@@ -238,7 +238,10 @@ describe("public-session post-deploy app handoff", () => {
     page.on("request", observeDocument);
     const start = requests.length;
     const held = holdAppDelivery();
-    const navigation = reload ? page.reload() : page.goto(baseUrl + publicPath);
+    // The app readiness below owns completion; unrelated subresources must not hold the handoff.
+    const navigation = reload
+      ? page.reload({ waitUntil: "domcontentloaded" })
+      : page.goto(baseUrl + publicPath, { waitUntil: "domcontentloaded" });
     // Observe rejection immediately while the HTML owner remains intentionally held.
     void navigation.catch(() => {});
     try {
