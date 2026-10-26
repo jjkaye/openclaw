@@ -62,7 +62,10 @@ export type ChannelFeedbackReflectionResult =
       responseLength: number;
     };
 
-function buildReflectionPrompt(params: Parameters<typeof runChannelFeedbackReflection>[0]): string {
+function buildReflectionPrompt(params: {
+  thumbedDownResponse?: string;
+  userComment?: string;
+}): string {
   const response = params.thumbedDownResponse;
   const truncated =
     response && response.length > MAX_RESPONSE_CHARS
