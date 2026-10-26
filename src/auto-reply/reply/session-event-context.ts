@@ -36,6 +36,15 @@ export function prepareSessionEventInput(text: string, options: SessionEventOpti
   if (!text.trim()) {
     throw new Error("Session event text must not be empty");
   }
+  if (options.preserveOccurrenceOnRejection && !options.occurrences?.length) {
+    throw new Error("Preserving a rejected event requires its original queued occurrence");
+  }
+  if (
+    options.occurrences &&
+    options.occurrences.map((event) => event.text).join("\n") !== text.trim()
+  ) {
+    throw new Error("Session event occurrence text changed before admission");
+  }
   const env = options.expectedTarget
     ? readSessionEventTargetEnvironment(options.expectedTarget)
     : undefined;
