@@ -218,6 +218,18 @@ describe("worktree default-base preparation", () => {
     { mode: "aborted", outcome: "failed", command: "fetch" },
     { mode: "aborted", outcome: "uncertain-result", command: "ls-remote" },
     { mode: "aborted", outcome: "uncertain-result", command: "symbolic-ref" },
+    { mode: "aborted", outcome: "cancelled-result", command: "remote" },
+    { mode: "aborted", outcome: "cancelled-result", command: "update-head" },
+    { mode: "aborted", outcome: "cancelled-result", command: "verify" },
+    { mode: "aborted", outcome: "uncertain-result", command: "remote" },
+    { mode: "aborted", outcome: "uncertain-result", command: "verify" },
+    { mode: "aborted", outcome: "exit-failure", command: "remote" },
+    { mode: "aborted", outcome: "output-limit", command: "remote" },
+    { mode: "aborted", outcome: "exit-failure", command: "fetch" },
+    { mode: "aborted", outcome: "output-limit", command: "fetch" },
+    { mode: "aborted", outcome: "exit-failure", command: "ls-remote" },
+    { mode: "aborted", outcome: "cancelled-before-spawn", command: "remote" },
+    { mode: "aborted", outcome: "cancelled-before-spawn", command: "fetch" },
   ])(
     "settles shared default fetching after its owner is $mode ($command, $outcome)",
     async ({ mode, outcome, command }, { signal }) => {
@@ -250,8 +262,8 @@ describe("worktree default-base preparation", () => {
       let fetches = 0;
       let gated = false;
       const failedCounts = {
-        discoveries: command === "symbolic-ref" ? 0 : 1,
-        fetches: command === "fetch" ? 1 : 0,
+        discoveries: ["remote", "symbolic-ref"].includes(command) ? 0 : 1,
+        fetches: ["fetch", "update-head", "verify"].includes(command) ? 1 : 0,
       };
       vi.spyOn(gitExec, "executeGitCommand").mockImplementation(async (cwd, args, options) => {
         if (args[0] === "ls-remote") {
@@ -260,19 +272,40 @@ describe("worktree default-base preparation", () => {
         if (args[0] === "fetch") {
           fetches++;
         }
-        if (args[0] === command && !gated) {
+        const selectedCommand =
+          command === "update-head"
+            ? args[0] === "symbolic-ref" && args.length === 3 && !args[1]!.startsWith("-")
+            : command === "verify"
+              ? args[0] === "rev-parse" && args[2]?.startsWith("refs/remotes/origin/")
+              : args[0] === command;
+        if (selectedCommand && !gated) {
           gated = true;
           entered.resolve();
           await release.promise;
-          if (outcome === "uncertain-result") {
+          if (
+            [
+              "uncertain-result",
+              "cancelled-result",
+              "cancelled-before-spawn",
+              "exit-failure",
+              "output-limit",
+            ].includes(outcome)
+          ) {
             return {
               stdout: "",
               stderr: "",
-              code: null,
+              code: outcome === "exit-failure" ? 1 : null,
               signal: null,
               killed: false,
-              termination: "signal",
-              cleanup: "uncertain",
+              termination: outcome === "exit-failure" ? "exit" : "signal",
+              cleanup:
+                outcome === "uncertain-result"
+                  ? "uncertain"
+                  : outcome === "cancelled-before-spawn"
+                    ? "normal"
+                    : "cooperative",
+              killIssuedByAbort: ["cancelled-result", "output-limit"].includes(outcome),
+              outputLimitExceeded: outcome === "output-limit",
               timeoutMs: options?.timeoutMs ?? 60_000,
             };
           }
@@ -316,14 +349,24 @@ describe("worktree default-base preparation", () => {
           Promise.all([firstResult, secondResult]),
           signal,
         );
-        if (outcome === "settled") {
-          expect(firstOutcome).toBe(failure);
+        if (["settled", "cancelled-result", "cancelled-before-spawn"].includes(outcome)) {
+          expect(firstOutcome).toBeInstanceOf(Error);
+          if (outcome === "settled") {
+            expect(firstOutcome).toBe(failure);
+          }
           expect(secondOutcome).toMatchObject({
             commit: await git(repo, "rev-parse", "HEAD"),
             recordRef: "origin/main",
             fetchSucceeded: true,
           });
-          expect({ discoveries, fetches }).toEqual({ discoveries: 2, fetches: 2 });
+          expect({ discoveries, fetches }).toEqual({
+            discoveries: failedCounts.discoveries + 1,
+            fetches: failedCounts.fetches + 1,
+          });
+        } else if (outcome === "exit-failure" || outcome === "output-limit") {
+          expect(firstOutcome).toBeInstanceOf(Error);
+          expect(secondOutcome).toBe(firstOutcome);
+          expect({ discoveries, fetches }).toEqual(failedCounts);
         } else if (outcome === "failed") {
           expect(firstOutcome).toBe(fetchFailure);
           expect(secondOutcome).toBe(fetchFailure);

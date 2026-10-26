@@ -223,14 +223,23 @@ export async function withWorktreeBasePreparation<T>(
         if (hasWorktreeUnknownOutcome(error)) {
           throw error;
         }
-        if (readCommandProcessFailure(error)?.cleanup === "uncertain") {
+        const outcome = readCommandProcessFailure(error);
+        if (outcome?.cleanup === "uncertain") {
           throw new CommandProcessCleanupError({ cause: error });
         }
         // Only this phase owner's actual authority failure can retire its attempt.
+        // Normal signal cleanup includes cancellation before spawn or during Git's
+        // retry delay; stopped children also require the runner's abort receipt.
         // A concurrent cancellation must not turn an unrelated Git error into a retry.
         if (
           (retirement && retirement.error === error) ||
-          (options.signal?.aborted && error === options.signal.reason)
+          (options.signal?.aborted &&
+            (error === options.signal.reason ||
+              (outcome?.termination === "signal" &&
+                !outcome.outputLimitExceeded &&
+                (outcome.cleanup === "normal" ||
+                  (outcome.killIssuedByAbort === true &&
+                    (outcome.cleanup === "cooperative" || outcome.cleanup === "forced"))))))
         ) {
           attempt.retired = true;
         }
@@ -381,7 +390,10 @@ async function fetchRemoteDefault(
   if (advertised.cleanup === "uncertain") {
     throw new CommandProcessCleanupError();
   }
-  options.signal?.throwIfAborted();
+  if (options.signal?.aborted) {
+    requireGitCommandOutput("git ls-remote origin HEAD", advertised);
+    options.signal.throwIfAborted();
+  }
   const advertisedOk = advertised.termination === "exit" && advertised.code === 0;
   const advertisedBranch = advertisedOk
     ? /^ref: refs\/heads\/(.+)\tHEAD\r?$/mu.exec(advertised.stdout)?.[1]
@@ -418,7 +430,10 @@ async function fetchRemoteDefault(
   if (fetched.cleanup === "uncertain") {
     throw new CommandProcessCleanupError();
   }
-  options.signal?.throwIfAborted();
+  if (options.signal?.aborted) {
+    requireGitCommandOutput("git fetch origin default branch", fetched);
+    options.signal.throwIfAborted();
+  }
   const fetchSucceeded = fetched.termination === "exit" && fetched.code === 0;
   if (!fetchSucceeded) {
     warnings.push(commandError("git fetch origin default branch", fetched).message);
@@ -430,6 +445,13 @@ async function fetchRemoteDefault(
     ["rev-parse", "--verify", `${remoteRef}^{commit}`],
     options,
   );
+  if (verified.cleanup === "uncertain") {
+    throw new CommandProcessCleanupError();
+  }
+  if (options.signal?.aborted) {
+    requireGitCommandOutput("git rev-parse remote default", verified);
+    options.signal.throwIfAborted();
+  }
   if (verified.termination !== "exit" || verified.code !== 0) {
     throw new Error(
       `Remote default ${remoteRef} is unavailable. Repair origin or choose an explicit worktree base ref. ${redactSensitiveText(warnings.join("\n"))}`,
