@@ -248,6 +248,8 @@ export function createChatComposerContext(
   const syncComposerDraftAfterSend = (target: HTMLTextAreaElement | null) => {
     state.emojiMenu.close();
     state.mentionMenu.close();
+    state.slashMenu.reset();
+    state.skillMenu.reset();
     const submittedDraft = target?.value ?? props.getDraft?.() ?? props.draft;
     const hostDraft = props.getDraft?.() ?? props.draft;
     const clearedSubmittedDraft =
