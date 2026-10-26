@@ -9,6 +9,13 @@ export { mergeAttemptToolMediaPayloads } from "../agents/embedded-agent-runner/r
 export { wrapPromptDataBlock } from "../agents/sanitize-for-prompt.js";
 export { stripInboundMetadata } from "../auto-reply/reply/strip-inbound-meta.js";
 export { writeGatewayRestartIntentSync } from "../infra/restart-intent.js";
+export { initializeQaRuntimeState } from "./qa-state-initializer.js";
+
+/** Read startup facts through the same packaged owners as the QA initializer. */
+export async function snapshotQaStartupState(env: NodeJS.ProcessEnv) {
+  const { snapshotQaStartupState: snapshot } = await import("./qa-startup-state.js");
+  return snapshot(env);
+}
 export {
   createLazyCliRuntimeLoader,
   createLiveTransportQaCliRegistration,

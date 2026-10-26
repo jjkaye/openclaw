@@ -263,6 +263,7 @@ beforeAll(async () => {
           workspace,
           apiRoot,
           command: createQaPreparedRepoCliCommand(repoRoot),
+          initializeCurrentRuntimeState: true,
           forcedRuntime: "codex",
           providerMode: "mock-openai",
           providerBaseUrl: `${apiRoot}/v1`,
