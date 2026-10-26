@@ -49,12 +49,25 @@ Send `Accept: application/json` and an identifying User-Agent, e.g.
 5. **Handoff:** link the release ID, assessed SHA, scan/selection evidence, and any
    unsynced decisions. Archive inactive releases rather than deleting history.
 
-Use `applicability` for needed/already-present/not-affected decisions and
-`handling` for straightforward/adaptation-required/blocked work; consult OpenAPI
-for exact enums. Put proposed/approved/included/deferred/skipped dispositions
-and reasons in `notes`, with evidence links. Deferral is not necessarily blocked;
-one release's exclusion does not make a fix globally `not_a_hotfix`. Keep P0/P1
-priority in rationale/evidence, separate from API severity.
+### Per-release assessment fields
+
+Keep source commits on the shared hotfix; update application details on its
+assessment for the target release:
+
+- `applicability`: `unknown`, `needed`, `already_present`, or `not_affected`.
+- `handling`: `unknown`, `straightforward`, `adaptation_required`, or `blocked`.
+- `notes`: proposed/approved/included/deferred/skipped disposition and why.
+- `adaptationDetails`: conflicts, code changes, or deviations from the source fix.
+- `destinationCommitRefs`: string array of actual release-branch commit refs.
+- `supportingEvidence`: string array of validation results or proof links.
+- `dependencies` / `exclusions`: string arrays of release-specific prerequisites
+  or excluded parts, with reasons.
+- `assessedSha`: release head actually assessed; refresh after reassessment,
+  not just to clear a stale flag.
+
+Deferral is not necessarily blocked; one release's exclusion does not make a fix
+globally `not_a_hotfix`. Keep P0/P1 priority in rationale/evidence, separate from
+API severity.
 
 ## API essentials
 
