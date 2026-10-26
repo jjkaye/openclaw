@@ -33,6 +33,7 @@ describe("image tool response validation", () => {
       new Map(),
     );
     vi.spyOn(imageModelRuntime, "resolveImageRuntime").mockImplementation(async (params) => ({
+      run: <T>(run: () => T): T => run(),
       runtimeValue: "test-key",
       model: makeProviderModelFixture({
         id: "gpt-5.4-mini",

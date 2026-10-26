@@ -618,6 +618,7 @@ describe("worker turn launcher local placement", () => {
               inlineProviderModels: [],
               configuredCatalogEntries: [],
             },
+            run: <T>(run: () => T): T => run(),
             [Symbol.asyncDispose]: release,
           };
         }),

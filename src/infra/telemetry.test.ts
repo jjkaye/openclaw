@@ -140,6 +140,7 @@ describe("anonymous telemetry", () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
+    await pluginRuntime.clearActivePluginRegistry();
     await closeOpenClawStateDatabaseAsync();
     await testState.cleanup();
   });

@@ -6,7 +6,10 @@ import {
   getPluginMethodArgumentKind,
 } from "./plugin-instance-argument-views.js";
 import { pluginInstanceInvocation, retainPluginOwnerWork } from "./plugin-instance-invocation.js";
-import type { PluginInstanceInvocation } from "./plugin-instance-invocation.types.js";
+import type {
+  PluginInstanceInvocation,
+  PluginIteratorAdmission,
+} from "./plugin-instance-invocation.types.js";
 import { PluginFactoryBinding } from "./plugin-instance-owned-values.js";
 import {
   getPluginOriginalValue,
@@ -15,7 +18,7 @@ import {
   setPluginOriginalValue,
   type PluginInstanceHandle,
 } from "./plugin-instance-scope.js";
-import type { PluginInstanceCallLease, PluginIteratorAdmission } from "./plugin-instance.types.js";
+import type { PluginInstanceCallLease } from "./plugin-instance.types.js";
 import { mapPluginReturnPromise, resolvePluginReturnPromise } from "./plugin-return-value.js";
 import { createPluginToolExecutionBinding } from "./plugin-tool-execution.js";
 import type { PluginRegistry } from "./registry-types.js";
