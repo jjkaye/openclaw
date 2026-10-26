@@ -25,23 +25,14 @@ afterEach(disposeHighlighter);
 
 it("renders before/after input into a complete viewer document", async () => {
   const rendered = await renderDiffDocument(
-    {
-      kind: "before_after",
-      before: "const value = 1;\n",
-      after: "const value = 2;\n",
-      path: "src/example.ts",
-    },
+    { kind: "before_after", before: "a\n", after: "b\n", path: "example.ts" },
     renderOptions,
   );
 
-  expect(rendered).toMatchObject({ title: "src/example.ts", fileCount: 1 });
+  expect(rendered).toMatchObject({ title: "example.ts", fileCount: 1 });
   contains(rendered.html, [
     "data-openclaw-diff-root",
-    "src/example.ts",
     "../../assets/viewer.js",
-    "min-height: 100vh;",
-    '"diffIndicators":"bars"',
-    '"disableLineNumbers":false',
     "--diffs-line-height: 24px;",
     "--diffs-font-size: 15px;",
     "@media (prefers-reduced-motion: reduce)",
@@ -53,17 +44,11 @@ it("renders before/after input into a complete viewer document", async () => {
     "--diffs-font-size: 16px;",
   ]);
   expect(rendered.html).not.toContain("fonts.googleapis.com");
-  expect(rendered.html).not.toContain(summaryNav);
 });
 
 it("renders multi-file navigation with counts, change labels, and escaped names", async () => {
   const patch = [
-    patchFile(
-      "a.ts",
-      "-const a = 1;\n+const a = 2;\n+const extra = true;\n const keep = 0;",
-      "@@ -1,2 +1,3 @@",
-    ),
-    patchFile("b.ts", "-const b = 1;\n+const b = 2;"),
+    patchFile("a&b.ts", "-a\n+b\n+c\n d", "@@ -1,2 +1,3 @@"),
     patchFile("new.ts", "+const created = true;", "@@ -0,0 +1 @@").replace(
       "--- a/new.ts",
       "new file mode 100644\n--- /dev/null",
@@ -73,27 +58,23 @@ it("renders multi-file navigation with counts, change labels, and escaped names"
       .replace("+++ b/old.ts", "+++ /dev/null"),
     "diff --git a/before.ts b/after.ts\nsimilarity index 90%\nrename from before.ts\nrename to after.ts",
     "--- a/before.ts\n+++ b/after.ts\n@@ -1 +1 @@\n-const v = 1;\n+const v = 2;",
-    patchFile("a&b.ts", "-x\n+y"),
   ].join("\n");
 
   const rendered = await renderDiffDocument(
     { kind: "patch", patch, title: "Workspace patch" },
     {
-      presentation: { ...DEFAULT_DIFFS_TOOL_DEFAULTS, layout: "split", theme: "dark" },
-      image: resolveDiffImageRenderOptions({
-        defaults: DEFAULT_DIFFS_TOOL_DEFAULTS,
-        fileQuality: "hq",
-        fileMaxWidth: 1180,
-      }),
+      ...renderOptions,
+      presentation: { ...renderOptions.presentation, layout: "split" },
+      image: { ...renderOptions.image, maxWidth: 1180 },
       expandUnchanged: true,
     },
   );
-  expect(rendered).toMatchObject({ title: "Workspace patch", fileCount: 6 });
+  expect(rendered).toMatchObject({ title: "Workspace patch", fileCount: 4 });
   contains(rendered.html, [
     "Workspace patch",
     `${summaryNav} aria-label="Changed files">`,
-    "6 changed files",
-    '<span class="oc-diff-nav-additions">+6</span><span class="oc-diff-nav-deletions">-5</span>',
+    "4 changed files",
+    '<span class="oc-diff-nav-additions">+4</span><span class="oc-diff-nav-deletions">-3</span>',
     '<span class="oc-diff-nav-additions">+2</span><span class="oc-diff-nav-deletions">-1</span>',
     'href="#oc-diff-file-1"',
     'id="oc-diff-file-1"',

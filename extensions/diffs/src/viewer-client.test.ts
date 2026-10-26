@@ -104,13 +104,8 @@ it("drops the interactive toolbar in image render mode", async () => {
   expect(renderHeaderMetadata()).toBeNull();
 });
 
-it("skips summary nav cards during hydration", async () => {
+it("skips nav cards and invalid JSON while hydrating valid sibling cards", async () => {
   document.body.innerHTML = '<nav class="oc-diff-card oc-diff-nav"><ol></ol></nav>';
-  await hydrateOptions();
-  expect(fileDiffHydrateMock).toHaveBeenCalledTimes(1);
-});
-
-it("skips invalid JSON payloads and hydrates valid sibling cards", async () => {
   const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
   addCard("{not-json");
   await hydrateOptions();
