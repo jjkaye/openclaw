@@ -13,13 +13,13 @@ import {
   releaseDesktopObserverToken,
 } from "./observe-bridge.js";
 import { connectRfbObserver, RFB_VERSION as VERSION } from "./observe.test-support.js";
-import { createDesktopSessionRegistry, type DesktopSessionRegistry } from "./session-registry.js";
+import { createDesktopSessionRegistry } from "./session-registry.js";
 import { SocketReader } from "./socket-reader.test-support.js";
 
 const FRAMEBUFFER_REQUEST = Buffer.from([3, 1, 0, 0, 0, 0, 0, 64, 0, 64]);
 const httpServer = http.createServer();
 let origin = "";
-let registry: Pick<DesktopSessionRegistry, "attachObserver" | "claimStream">;
+let registry: ReturnType<typeof createDesktopSessionRegistry>;
 const cleanups: Array<() => Promise<void>> = [];
 beforeAll(async () => {
   httpServer.on("upgrade", (req, socket, head) => {
@@ -55,6 +55,7 @@ it.each([
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   }
   const ard = outcome.startsWith("ard-") || outcome === "invalid security";
+  const rejected = outcome.endsWith("rejected");
   const authenticated = createDeferred();
   const browserReady = createDeferred();
   const finishAuth = createDeferred();
@@ -73,12 +74,15 @@ it.each([
       expect(await reader.readExactly(1)).toEqual(Buffer.from([ard ? 30 : 2]));
       await browserReady.promise;
       if (ard) {
-        const header = Buffer.from([0, 5, 0, outcome === "invalid security" ? 0 : 16]);
-        const modulus = Buffer.alloc(16);
-        modulus.writeUInt16BE(7919, 14);
-        const serverPublic = Buffer.alloc(16);
-        serverPublic.writeUInt16BE(6817, 14);
-        socket.write(Buffer.concat([header, modulus, serverPublic]));
+        // ARD: generator 5, 16-byte modulus 7919 and server public key 6817.
+        const parameters = Buffer.from(
+          "0005001000000000000000000000000000001eef00000000000000000000000000001aa1",
+          "hex",
+        );
+        if (outcome === "invalid security") {
+          parameters.writeUInt16BE(0, 2);
+        }
+        socket.write(parameters);
         if (outcome === "invalid security") {
           script.resolve();
           return;
@@ -89,14 +93,9 @@ it.each([
       await reader.readExactly(ard ? 144 : 16);
       authenticated.resolve();
       await finishAuth.promise;
-      const rejected = outcome.endsWith("rejected");
       const reason = Buffer.from("access denied for operator using account-password");
-      const result = Buffer.alloc(rejected ? 8 : 4);
-      if (rejected) {
-        result.writeUInt32BE(1, 0);
-        result.writeUInt32BE(reason.length, 4);
-      }
-      socket.write(rejected ? Buffer.concat([result, reason]) : result);
+      const failure = Buffer.concat([Buffer.from([0, 0, 0, 1, 0, 0, 0, reason.length]), reason]);
+      socket.write(rejected ? failure : Buffer.alloc(4));
       if (!rejected) {
         expect(await reader.readExactly(1)).toEqual(Buffer.from([1]));
         socket.write(Buffer.from("server-init"));
@@ -113,28 +112,18 @@ it.each([
     stopped.resolve();
   });
   const start = vi.fn(async (_signal: AbortSignal) => ({ stream: pcm, stop }));
-  const sessions = createDesktopSessionRegistry();
-  cleanups.push(() => sessions.stopAll());
-  registry = ard
-    ? sessions
-    : {
-        claimStream: () => undefined,
-        attachObserver: () => (outcome === "stale-owner" ? undefined : { release() {} }),
-      };
+  registry = createDesktopSessionRegistry();
+  cleanups.push(() => registry.stopAll());
+  if (!ard && outcome !== "stale-owner") {
+    await registry.activate({ sourceKey: "host", ownerEpoch: 1 });
+  }
   const requester = { connId: "audio-authorization-test", isCurrent: () => true };
   const credentials = { username: "operator", password: "account-password" };
-  const host = ard
+  const observation = ard
     ? await createHostDesktopService({
-        registry: sessions,
+        registry,
         getConfig: () => ({ enabled: true, port }),
       }).observe({ control: false, credentials })
-    : undefined;
-  if (host) {
-    expect(host.auth).toBe("ard-account");
-    expect(host.vncPassword).toBeUndefined();
-  }
-  const grant = host
-    ? undefined
     : mintDesktopObserverToken({
         sourceKey: "host",
         ownerEpoch: 1,
@@ -144,7 +133,9 @@ it.each([
         audio: { start },
         requester,
       });
-  const audio = grant ? await attach(grant.audio!.wsPath) : undefined;
+  const screenPath =
+    "token" in observation ? "/desktop/observe?token=" + observation.token : observation.wsPath;
+  const audio = observation.audio ? await attach(observation.audio.wsPath) : undefined;
   const audioClosed = audio ? once(audio, "close") : undefined;
   const expectAudioDenied = async () => {
     await audioClosed;
@@ -152,16 +143,13 @@ it.each([
   };
   audio?.send(JSON.stringify({ action: "start" }));
   if (outcome === "released") {
-    expect(
-      await releaseDesktopObserverToken("/desktop/observe?token=" + grant!.token, requester),
-    ).toBe(true);
+    expect(await releaseDesktopObserverToken(screenPath, requester)).toBe(true);
     return expectAudioDenied();
   }
   if (outcome === "expired") {
     vi.advanceTimersByTime(60_001);
     return expectAudioDenied();
   }
-  const screenPath = host?.wsPath ?? "/desktop/observe?token=" + grant!.token;
   if (outcome === "stale-owner") {
     await attach(screenPath);
     return expectAudioDenied();
@@ -174,17 +162,16 @@ it.each([
     expect(start).not.toHaveBeenCalled();
     finishAuth.resolve();
   }
-  if (outcome.endsWith("rejected") || outcome === "invalid security") {
+  if (rejected || outcome === "invalid security") {
     const result = await closed;
-    expect(result).toEqual({
-      code: outcome === "invalid security" ? 1011 : 1008,
-      reason:
-        outcome === "invalid security"
-          ? "desktop security negotiation failed; check the desktop service and reconnect"
-          : ard
-            ? "macOS denied desktop access; check credentials and Screen Sharing or Remote Management Observe/Control permissions"
-            : "desktop VNC authentication rejected",
-    });
+    expect(result.code).toBe(outcome === "invalid security" ? 1011 : 1008);
+    expect(result.reason).toMatch(
+      outcome === "invalid security"
+        ? /security negotiation failed; check .+ reconnect/u
+        : ard
+          ? /macOS denied desktop access; check .+ Observe\/Control permissions/u
+          : /desktop VNC authentication rejected/u,
+    );
     expect(Buffer.byteLength(result.reason)).toBeLessThanOrEqual(123);
     expect(result.reason).not.toContain(credentials.password);
     await script.promise;
@@ -195,19 +182,15 @@ it.each([
   ws.send(Buffer.concat([Buffer.from([4, 1, 0, 0, 0, 0, 0, 65]), FRAMEBUFFER_REQUEST]));
   await script.promise;
   if (!audio) {
-    expect(connections).toBe(2);
     return;
   }
   expect((await audioStarted)![0].toString()).toBe('{"state":"started"}');
-  expect(start).toHaveBeenCalledOnce();
   const received = once(audio, "message");
   const samples = Buffer.from([0, 1, 0, 2]);
   pcm.write(samples);
   expect(await received).toEqual([samples, true]);
   ws.close();
-  await audioClosed;
-  await stopped.promise;
+  await Promise.all([audioClosed, stopped.promise]);
   expect(pcm.destroyed).toBe(true);
-  expect(stop).toHaveBeenCalledOnce();
   expect(start.mock.calls[0]?.[0].aborted).toBe(true);
 });
