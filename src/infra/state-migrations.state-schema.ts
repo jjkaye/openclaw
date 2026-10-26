@@ -1,6 +1,7 @@
 import { clearPluginMetadataLifecycleCaches } from "../plugins/plugin-metadata-lifecycle.js";
 import { prepareOpenClawStateDatabaseSchema } from "../state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
+import { SCHEMA_RECOVERY } from "./schema-migration-diagnostics.js";
 import type {
   LegacyStateMigrationEndpoint,
   LegacyStateMigrationMode,
@@ -12,6 +13,7 @@ export function createStateSchemaMigrationStep(params: {
   env: NodeJS.ProcessEnv;
   mode: LegacyStateMigrationMode | "doctor-preparation";
   requiredness: LegacyStateMigrationStep["requiredness"];
+  integrityCheck?: "quick" | "full";
 }): LegacyStateMigrationStep {
   const stateEnv = { ...params.env, OPENCLAW_STATE_DIR: params.stateDir };
   const database: LegacyStateMigrationEndpoint = {
@@ -26,12 +28,15 @@ export function createStateSchemaMigrationStep(params: {
     requiredness: params.requiredness,
     reversibility: "checkpoint-required",
     run: async () => {
-      const result = await prepareOpenClawStateDatabaseSchema({ env: stateEnv }, params.mode);
+      const result = await prepareOpenClawStateDatabaseSchema(
+        { env: stateEnv, integrityCheck: params.integrityCheck },
+        params.mode,
+      );
       if (result.changes.length > 0) {
         // Schema repair can expose install records hidden from pre-upgrade discovery.
         clearPluginMetadataLifecycleCaches();
       }
-      return result;
+      return result.warnings.length > 0 ? { ...result, notices: [SCHEMA_RECOVERY] } : result;
     },
   };
 }

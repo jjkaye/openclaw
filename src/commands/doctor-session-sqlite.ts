@@ -85,9 +85,11 @@ import {
   countRetainedSessionSources,
   prepareRetainedSessionImport,
   retireDeferredPluginSessionImport,
+  collectRetainedTrajectoryPointers,
 } from "./doctor-session-sqlite-retained.js";
 import { settleDuplicateSessionSqliteArchives } from "./doctor-session-sqlite-retirement.js";
 import {
+  assertDoctorSessionSqliteTargetsNotAliased,
   createMigrationTargetInput,
   filterLegacySessionStoreTargets,
   prepareDoctorSessionSqliteTargets,
@@ -212,7 +214,7 @@ export async function runDoctorSessionSqlite(
                   pending: pendingPlugins,
                 }),
               });
-        report.issues.push(...settlementIssuesForStore(target.storePath));
+        settlementIssuesForStore(target.storePath).forEach((issue) => report.issues.push(issue));
         return report;
       },
     });
@@ -261,7 +263,7 @@ export async function runDoctorSessionSqlite(
     );
   }
   for (const report of reports) {
-    report.issues.push(...settlementIssuesForStore(report.storePath));
+    settlementIssuesForStore(report.storePath).forEach((issue) => report.issues.push(issue));
   }
   if (activeRun && coverage) {
     for (const owner of archiveTargets) {
@@ -615,11 +617,11 @@ export async function settleRetainedDoctorSessionSources(
     );
     for (const [index, owner] of owners.entries()) {
       const ownIssue = owner.report.issues.find((issue) => !isRetainedSourceSettlementIssue(issue));
-      owner.report.issues.push(
-        ...plan.owners[index]!.owner.report.issues.filter(
-          (issue) => issue.code === "plugin_migration_source_retained",
-        ),
-      );
+      for (const issue of plan.owners[index]!.owner.report.issues) {
+        if (issue.code === "plugin_migration_source_retained") {
+          owner.report.issues.push(issue);
+        }
+      }
       if (failedOwners.length === 0 || failedOwners.includes(owner)) {
         owner.report.issues.push({
           code: "retained_plugin_source_settlement_failed",
@@ -655,16 +657,12 @@ export async function reconcileDoctorSessionSqlitePublication(
 ): Promise<void> {
   const env = options.env ?? process.env;
   const cfg = resolveDoctorSessionSqliteConfig(options);
-  const { targets } = resolveDoctorSessionSqliteTargets({ ...options, cfg, env });
-  assertDoctorSqliteMaintenancePathsNotAliased(
-    `session SQLite ${options.mode}`,
-    resolveDoctorSessionSqliteMaintenancePaths(targets),
-    resolveDoctorSessionSqliteMaintenanceRoots(targets, env),
-  );
+  const resolved = resolveDoctorSessionSqliteTargets({ ...options, cfg, env });
+  assertDoctorSessionSqliteTargetsNotAliased({ ...options, ...resolved, env });
   await reconcileSessionSqliteMigrationPublications({
     env,
     sourcePath,
-    trustedTargets: targets.map(createMigrationTargetInput),
+    trustedTargets: resolved.targets.map(createMigrationTargetInput),
   });
 }
 
@@ -874,9 +872,9 @@ async function inspectOrMigrateTarget(params: {
     validateLegacySessionRecords(params.target, records, report, "validate", params.env);
   }
   let validationPassed = retainedImport !== undefined;
-  if (params.mode === "import" && retainedImport) {
-    // Exact source and database identities carry the earlier verified import into archival.
-    updateManifest("passed");
+  if (params.mode === "import") {
+    // A blocked import cannot certify archival; retained imports already carry exact identities.
+    updateManifest(retainedImport ? "passed" : "failed");
   }
   if (
     params.mode === "import" &&
@@ -991,7 +989,7 @@ async function inspectOrMigrateTarget(params: {
         if (indexless) {
           report.issues.push({
             code: "retained_plugin_source_index_rebuilt",
-            message: `Derived the retained source index from verified transcripts for ${path.dirname(params.target.storePath)}. Recorded their identities in the completed import receipt without creating sessions.json or replaying canonical metadata.`,
+            message: `Derived the retained source index from verified transcripts for ${path.dirname(params.target.storePath)}. Recorded their identities in the completed import receipt without creating sessions.json or replaying existing metadata.`,
           });
         }
       }
@@ -1291,18 +1289,11 @@ async function archiveLegacyArtifacts(
         pointers.add(pointer);
       }
     }
-    // A pointer sidecar only locates its transcript's trajectory, so it settles with that
-    // transcript, including a receipt-verified one an earlier run archived without it.
-    for (const transcript of receiptSources) {
-      const pointer = resolveTrajectoryPointerPath(transcript);
-      if (
-        pointer &&
-        receiptSources.has(pointer) &&
-        !owner.sourceConflicts?.has(transcript) &&
-        !fs.existsSync(transcript)
-      ) {
-        pointers.add(pointer);
-      }
+    for (const pointer of collectRetainedTrajectoryPointers(
+      receiptSources,
+      owner.sourceConflicts,
+    )) {
+      pointers.add(pointer);
     }
     for (const pointer of pointers) {
       const source = canonicalMigrationFilePath(pointer);

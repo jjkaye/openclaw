@@ -59,11 +59,13 @@ import {
   registerNodeRegistryPrivateRuntime,
   settleNodeRegistryPairingGenerationChange,
 } from "./node-registry-private.js";
+import { NodeHostStatsCheckpoints, type PersistNodeHostStats } from "./node-registry.host-stats.js";
 import {
   NodeInvokeStreamController,
   type NodeInvokeProgressParams,
   type NodeInvokeResultParams,
   type PendingInvoke,
+  type PendingSystemRunEvent,
 } from "./node-registry.invoke-stream.js";
 import {
   updateNodePresenceActivity,
@@ -75,12 +77,15 @@ import {
 import {
   authorizedSystemRunEventExpiresAt,
   authorizedSystemRunEventKey,
-  finalizeAuthorizedSystemRunEvent,
-  type AuthorizedSystemRunEvent,
-  type AuthorizedSystemRunEventState,
 } from "./node-registry.system-run.js";
 import { isNodeWorkerHostClientId } from "./node-runner-inventory-runtime.js";
-import type { NodeSession } from "./node-session.types.js";
+import type {
+  NodeConnectivityResult,
+  NodeEventPayloadPreparation,
+  NodeEventTransport,
+  NodeSession,
+  NodeSessionConnectParams,
+} from "./node-session.types.js";
 import { normalizeNodeSkillDescriptors } from "./node-skill-descriptors.js";
 import { WEBSOCKET_OPEN_READY_STATE } from "./server-constants.js";
 import type { GatewayWsClient } from "./server/ws-types.js";
@@ -89,32 +94,15 @@ export type { NodeInvokeResult } from "./node-invoke.types.js";
 export { serializeEventPayload } from "./node-event-payload.js";
 export type { SerializedEventPayload } from "./node-event-payload.js";
 
-export type NodeEventPayloadPreparation = (connId: string) =>
-  | {
-      payloadJSON: SerializedEventPayload | null;
-      onSent?: () => void;
-    }
-  | undefined;
-
-export type { NodeSession } from "./node-session.types.js";
+export type {
+  NodeConnectivityResult,
+  NodeEventPayloadPreparation,
+  NodeEventTransport,
+  NodeSession,
+  NodeSessionConnectParams,
+} from "./node-session.types.js";
 
 type PairingBoundNodeSession = NodeSession & { pairingIdentity: string };
-export type NodeSessionConnectParams = GatewayWsClient["connect"] &
-  Partial<
-    Pick<
-      NodeSession,
-      | "declaredCaps"
-      | "declaredCommands"
-      | "declaredComputerUse"
-      | "declaredPermissions"
-      | "sessionCapsCeiling"
-      | "sessionCommandsCeiling"
-      | "coreVersion"
-      | "uiVersion"
-    >
-  > & {
-    withheldCommands?: string[];
-  };
 
 type NodeSessionPolicy = {
   approvedCaps: string[];
@@ -129,19 +117,16 @@ export function readNodeSessionWithheldCommands(node: object): readonly string[]
   return NODE_SESSION_POLICIES.get(node)?.withheldCommands ?? [];
 }
 
-export type NodeConnectivityResult =
-  | { ok: true }
-  | { ok: false; error: { code: string; message: string } };
+/** Authorized system.run event window bound to one node connection. */
+type AuthorizedSystemRunEvent = PendingSystemRunEvent & {
+  nodeId: string;
+  connId: string;
+  expiresAtMs: number | null;
+};
 
 const FAILED_EVENT_LOG_INTERVAL_MS = 30_000;
 const log = createSubsystemLogger("gateway/nodes");
 const failedEventLogAtByNode = new WeakMap<NodeSession, number>();
-/** Event transport for nodes that cannot keep a WebSocket open, such as watchOS. */
-export type NodeEventTransport = {
-  send: (event: string, payload: unknown) => boolean;
-  sendRaw: (event: string, payloadJSON?: SerializedEventPayload | null) => boolean;
-  checkConnectivity?: (timeoutMs: number) => Promise<NodeConnectivityResult>;
-};
 
 type NodeSessionRegistrationOptions = {
   remoteIp?: string | undefined;
@@ -165,6 +150,7 @@ export type NodeRegistryOptions = {
   }) => void;
   onPairingInvalidated?: (params: { nodeId: string; connId: string }) => void;
   onDesktopAvailabilityChanged?: (nodeId: string) => void;
+  persistHostStats?: PersistNodeHostStats;
 };
 
 export class NodeRegistry {
@@ -236,8 +222,10 @@ export class NodeRegistry {
   private authorizedSystemRunEvents = new Map<string, AuthorizedSystemRunEvent>();
   private pairingGenerationEventChains = new Map<string, Promise<void>>();
   private committedConfig: OpenClawConfig | undefined;
+  private hostStatsCheckpoints: NodeHostStatsCheckpoints;
 
   constructor(private readonly options: NodeRegistryOptions = {}) {
+    this.hostStatsCheckpoints = new NodeHostStatsCheckpoints(options);
     this.committedConfig = options.getConfig?.();
     registerNodeRegistryPrivateRuntime(this, {
       getNode: (nodeId) => this.nodesById.get(nodeId),
@@ -270,6 +258,7 @@ export class NodeRegistry {
       },
       rememberAuthorizedSystemRunEvent: (event) => this.rememberAuthorizedSystemRunEvent(event),
       publishActiveNodeContext: () => this.publishActiveNodeContext(),
+      closeHostStats: () => this.hostStatsCheckpoints.close(),
     });
   }
 
@@ -392,8 +381,6 @@ export class NodeRegistry {
     replaceConnectedNodePluginTools({
       nodeId: node.nodeId,
       displayName: node.displayName,
-      platform: node.platform,
-      remoteIp: node.remoteIp,
       tools: normalized,
     });
     node.nodeSkills = cfg?.gateway?.nodes?.allowSkills === false ? [] : policy.skills;
@@ -554,6 +541,7 @@ export class NodeRegistry {
     }
     this.refreshSessionPolicy(session);
     if (previousSession) {
+      this.hostStatsCheckpoints.forget(previousSession);
       this.clearDesktopAvailability(previousSession);
     }
     if (replacesPresence) {
@@ -575,6 +563,7 @@ export class NodeRegistry {
     const node = this.nodesById.get(nodeId);
     const unregistersCurrentNode = node?.connId === connId;
     if (unregistersCurrentNode) {
+      this.hostStatsCheckpoints.forget(node);
       invalidateNodeCatalog(this);
       const hadPresence = node.lastActiveAtMs !== undefined;
       this.nodesById.delete(nodeId);
@@ -673,6 +662,7 @@ export class NodeRegistry {
       return false;
     }
     node.client.invalidated = true;
+    this.hostStatsCheckpoints.forget(node);
     invalidateNodeCatalog(this);
     node.client.invalidatedReason ??= reason;
     this.clearDesktopAvailability(node);
@@ -786,6 +776,7 @@ export class NodeRegistry {
     // Resource snapshots are operator-facing; publishing active-node context would churn prompts.
     node.hostStats = { ...params.stats, updatedAtMs: params.observedAtMs ?? Date.now() };
     invalidateNodeCatalog(this);
+    this.hostStatsCheckpoints.record(node);
     return node.hostStats;
   }
 
@@ -995,8 +986,6 @@ export class NodeRegistry {
         sessionCapsCeiling.has(capability),
       );
     }
-    this.refreshSessionPolicy(node);
-
     if ("permissions" in surface) {
       node.permissions =
         surface.permissions === undefined
@@ -1014,9 +1003,16 @@ export class NodeRegistry {
       }
     }
 
+    const previousPairingGeneration = node.pairingGeneration;
     if (generationTransition) {
-      const previousPairingGeneration = node.pairingGeneration;
+      // Policy refresh can synchronously notify readers of this committed surface.
+      this.hostStatsCheckpoints.forget(node);
+      node.hostStats = undefined;
       node.pairingGeneration = generationTransition.nextPairingGeneration;
+    }
+    this.refreshSessionPolicy(node);
+
+    if (generationTransition) {
       // Runner declarations are pairing-generation facts. Retire the old
       // declaration so the live process must publish for its promoted generation.
       settleNodeRegistryPairingGenerationChange({
@@ -1094,7 +1090,11 @@ export class NodeRegistry {
     runId?: string;
     sessionKey: string;
     terminal: boolean;
-  }): AuthorizedSystemRunEventState | null {
+  }):
+    | (Pick<PendingSystemRunEvent, "invocationDeliveryContext"> & {
+        holdNotice?: (notify: () => void) => void;
+      })
+    | null {
     if (!params.connId || !params.sessionKey) {
       return null;
     }
@@ -1118,14 +1118,35 @@ export class NodeRegistry {
     if (match === null) {
       return null;
     }
-    return finalizeAuthorizedSystemRunEvent({
-      event: this.authorizedSystemRunEvents.get(match),
-      terminal: params.terminal,
-      consume: () => this.authorizedSystemRunEvents.delete(match),
-      pendingInvokes: this.pendingInvokes.values(),
-      nodeId: params.nodeId,
-      connId,
-    });
+    const event = this.authorizedSystemRunEvents.get(match);
+    const source = event?.invocationDeliveryContext;
+    let waiting: PendingInvoke | undefined;
+    if (params.terminal) {
+      this.authorizedSystemRunEvents.delete(match);
+      // The node reports completion before its result; a still-waiting caller receives that output.
+      waiting = [...this.pendingInvokes.values()].find(
+        (pending) =>
+          pending.nodeId === params.nodeId &&
+          pending.connId === connId &&
+          pending.systemRunEvent?.runId === event?.runId,
+      );
+    }
+    return {
+      ...(source ? { invocationDeliveryContext: { ...source } } : {}),
+      ...(waiting
+        ? {
+            holdNotice: (notify: () => void) => {
+              const resolve = waiting.resolve;
+              waiting.resolve = (value) => {
+                resolve(value);
+                if (!value.ok) {
+                  notify();
+                }
+              };
+            },
+          }
+        : {}),
+    };
   }
 
   private rememberAuthorizedSystemRunEvent(
@@ -1305,7 +1326,9 @@ export class NodeRegistry {
     if (eventTransport) {
       return eventTransport.send(event, payload);
     }
-    return sendNodeWebSocketEvent(node.client.socket, () => serializeNodeEvent(event, payload));
+    return sendNodeWebSocketEvent(node.client.socket, event, () =>
+      serializeNodeEvent(event, payload),
+    );
   }
 
   private sendEventRawInternal(
@@ -1330,7 +1353,7 @@ export class NodeRegistry {
     if (eventTransport) {
       return eventTransport.sendRaw(event, payloadJSON);
     }
-    return sendNodeWebSocketEvent(node.client.socket, () => {
+    return sendNodeWebSocketEvent(node.client.socket, event, () => {
       const payloadFragment = payloadJSON ? `,"payload":${payloadJSON.json}` : "";
       return `{"type":"event","event":${JSON.stringify(event)}${payloadFragment}}`;
     });

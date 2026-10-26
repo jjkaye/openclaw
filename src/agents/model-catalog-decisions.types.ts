@@ -7,7 +7,6 @@ import type { RuntimeAuthMaterialization } from "./auth-profiles/runtime-materia
 import type { AuthProfileStore } from "./auth-profiles/types.js";
 import type { ModelCatalogSnapshot } from "./model-catalog.types.js";
 import type { createOpenAIModelRoutesResolver } from "./openai-model-routes.js";
-import type { PreparedAccountCatalogAccess } from "./prepared-model-runtime-auth.js";
 
 export type ModelCatalogDecisionParams = {
   cfg: OpenClawConfig;
@@ -27,7 +26,7 @@ export type ModelCatalogDecisionParams = {
   pinnedProfileId?: string;
   profileProvider?: string;
   runtimeOverride?: string;
-  accountCatalog?: PreparedAccountCatalogAccess;
+  accountCatalog?: import("./prepared-model-runtime-auth.js").PreparedAccountCatalogAccess;
   routeResolverFactory?: typeof createOpenAIModelRoutesResolver;
   isCurrent?: () => boolean;
   preparedPersonalCatalog?: PersonalCatalogProfiles & { isCurrent: () => boolean };

@@ -1,17 +1,19 @@
 import { realpathSync } from "node:fs";
 import nodePath from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { listAgentIds } from "../agents/agent-scope-config.js";
-import { resolveStateDir } from "../config/paths.js";
+import { listGatewayOwnedAgentIds } from "../agents/agent-roster.js";
 import {
-  isConfiguredAgentDatabaseTarget,
+  listConfiguredSessionStoreAgentIds,
   resolveConfiguredAgentDatabaseCandidatePaths,
 } from "../config/sessions/targets.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { getDatabaseEngineInput } from "../infra/database-engine/context.js";
 import { formatErrorMessage } from "../infra/errors.js";
-import { openNodeSqliteDatabase } from "../infra/node-sqlite.js";
-import { adoptSqliteSchemaContracts } from "../infra/sqlite-schema-contract.js";
+import { openNodeSqliteDatabase, resolveImmutableSqliteFileUri } from "../infra/node-sqlite.js";
+import { readSqliteDatabaseCleanClose } from "../infra/sqlite-database-admission.js";
+import { deferSqliteSnapshotCleanupAfterRead } from "../infra/sqlite-readonly-location-cleanup.js";
 import { prepareSqliteReadOnlyLocation } from "../infra/sqlite-snapshot-source.js";
+import { runSqliteDeferredTransactionSync } from "../infra/sqlite-transaction.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import {
   AgentDatabaseAdmissionError,
@@ -40,6 +42,7 @@ import {
   collectAgentDatabasePreflightTargets,
   inspectDatabaseCandidatePresence,
   recordAgentDatabaseRecoveryInspection,
+  selectAgentDatabaseInspectionTargets,
 } from "./openclaw-database-preflight-targets.js";
 import {
   formatIndeterminateDatabaseReadiness,
@@ -52,18 +55,18 @@ import type {
   OpenClawDatabaseSchemaPreflight,
   OpenClawDatabasePreflightOptions,
 } from "./openclaw-database-preflight.types.js";
-import { requestOpenClawAgentDatabaseIntegrityCheck } from "./openclaw-database-verify.js";
 import {
   OPENCLAW_SQLITE_BUSY_TIMEOUT_MS,
   OPENCLAW_STATE_SCHEMA_VERSION,
 } from "./openclaw-state-db-contract.js";
-import { getActiveOpenClawStateDatabaseReadSnapshot } from "./openclaw-state-db-readonly.js";
-import { normalizeOpenClawStateSchemaReadError } from "./openclaw-state-db-schema-migration-required.js";
+import {
+  executeExistingOpenClawStateRead,
+  getActiveOpenClawStateDatabaseReadSnapshot,
+} from "./openclaw-state-db-readonly.js";
+import * as schemaRead from "./openclaw-state-db-schema-migration-required.js";
 import { resolveOpenClawStateSqlitePath } from "./openclaw-state-db.paths.js";
 import {
-  captureStateSchemaInspectionContracts,
   inspectStateDatabaseSchema,
-  type StateSchemaInspection,
   type StateSchemaInspectionInput,
 } from "./openclaw-state-schema-preflight.js";
 
@@ -89,6 +92,7 @@ export async function assertOpenClawDatabasesReady(
   options: {
     env: NodeJS.ProcessEnv;
     onAgentInspection?: (stats: AgentDatabasePreflightStats) => void;
+    onRegisteredAgentDatabases?: OpenClawDatabasePreflightOptions["onRegisteredAgentDatabases"];
   } & (
     | {
         operation: "doctor";
@@ -105,6 +109,7 @@ export async function assertOpenClawDatabasesReady(
     {
       env: options.env,
       onAgentInspection: options.onAgentInspection,
+      onRegisteredAgentDatabases: options.onRegisteredAgentDatabases,
       verifyCurrentSchemaShape: true,
       ...(options.config
         ? {
@@ -214,7 +219,14 @@ export async function preflightOpenClawDatabaseSchemas(
     ? getAgentDatabaseStartupAdmission()
     : undefined;
   const admissionConfig = options.agentAdmissionConfig;
-  const admittedAgentIds = new Set(admissionConfig ? listAgentIds(admissionConfig) : []);
+  const admittedAgentIds = new Set(
+    admissionConfig
+      ? [
+          ...listConfiguredSessionStoreAgentIds(admissionConfig),
+          ...listGatewayOwnedAgentIds(admissionConfig),
+        ]
+      : [],
+  );
   const scheduling = startup?.scheduling(
     options.env,
     admissionConfig
@@ -223,13 +235,38 @@ export async function preflightOpenClawDatabaseSchemas(
       : [],
     admittedAgentIds,
   );
+  let prestartedReader: ReturnType<typeof createAgentSchemaInspectionWorker> | undefined;
+  await using readerCustody = {
+    take(this: void) {
+      const reader = prestartedReader;
+      prestartedReader = undefined;
+      return reader;
+    },
+    async [Symbol.asyncDispose]() {
+      await prestartedReader?.[Symbol.asyncDispose]();
+    },
+  };
+  if (
+    options.requireStartupMigrationReadiness &&
+    options.scope !== "state" &&
+    getDatabaseEngineInput("agent")
+  ) {
+    prestartedReader = createAgentSchemaInspectionWorker();
+    prestartedReader.prestart(
+      scheduling && options.signal
+        ? AbortSignal.any([scheduling.signal, options.signal])
+        : (scheduling?.signal ?? options.signal),
+    );
+  }
   const prepareSchemaHeader = startup?.prepareSchemaHeaders(options.env);
   const preparedStartup =
     options.reuseStartupSchemaPreparation &&
     !options.requireStartupMigrationReadiness &&
-    !options.verifyCurrentSchemaShape
+    !options.verifyCurrentSchemaShape &&
+    !options.openStateSchemaReadAdmission
       ? getAgentDatabaseStartupAdmission()
       : undefined;
+  const assertPreparedStateSchema = preparedStartup?.takePreparedStateSchema(options.env);
   const readPreparedSchemaHeader = preparedStartup?.takePreparedSchemaHeaders(options.env);
   const refusalOwner = startup ?? preparedStartup;
   const priorRefusals = refusalOwner?.captureRefusals(options.env);
@@ -251,63 +288,119 @@ export async function preflightOpenClawDatabaseSchemas(
   }
   try {
     if (statePresence.status === "present") {
-      // Admission must inspect the same private generation as config recovery and discovery.
-      // Without an enclosing snapshot, the copy worker still owns native source opens.
-      let stateLocation = getActiveOpenClawStateDatabaseReadSnapshot({
-        env: options.env,
-      })?.location;
-      if (stateLocation === undefined) {
-        stateSnapshot = await prepareSqliteReadOnlyLocation(realpathSync.native(statePath), {
-          preserveSourceArtifacts: options.preserveSourceArtifacts ?? true,
-          allowLiveOwner: options.preserveSourceArtifacts !== false,
-          signal: options.signal,
-        });
-        stateLocation = stateSnapshot.location;
-      }
-      options.signal?.throwIfAborted();
-      const input: StateSchemaInspectionInput = {
-        pathname: statePath,
-        supportedVersion: supportedVersions.state,
-        requireStartupMigrationReadiness: options.requireStartupMigrationReadiness,
-        verifyCurrentSchemaShape: options.verifyCurrentSchemaShape,
-        scope: options.scope,
-        purpose,
-      };
-      let inspection: StateSchemaInspection;
-      if (
-        purpose === "runtime" &&
-        !options.requireStartupMigrationReadiness &&
-        !options.openStateSchemaReadAdmission
-      ) {
-        await using reader = createAgentSchemaInspectionWorker();
-        inspection = await reader.inspectState(
-          { ...input, schemaContracts: captureStateSchemaInspectionContracts() },
-          options.signal,
-          stateLocation,
+      if (getDatabaseEngineInput("state")) {
+        const read = await executeExistingOpenClawStateRead(
+          { env: options.env },
+          {
+            type: "stateBootstrap.inspect",
+            input: {
+              pathname: statePath,
+              supportedVersion: supportedVersions.state,
+              purpose,
+              scope: options.scope,
+            },
+          },
+          { signal: options.signal, current: true },
         );
-        adoptSqliteSchemaContracts(inspection.schemaContracts ?? []);
+        if (!read) {
+          throw new Error("Shared state disappeared during PostgreSQL startup admission");
+        }
+        Object.assign(result, read.inspection.schemas);
+        registeredDatabases = read.inspection.registeredDatabases ?? [];
+        deletionJournal = read.inspection.deletionJournal ?? deletionJournal;
       } else {
-        // Boot admission exposes this native handle to its enclosing migration owner.
-        stateDatabase = openNodeSqliteDatabase(stateLocation, { readOnly: true });
-        closeStateSchemaReadAdmission = options.openStateSchemaReadAdmission?.(stateDatabase);
-        stateDatabase.exec(`PRAGMA busy_timeout = ${OPENCLAW_SQLITE_BUSY_TIMEOUT_MS};`);
-        inspection = inspectStateDatabaseSchema(stateDatabase, input);
+        // Admission must inspect the same private generation as config recovery and discovery.
+        // Without an enclosing snapshot, the copy worker still owns native source opens.
+        const activeSnapshot = getActiveOpenClawStateDatabaseReadSnapshot({
+          env: options.env,
+        });
+        const assertStateSource = activeSnapshot ? undefined : assertPreparedStateSchema;
+        const cleanClose = purpose === "runtime" && readSqliteDatabaseCleanClose(statePath);
+        let stateLocation =
+          activeSnapshot?.location ?? (cleanClose || assertStateSource ? statePath : undefined);
+        options.signal?.throwIfAborted();
+        const input: StateSchemaInspectionInput = {
+          pathname: statePath,
+          supportedVersion: supportedVersions.state,
+          requireStartupMigrationReadiness: options.requireStartupMigrationReadiness,
+          verifyCurrentSchemaShape: options.verifyCurrentSchemaShape,
+          scope: options.scope,
+          purpose,
+        };
+        const inspectSource =
+          stateLocation === undefined && options.preserveSourceArtifacts === false;
+        await using reader =
+          !assertStateSource &&
+          (purpose === "runtime" || inspectSource) &&
+          !options.requireStartupMigrationReadiness &&
+          !options.openStateSchemaReadAdmission
+            ? createAgentSchemaInspectionWorker()
+            : undefined;
+        // Online inspection needs one native read transaction, not a payload-sized copy.
+        // Keep it in the child: closing a source here could release this process's writer locks.
+        let inspection =
+          reader && inspectSource ? await reader.inspectState(input, options.signal) : null;
+        if (!inspection) {
+          if (stateLocation === undefined) {
+            stateSnapshot = await prepareSqliteReadOnlyLocation(realpathSync.native(statePath), {
+              preserveSourceArtifacts: options.preserveSourceArtifacts ?? true,
+              allowLiveOwner: options.preserveSourceArtifacts !== false,
+              signal: options.signal,
+              // Any failed removal refuses admission; keep its cause for the Bun EBUSY deferral.
+              requireCleanup: true,
+            });
+            stateLocation = stateSnapshot.location;
+          }
+          options.signal?.throwIfAborted();
+          if (reader) {
+            inspection = await reader.inspectState(input, options.signal, stateLocation);
+          } else {
+            // Boot admission exposes this native handle to its enclosing migration owner.
+            stateDatabase = openNodeSqliteDatabase(
+              cleanClose ? resolveImmutableSqliteFileUri(stateLocation) : stateLocation,
+              { readOnly: true, timeout: OPENCLAW_SQLITE_BUSY_TIMEOUT_MS },
+            );
+            closeStateSchemaReadAdmission = options.openStateSchemaReadAdmission?.(stateDatabase);
+            const admittedDatabase = stateDatabase;
+            assertStateSource?.();
+            inspection = assertStateSource
+              ? runSqliteDeferredTransactionSync(
+                  admittedDatabase,
+                  () => inspectStateDatabaseSchema(admittedDatabase, input),
+                  { operationLabel: "state.startup-prepared-schema" },
+                )
+              : inspectStateDatabaseSchema(stateDatabase, input);
+            assertStateSource?.();
+          }
+        }
+        if (!inspection) {
+          throw new Error("Missing state schema inspection result");
+        }
+        Object.assign(result, inspection.schemas);
+        stateInspectionErrors.push(...inspection.inspectionErrors);
+        if (
+          startup &&
+          inspection.inspectionErrors.length === 0 &&
+          inspection.schemas.incompatible.length === 0 &&
+          inspection.schemas.indeterminate.length === 0 &&
+          !inspection.schemas.pendingMigrations?.length
+        ) {
+          startup.recordStateSchemaPreparation(options.env);
+        }
+        if (options.scope === "state" || !inspection.deletionJournal) {
+          return result;
+        }
+        registeredDatabases = inspection.registeredDatabases ?? [];
+        deletionJournal = inspection.deletionJournal;
       }
-      Object.assign(result, inspection.schemas);
-      stateInspectionErrors.push(...inspection.inspectionErrors);
-      if (options.scope === "state" || !inspection.deletionJournal) {
-        return result;
-      }
-      registeredDatabases = inspection.registeredDatabases ?? [];
-      deletionJournal = inspection.deletionJournal;
     }
   } catch (error) {
     // Accepted stop must not turn cancellation or failed cleanup into a
     // warn-and-continue result that launches the remaining startup runtime.
-    const failure = normalizeOpenClawStateSchemaReadError(error, statePath);
+    const failure = schemaRead.normalizeOpenClawStateSchemaReadError(error, statePath);
     stateInspectionErrors.push(failure);
     if (options.signal?.aborted || options.requireStartupMigrationReadiness) {
-      throw failure;
+      throw schemaRead.annotateStartupStateInspectionFailure(failure, statePath, options.signal);
     }
     const row: IndeterminateOpenClawDatabase = {
       kind: "state",
@@ -334,9 +427,6 @@ export async function preflightOpenClawDatabaseSchemas(
       registeredDatabases,
       deletionJournal,
       purpose,
-      inspectCandidateOwners: Boolean(
-        options.requireStartupMigrationReadiness || options.agentAdmissionConfig,
-      ),
     });
   const recordRecoveryFailure = (pathname: string, reason: string) => {
     preparedDiscovery?.discovery.failures.push({ path: pathname, reason });
@@ -344,19 +434,11 @@ export async function preflightOpenClawDatabaseSchemas(
   for (const failure of failures) {
     result.indeterminate.push({ kind: "agent", ...failure });
   }
-  const admissionTargets =
-    admissionConfig &&
-    (purpose === "runtime" ||
-      options.requireStartupMigrationReadiness ||
-      options.reuseStartupSchemaPreparation)
-      ? [
-          ...configuredTargets,
-          ...(
-            options.configuredAgentDatabaseCandidatePaths ??
-            resolveConfiguredAgentDatabaseCandidatePaths(admissionConfig, { env: options.env })
-          ).map((pathname) => ({ path: pathname })),
-        ]
-      : undefined;
+  const { admissionTargets, inspectionTargets } = selectAgentDatabaseInspectionTargets(
+    { ...options, purpose },
+    candidates,
+    configuredTargets,
+  );
   const recordInspectionFailure = (
     row: { agentId?: string; path: string },
     inspection: OpenClawDatabaseSchemaPreflight,
@@ -384,26 +466,7 @@ export async function preflightOpenClawDatabaseSchemas(
     );
     return true;
   };
-  const skipped = new Set<string>();
   let recoveryHolds: ReturnType<typeof readAgentDeletionRecoveryHoldsInWorker> | undefined;
-  const inspectionTargets = candidates
-    .filter((row) => {
-      if (
-        !admissionTargets ||
-        isConfiguredAgentDatabaseTarget(admissionTargets, row.agentId, row.path)
-      ) {
-        return true;
-      }
-      if (options.requireStartupMigrationReadiness && !skipped.has(row.path)) {
-        createSubsystemLogger("state/agent-admission").warn(
-          `Skipped ${nodePath.basename(row.path)}: database is not a configured target; run openclaw doctor to inspect retained data.`,
-        );
-        skipped.add(row.path);
-      }
-      return false;
-    })
-    .map((row) => Object.assign({}, row, { presence: inspectDatabaseCandidatePresence(row.path) }))
-    .filter((row) => row.presence.status !== "absent");
   const stats = await preflightAgentDatabasesBounded(
     inspectionTargets,
     async (row, inspection, claimAgentTarget, inspectSchema) => {
@@ -427,6 +490,7 @@ export async function preflightOpenClawDatabaseSchemas(
         return undefined;
       }
       let agentSnapshot: Awaited<ReturnType<typeof prepareSqliteReadOnlyLocation>> | undefined;
+      let readSucceeded = false;
       try {
         // Preserve SQLite's filesystem traversal through symlink/.. locators.
         const realAgentPath = realpathSync.native(agentPath);
@@ -445,6 +509,7 @@ export async function preflightOpenClawDatabaseSchemas(
         const schemaInput = {
           pathname: realAgentPath,
           agentId: row.agentId,
+          env: options.env,
           supportedVersion: supportedVersions.agent,
           inspectOwnership,
           verifyCurrentSchemaShape: row.holdForDeletionRecovery
@@ -457,13 +522,15 @@ export async function preflightOpenClawDatabaseSchemas(
             purpose === "runtime" &&
             options.preserveSourceArtifacts !== true &&
             scheduling?.canDefer(row),
-          startupIntegrityStateDir: options.requireStartupMigrationReadiness
-            ? resolveStateDir(options.env)
-            : undefined,
         };
         // Native read-only opens can change source SHM read marks. Explicit
         // artifact preservation must use the WAL-aware private snapshot below.
-        if (!schemaInspection && options.preserveSourceArtifacts !== true) {
+        if (
+          !schemaInspection &&
+          (getDatabaseEngineInput("agent") ||
+            options.preserveSourceArtifacts !== true ||
+            (purpose === "runtime" && readSqliteDatabaseCleanClose(realAgentPath)))
+        ) {
           schemaInspection = await inspectSchema(schemaInput, options.signal);
         }
         if (!schemaInspection) {
@@ -472,6 +539,7 @@ export async function preflightOpenClawDatabaseSchemas(
             preserveSourceArtifacts: options.preserveSourceArtifacts ?? true,
             allowLiveOwner: options.preserveSourceArtifacts !== false,
             signal: options.signal,
+            requireCleanup: true,
           });
           options.signal?.throwIfAborted();
           schemaInspection = await inspectSchema(
@@ -483,6 +551,7 @@ export async function preflightOpenClawDatabaseSchemas(
         if (!schemaInspection) {
           throw new Error(`Agent database inspection returned no result: ${agentPath}`);
         }
+        readSucceeded = !schemaInspection.failure && !schemaInspection.reason;
         const { version: agentVersion, writerAppVersion, agentSchemaMeta } = schemaInspection;
         if (row.holdForDeletionRecovery) {
           recordAgentDatabaseRecoveryInspection(
@@ -586,13 +655,6 @@ export async function preflightOpenClawDatabaseSchemas(
             inspection.incompatible.push(incompatible);
           }
         }
-        if (schemaInspection.integrityGateOutcome === "cached") {
-          requestOpenClawAgentDatabaseIntegrityCheck({
-            check: "quick",
-            path: agentPath,
-            env: options.env ?? process.env,
-          });
-        }
         recordPreparedSchemaHeader?.(schemaInspection);
         return schemaInspection.preparationPending ? "defer" : undefined;
       } catch (error) {
@@ -628,7 +690,12 @@ export async function preflightOpenClawDatabaseSchemas(
               };
             }
           } catch (error) {
-            failure = { error };
+            if (
+              !readSucceeded ||
+              !deferSqliteSnapshotCleanupAfterRead(error, agentSnapshot.cleanupRoot)
+            ) {
+              failure = { error };
+            }
           }
           if (failure && !recordInspectionFailure(row, inspection, failure.error)) {
             if (row.holdForDeletionRecovery) {
@@ -648,10 +715,13 @@ export async function preflightOpenClawDatabaseSchemas(
     result,
     options.signal,
     scheduling,
+    readerCustody.take,
   );
   if (preparedDiscovery) {
     options.onAgentDatabaseDiscovery?.(preparedDiscovery);
   }
+  stats.schemaProcessCount += prestartedReader?.processCount ?? 0;
   options.onAgentInspection?.(stats);
+  options.onRegisteredAgentDatabases?.(registeredDatabases);
   return result;
 }

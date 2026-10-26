@@ -20,7 +20,7 @@
     }
   },
   "dependencies": {
-    "zod": "4.6.5"
+    "zod": "4.6.7"
   },
   "openclaw": {
     "extensions": [
@@ -43,6 +43,10 @@
         "./src/run.worker.ts"
       ],
       "staticAssets": [
+        {
+          "source": "./src/team-reports-schema.postgres.sql",
+          "output": "./src/team-reports-schema.postgres.sql"
+        },
         {
           "source": "./assets/crab.avif",
           "output": "assets/crab.avif"

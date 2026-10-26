@@ -11,19 +11,12 @@ import {
 import { truncateUtf8Prefix } from "openclaw/plugin-sdk/text-utility-runtime";
 import YAML from "yaml";
 import { extractWikiLinks, maskMarkdownCode } from "./markdown-links.js";
+import { WIKI_PAGE_GROUPS, type WikiPageKind } from "./wiki-page-kinds.js";
 
 export { WIKI_RELATED_END_MARKER, WIKI_RELATED_START_MARKER } from "./markdown-links.js";
 
-export const WIKI_PAGE_GROUPS = [
-  { kind: "source", dir: "sources", heading: "Sources" },
-  { kind: "entity", dir: "entities", heading: "Entities" },
-  { kind: "concept", dir: "concepts", heading: "Concepts" },
-  { kind: "synthesis", dir: "syntheses", heading: "Syntheses" },
-  { kind: "report", dir: "reports", heading: "Reports" },
-] as const;
 export const WIKI_RAW_SOURCE_MARKER = "<!-- openclaw:wiki:raw-source -->";
 
-export type WikiPageKind = (typeof WIKI_PAGE_GROUPS)[number]["kind"];
 type GeneratedSourceBody = "bridge" | "unsafe-local" | "local-file" | "chatgpt-export";
 
 export type ParsedWikiMarkdown = {
@@ -32,7 +25,6 @@ export type ParsedWikiMarkdown = {
   body: string;
 };
 
-export type WikiClaimEvidence = NonNullable<ReturnType<typeof normalizeWikiClaimEvidence>>;
 export type WikiClaim = ReturnType<typeof normalizeWikiClaims>[number];
 type WikiPersonCard = ReturnType<typeof normalizeWikiPersonCard>;
 export type WikiRelationship = ReturnType<typeof normalizeWikiRelationships>[number];
@@ -112,7 +104,6 @@ function capWikiValueWithHash(raw: string, maxBytes: number, fallback: string): 
 export function slugifyWikiSegment(raw: string): string {
   const slug = normalizeLowercaseStringOrEmpty(raw)
     .replace(/[^\p{L}\p{N}\p{M}]+/gu, "-")
-    .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "");
   if (!slug) {
     return "page";
@@ -351,8 +342,11 @@ function findNotesHumanBlock(
   return { start: bodyOffset + start, end: bodyOffset + endMarker + HUMAN_END_MARKER.length };
 }
 
-export function extractHumanNotesBlock(page: string): string | null {
-  const block = findNotesHumanBlock(page);
+export function extractHumanNotesBlock(
+  page: string,
+  options?: { producerMarkdown?: boolean },
+): string | null {
+  const block = findNotesHumanBlock(page, options?.producerMarkdown);
   if (!block) {
     return null;
   }

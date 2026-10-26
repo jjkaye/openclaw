@@ -1,13 +1,9 @@
 // Sends HMAC-protected exec host requests over the local socket.
 import crypto from "node:crypto";
 import { addTimerTimeoutGraceMs } from "@openclaw/normalization-core/number-coercion";
+import type { NodePermissionDetails } from "../../packages/gateway-protocol/src/node-permissions.js";
 import type { ExecApprovalPolicySnapshot } from "./exec-approvals.js";
 import { requestJsonlSocket } from "./jsonl-socket.js";
-
-export type NodePermissionDetails = {
-  capabilities: string[];
-  state: "not-determined" | "denied" | "restart-required" | "stale-grant" | "disabled-in-openclaw";
-};
 
 // Allow the companion's 15 s approval prompt before execution, then 5 s for its reply.
 const EXEC_HOST_RESPONSE_GRACE_MS = 20_000;

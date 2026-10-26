@@ -8,11 +8,15 @@
   },
   "type": "module",
   "dependencies": {
+    "@solidjs/web": "2.0.0-rc.18",
     "nostr-tools": "2.25.2",
-    "zod": "4.6.5"
+    "solid-js": "2.0.0-rc.18",
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@openclaw/plugin-sdk": "workspace:*",
+    "@solidjs/compiler": "2.0.0-rc.18",
+    "esbuild": "0.28.2",
     "openclaw": "workspace:*"
   },
   "peerDependencies": {
@@ -92,6 +96,14 @@
     "release": {
       "publishToClawHub": true,
       "publishToNpm": true
+    },
+    "controlUi": "./browser/index.tsx",
+    "assetScripts": {
+      "build": "cd ../.. && node --import ./scripts/tsx.mjs scripts/build-plugin-control-ui.mts extensions/nostr",
+      "copy": "cd ../.. && node --import ./scripts/tsx.mjs scripts/build-plugin-control-ui.mts extensions/nostr --copy",
+      "buildOutputs": [
+        "dist/openclaw.plugin.json"
+      ]
     }
   }
 }

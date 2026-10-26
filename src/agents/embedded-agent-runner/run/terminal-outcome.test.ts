@@ -346,31 +346,22 @@ describe("embedded run attempt terminal outcome", () => {
     expect(nullFailure).not.toHaveProperty("error");
   });
 
-  it("keeps compaction timeouts ahead of their mechanical abort flag", () => {
-    expect(
-      resolveEmbeddedRunAttemptTerminalOutcome({
-        attempt: makeAttempt({
-          terminal: { kind: "timeout", phase: "compaction", source: "runtime" },
+  it.each(["compaction", "tool_execution"] as const)(
+    "keeps %s timeouts ahead of their mechanical abort flag",
+    (phase) => {
+      expect(
+        resolveEmbeddedRunAttemptTerminalOutcome({
+          attempt: makeAttempt({
+            terminal: { kind: "timeout", phase, source: "runtime" },
+          }),
+          assistant: undefined,
         }),
-        assistant: undefined,
-      }),
-    ).toMatchObject({ reason: "timed_out", status: "timeout" });
-  });
-
-  it("preserves tool execution as a hard timeout checkpoint", () => {
-    expect(
-      resolveEmbeddedRunAttemptTerminalOutcome({
-        attempt: makeAttempt({
-          terminal: { kind: "timeout", phase: "tool_execution", source: "runtime" },
-        }),
-        assistant: undefined,
-      }),
-    ).toMatchObject({
-      reason: "hard_timeout",
-      status: "timeout",
-      timeoutPhase: "tool_execution",
-    });
-  });
+      ).toMatchObject({
+        reason: "timed_out",
+        status: "timeout",
+      });
+    },
+  );
 
   it("keeps a recovered compaction timeout observation non-terminal", () => {
     expect(

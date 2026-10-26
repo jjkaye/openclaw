@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { requireNativeDatabaseFile } from "../infra/database-engine/physical-facts.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
+import { isPostgresSqlConnection } from "../infra/sql-connection.js";
 import { recordLegacyMigrationReceipt } from "../infra/state-migrations.receipts.js";
 import { normalizeAgentId } from "../routing/session-key.js";
 import { isReservedSystemAgentId } from "../system-agent/agent-id.js";
@@ -49,11 +51,15 @@ export function reconstructAgentDeletionJournal(
   held: readonly HeldAgentDatabase[],
   now = Date.now(),
 ): HeldAgentDatabase[] {
+  const db = database.db;
+  if (isPostgresSqlConnection(db)) {
+    requireNativeDatabaseFile("postgres", "repair");
+  }
   if (!database.db.isTransaction) {
     throw new Error("Agent deletion journal reconstruction requires a shared-state transaction.");
   }
   const previous = readReport(database);
-  if (!reconstructAgentDeletionJournalSchema(database.db, database.path)) {
+  if (!reconstructAgentDeletionJournalSchema(db, database.path)) {
     return decodeHolds(database, previous?.held ?? []);
   }
   // Losing the table later cannot upgrade an existing quarantine hold's provenance.

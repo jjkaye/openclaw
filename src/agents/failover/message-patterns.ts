@@ -63,7 +63,7 @@ export function isPreDispatchToolCallRejectionMessage(errorMessage?: string): bo
   return errorMessage !== undefined && PRE_DISPATCH_TOOL_CALL_REJECTION_MESSAGES.has(errorMessage);
 }
 const PERIODIC_USAGE_LIMIT_RE =
-  /\b(?:daily|weekly|monthly)(?:\/(?:daily|weekly|monthly))* (?:usage )?limit(?:s)?(?: (?:exhausted|reached|exceeded))?\b/i;
+  /\b(?:daily|weekly|monthly)(?:\/(?:daily|weekly|monthly))* (?:usage )?limit(?:s)?(?: (?:exhausted|reached|exceeded))?\b|已达到 Token Plan 用量上限|已达到每[日周月天](?:\/每[日周月天])*使用上限|(?:配额|额度)已用尽/i;
 
 const HIGH_CONFIDENCE_AUTH_PERMANENT_PATTERNS = [
   /api[_ ]?key[_ ]?(?:revoked|deactivated|deleted)/i,
@@ -230,6 +230,8 @@ const ERROR_PATTERNS = {
   ],
   billing: [
     BILLING_ERROR_HARD_402_RE,
+    // Already rendered billing copy re-enters classification; "usage limits" in it must not read as rate_limit.
+    /\breturned a billing error\b/i,
     /\b(?:got|returned|received)\s+(?:a\s+)?402\b(?!\s+records\b)/i,
     "payment required",
     "insufficient credits",

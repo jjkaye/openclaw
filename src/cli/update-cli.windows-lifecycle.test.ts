@@ -9,6 +9,7 @@ import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths
 import { withEnvAsync } from "../test-utils/env.js";
 import { resolveTestNodeExecPath } from "../test-utils/node-process.js";
 import { createCommandResult as commandResult } from "../test-utils/npm-spec-install-test-helpers.js";
+import { waitForCliSignalExit } from "./signal-exit-barrier.js";
 import {
   expectNoSideEffects,
   freshRestartCalls,
@@ -20,7 +21,6 @@ import {
 } from "./update-cli-assertions.test-support.js";
 import { createUpdateCliFixture } from "./update-cli-fixture.test-support.js";
 import {
-  databasePreflightMocks,
   gatewayFixturePid,
   readPackageVersion,
   restartHealthTestControl,
@@ -58,10 +58,7 @@ import {
   updateFinalizeCommand,
   updateGitCheckout,
 } from "./update-cli-modules.test-support.js";
-import {
-  recoveryVerificationStep,
-  registerFailureSelectorTests,
-} from "./update-cli/update-cli-failure-recovery.test-support.js";
+import { registerFailureSelectorTests } from "./update-cli/update-cli-failure-recovery.test-support.js";
 import {
   writeJsonFixture,
   writeNpmPackageInstall,
@@ -140,7 +137,6 @@ describe("update-cli", () => {
   });
 
   it("does not inspect or mutate a Windows host service from an isolated install", async () => {
-    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
     const tempDir = fixture.tempDirs.make("openclaw-update-isolated-service-");
     const { nodeModules } = await fixture.setupInstalledPackageRoot(tempDir);
     fixture.mockRunningManagedGateway();
@@ -149,6 +145,7 @@ describe("update-cli", () => {
 
     await withEnvAsync({ OPENCLAW_HOME: path.join(tempDir, "relocated-home") }, async () => {
       fixture.initializeExistingUpdateProfile();
+      vi.spyOn(process, "platform", "get").mockReturnValue("win32");
       await updateCommand({ yes: true });
     });
 
@@ -261,7 +258,6 @@ describe("update-cli", () => {
     async ({ command, fault }) => {
       const stopFailure = fault === "stop-enable-committed";
       runtimeRecovery.stubNodeRuntime();
-      vi.spyOn(process, "platform", "get").mockReturnValue("win32");
       fixture.setTty(true);
       fixture.setStdoutTty(true);
       const root = await fixture.mockPackageInstallAtCaseDir("openclaw-update-native-preparation");
@@ -285,6 +281,7 @@ describe("update-cli", () => {
         ...process.env,
         OPENCLAW_STATE_DIR: target.stateDir,
       });
+      vi.spyOn(process, "platform", "get").mockReturnValue("win32");
       fixture.tempDirsToCleanup.add(target.stateDir);
       await fs.mkdir(target.stateDir, { recursive: true });
       await writeJsonFixture(target.configPath, fixture.baseSnapshot.config);
@@ -392,24 +389,31 @@ describe("update-cli", () => {
         version: "1.0.0",
       });
       expect(serviceRestart).not.toHaveBeenCalled();
+      expect(freshRestartCalls()).toEqual([]);
       expect(triageCommand).toHaveBeenCalledOnce();
       expect(reportedError).toEqual(new ExitError(1));
       expect(defaultRuntime.exit).not.toHaveBeenCalled();
-      expect(triageCommand.mock.calls[0]?.[1]?.recovery).toMatchObject({
+      const recovery = triageCommand.mock.calls[0]?.[1]?.recovery;
+      // Native preparation failed before a service stop or package activation;
+      // triage retains the autostart error without claiming verified readiness.
+      expect(recovery).toHaveProperty("updateFailure.result.verification", {});
+      expect(recovery).toMatchObject({
         target,
         updateFailure: {
           result: {
             status: "error",
             recovery: { serviceRestartSafe: false, reason: "runtime-verification-failed" },
-            verification: {
-              runningVersion: "1.0.0",
-              versionMatch: true,
-              readyz: true,
-              settled: true,
-            },
             steps: [
+              expect.objectContaining({ name: "updater-runtime-retention", exitCode: 0 }),
               expect.objectContaining({ stderrTail: expect.stringContaining("enable denied") }),
-              recoveryVerificationStep(undefined, root),
+              {
+                name: "gateway recovery observation",
+                command: "gateway verification",
+                cwd: root,
+                durationMs: 0,
+                exitCode: 0,
+                diagnostics: [expect.stringContaining("No service was stopped or started.")],
+              },
             ],
           },
         },
@@ -532,11 +536,7 @@ describe("update-cli", () => {
   it("restores package files without re-enabling Windows autostart after interruption", async () => {
     await fixture.useFileBackedConfig();
     vi.spyOn(process, "platform", "get").mockReturnValue("win32");
-    const exitCalled = createDeferred();
-    const processExitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      exitCalled.resolve();
-      return undefined as never;
-    });
+    const processExitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
     const root = await fixture.mockPackageInstallAtCaseDir("openclaw-update-lifecycle-signal");
     fixture.primeServiceCommand(
       [nodeExecutable, path.join(root, "dist", "index.js"), "gateway", "run"],
@@ -566,10 +566,11 @@ describe("update-cli", () => {
 
     const priorSigintListeners = new Set(process.listeners("SIGINT"));
     await expect(updateCommand({ yes: true, restart: false })).rejects.toEqual(new ExitError(1));
-    await exitCalled.promise;
-    expect(processExitSpy).toHaveBeenCalledWith(130);
+    await expect(waitForCliSignalExit()).resolves.toBe(130);
+    expect(process.exitCode).toBe(130);
+    expect(processExitSpy).not.toHaveBeenCalled();
     expect(resumeScheduledTaskAutoStartAfterUpdate.mock.calls.length).toBe(0);
-    await expect(fs.access(path.join(root, "dist", "index.js"))).resolves.toBeUndefined();
+    await fs.access(path.join(root, "dist", "index.js"));
     expect(JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8"))).toMatchObject({
       version: "1.0.0",
     });
@@ -663,17 +664,13 @@ describe("update-cli", () => {
   it.each([
     { signal: "SIGINT", phase: "package suspension" },
     { signal: "SIGINT", phase: "service pre-stop inspection" },
-    { signal: "SIGBREAK", phase: "Git schema preflight" },
+    { signal: "SIGBREAK", phase: "Git task suspension" },
   ] as const)(
     "restores Windows Scheduled Task autostart on $signal during $phase",
     async ({ signal, phase }) => {
       vi.spyOn(process, "platform", "get").mockReturnValue("win32");
       const processOnSpy = vi.spyOn(process, "on");
-      const exitCalled = createDeferred();
-      const processExitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-        exitCalled.resolve();
-        return undefined as never;
-      });
+      const processExitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
       const gate = createDeferred();
       const entered = createDeferred();
       const gitMutation = vi.fn();
@@ -687,9 +684,12 @@ describe("update-cli", () => {
           await waitForSignal();
         }
         taskSuspended = true;
+        if (phase === "Git task suspension") {
+          await waitForSignal();
+        }
         return true;
       });
-      if (phase === "Git schema preflight") {
+      if (phase === "Git task suspension") {
         fixture.mockOwnedGitService();
         serviceLoaded.mockResolvedValue(true);
         vi.mocked(updateGitCheckout).mockImplementationOnce(async ({ opts: options }) => {
@@ -699,12 +699,6 @@ describe("update-cli", () => {
           )({ schemaVersions: { state: 3, agent: 11 } });
           gitMutation();
           return makeOkUpdateResult({ mode: "git" });
-        });
-        databasePreflightMocks.preflightOpenClawDatabaseSchemas.mockImplementation(async () => {
-          if (taskSuspended) {
-            await waitForSignal();
-          }
-          return { incompatible: [], indeterminate: [] };
         });
       } else {
         const root = await fixture.mockPackageInstallAtCaseDir("openclaw-update-suspension-signal");
@@ -718,7 +712,7 @@ describe("update-cli", () => {
         async (
           _env,
           options: Parameters<
-            typeof import("../daemon/schtasks.js").resumeScheduledTaskAutoStartAfterUpdate
+            typeof import("../daemon/schtasks-control.js").resumeScheduledTaskAutoStartAfterUpdate
           >[1],
         ) => {
           await options?.beforeMutation?.();
@@ -768,16 +762,16 @@ describe("update-cli", () => {
         await updatePromise;
         expect(resumeScheduledTaskAutoStartAfterUpdate).toHaveBeenCalledOnce();
         expect(serviceStop).not.toHaveBeenCalled();
-        expect(Boolean(packageInstallCommandCall())).toBe(phase !== "Git schema preflight");
+        expect(Boolean(packageInstallCommandCall())).toBe(phase !== "Git task suspension");
         expect(gitMutation).not.toHaveBeenCalled();
         expect(freshRestartCalls()).toEqual([]);
         expect(listUpdateRuns({ limit: 1 })).toMatchObject([
           { phase: "finished", status: "skipped", reason: "cancelled" },
         ]);
         expect(defaultRuntime.exit).not.toHaveBeenCalledWith(1);
-        await exitCalled.promise;
-        expect(processExitSpy).toHaveBeenCalledWith(130);
-        expect(processExitSpy.mock.calls.every(([code]) => code === 130)).toBe(true);
+        await expect(waitForCliSignalExit()).resolves.toBe(130);
+        expect(process.exitCode).toBe(130);
+        expect(processExitSpy).not.toHaveBeenCalled();
       } finally {
         gate.resolve();
         await updatePromise;
@@ -921,11 +915,7 @@ describe("update-cli", () => {
 
       await expect(updateCommand({ yes: true, json: true })).rejects.toEqual(new ExitError(1));
       expect(defaultRuntime.exit).not.toHaveBeenCalled();
-      if (failureKind === "post-core exception") {
-        expect(triageAfterFailure.mock.calls.map(([, context]) => context)).toContainEqual(
-          expect.objectContaining({ kind: "update", error: failure.message }),
-        );
-      }
+      expect(triageAfterFailure).not.toHaveBeenCalled();
       expect(suspendScheduledTaskAutoStartForUpdate).toHaveBeenCalledOnce();
       expect(serviceStop).toHaveBeenCalledOnce();
       expect(suspendScheduledTaskAutoStartForUpdate.mock.invocationCallOrder[0]).toBeLessThan(

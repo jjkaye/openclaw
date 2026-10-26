@@ -19,7 +19,7 @@ import {
   CODEX_NATIVE_HOOK_RELAY_TTL_GRACE_MS,
 } from "./native-hook-relay.js";
 import type { CodexServerNotification, CodexDynamicToolCallParams } from "./protocol.js";
-import type { CodexAttemptResources } from "./run-attempt-resources.js";
+import type { StartedCodexAttemptResources } from "./run-attempt-start.js";
 import { createCodexUserInputBridge } from "./user-input-bridge.js";
 
 const CODEX_NATIVE_HOOK_RELAY_RENEW_INTERVAL_MS = 60_000;
@@ -29,6 +29,7 @@ class CodexAttemptState {
   rateLimitsRevisionBeforeLastTurnStart?: number;
   completed = false;
   abortCleanup = Promise.resolve();
+  nativeCancellationConfirmed = false;
   pluginRuntimeRefreshStop?: Promise<void>;
   // Only completed native cleanup can advance this state to confirmed.
   permissionChangeRestart?: "requested" | "confirmed";
@@ -60,10 +61,9 @@ class CodexAttemptState {
   };
   terminalDynamicToolReleaseCheckScheduled = false;
   currentTurnHadNonTerminalDynamicToolResult = false;
-  currentTurnHadToolAuthoredFinalReply = false;
 }
 
-export function createCodexAttemptTurnState(resources: CodexAttemptResources) {
+export function createCodexAttemptTurnState(resources: StartedCodexAttemptResources) {
   const {
     prompt,
     state: resourceState,
@@ -98,7 +98,7 @@ export function createCodexAttemptTurnState(resources: CodexAttemptResources) {
   };
   const interruptTurn = async (
     turnId: string,
-    completionOptions?: { locallyCompleted?: boolean; timeoutMs?: number },
+    completionOptions?: { locallyCompleted?: boolean },
   ) => {
     if (completionOptions?.locallyCompleted) {
       state.localCompletionRequested = true;
@@ -106,10 +106,11 @@ export function createCodexAttemptTurnState(resources: CodexAttemptResources) {
     const completed = await interruptCodexTurnAndWaitBestEffort(resourceState.client, {
       threadId: resourceState.thread.threadId,
       turnId,
-      timeoutMs: completionOptions?.timeoutMs,
     });
     if (!completed) {
       await closeCodexStartupClientBestEffort(resourceState.client);
+    } else if (turnId) {
+      state.nativeCancellationConfirmed = true;
     }
     return completed;
   };

@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import type { Duplex, Readable } from "node:stream";
-import { setTimeout as delay } from "node:timers/promises";
 import { toErrorObject } from "../../infra/errors.js";
 import { createDeferredCore } from "../../shared/deferred.js";
+import { sleep } from "../../utils/sleep.js";
 import { joinProcessCompletionAndOutput } from "../decoded-output.js";
 import { pipeProcessOutput } from "../pipe-output.js";
 import {
@@ -33,8 +33,6 @@ import {
   stopServiceChildOwner,
 } from "./service-child-relay-retirement.js";
 import type { AwaitedStdoutConsumer, ProcessAdapterStartup } from "./types.js";
-
-type AuthorityState = "starting" | "active" | "closing" | "closed" | "identity-lost";
 
 export function createServiceChildRelayAdapter(
   params: ServiceChildRelayParams & { stdoutConsumption: "awaited" },
@@ -106,9 +104,11 @@ export async function createServiceChildRelayAdapter(
           events.emitError(error, "stderr"),
         )
       : undefined;
-  child.stdin?.on("error", (error) => events.emitError(error, "stdin"));
+  if (!params.terminateOnHostLoss) {
+    child.stdin?.on("error", (error) => events.emitError(error, "stdin"));
+  }
 
-  let state: AuthorityState = "starting";
+  let state: "starting" | "active" | "closing" | "closed" | "identity-lost" = "starting";
   let commandPid: number | undefined;
   let anchorPid: number | undefined = useLinuxSubreaper ? child.pid : undefined;
   let outboundSequence = 0;
@@ -327,6 +327,7 @@ export async function createServiceChildRelayAdapter(
     state = "closed";
     if (!rootResult && !resultError && !waitError) {
       rootResult = { code: null, signal: requestedSignal ?? null };
+      events.emitExit(rootResult.code, rootResult.signal);
     }
     settleWait();
     cleanup.completion.resolve();
@@ -386,7 +387,7 @@ export async function createServiceChildRelayAdapter(
       }
       // After the budget expires, the deadline owner's I/O poll can still deliver queued exit.
       await Promise.race([
-        ...(remainingMs > 0 ? [delay(Math.min(100, remainingMs))] : []),
+        ...(remainingMs > 0 ? [sleep(Math.min(100, remainingMs))] : []),
         ...(!childExited ? [relayExit.promise] : []),
         cleanup.completion.promise,
       ]);
@@ -469,7 +470,7 @@ export async function createServiceChildRelayAdapter(
       anchorPid ??= message.anchorPid;
       cleanupDeadline.begin();
       if (useWindowsJobAnchor || anchorPid !== undefined) {
-        startup.reject(new Error(message.error));
+        startup.reject(Object.assign(new Error(message.error), message.errorDetails));
       } else {
         loseIdentity(message.error);
       }
@@ -486,7 +487,7 @@ export async function createServiceChildRelayAdapter(
       (line) => {
         try {
           const message = readServiceChildMessage(JSON.parse(line));
-          if (!("sequence" in message) || message.type === "retirement") {
+          if (!("sequence" in message)) {
             throw new Error("invalid anchor message");
           }
           handleAnchorMessage(message);
@@ -536,7 +537,7 @@ export async function createServiceChildRelayAdapter(
       return;
     }
     if (useWindowsJobAnchor) {
-      if (!("sequence" in message) || message.type === "retirement") {
+      if (!("sequence" in message)) {
         loseIdentity("invalid anchor message");
         return;
       }
@@ -547,9 +548,9 @@ export async function createServiceChildRelayAdapter(
       return;
     }
     if (message.type === "relay-error") {
-      loseIdentity(message.error);
-    } else if (message.type === "retirement") {
-      retirement.receive(message);
+      if (!retirement.recordSignalError(new Error(message.error))) {
+        loseIdentity(message.error);
+      }
     }
   });
   child.once("error", (error) => {
@@ -585,9 +586,10 @@ export async function createServiceChildRelayAdapter(
     args: params.args,
     argv0: params.argv0,
     cwd: params.cwd,
-    env: params.env ? toStringEnv(params.env) : undefined,
+    env: toStringEnv(params.env ?? process.env),
     stdinMode: params.stdinMode,
     secretFd: params.secretInput?.fd,
+    terminateOnHostLoss: params.terminateOnHostLoss,
     controlFd,
     ...preparation.ownership,
     treeOwnership: useLinuxSubreaper ? "linux-subreaper" : undefined,
@@ -595,7 +597,19 @@ export async function createServiceChildRelayAdapter(
     ...(control ? { acknowledgeClosing: true as const } : {}),
     windowsShellCommand: params.windowsShellCommand,
   };
-  const stdin = createManagedChildStdin(child.stdin);
+  const stdin = createManagedChildStdin(
+    child.stdin,
+    params.terminateOnHostLoss
+      ? () => {
+          void sendControlMessage({ type: "stdin-end" }).then(
+            () => child.stdin?.end(),
+            (error: unknown) =>
+              loseIdentity(toErrorObject(error, "stdin EOF delivery failed").message),
+          );
+        }
+      : undefined,
+    params.terminateOnHostLoss ? (error) => events.emitError(error, "stdin") : undefined,
+  );
   params.abortSignal?.addEventListener("abort", onConstructionAbort, { once: true });
   const ready = (async () => {
     using delivery = preparation.transferSecretInput();
@@ -620,6 +634,9 @@ export async function createServiceChildRelayAdapter(
       if (secretDeliveryResult.status === "rejected") {
         throw secretDeliveryResult.reason;
       }
+      if (params.input !== undefined && params.prepareInput) {
+        await params.prepareInput();
+      }
       if (params.abortSignal?.aborted || waitError) {
         throw waitError ?? new Error("service child construction aborted");
       }
@@ -634,7 +651,8 @@ export async function createServiceChildRelayAdapter(
       void stdoutRelay.drain();
       unpipeStderr?.();
       void stderrRelay.drain();
-      stopServiceChildOwner(child, useLinuxSubreaper);
+      // Ready assigns commandPid after native admission; retain transport for its closing/ACK join.
+      stopServiceChildOwner(child, useLinuxSubreaper, commandPid ? kill : undefined);
       throw error;
     } finally {
       params.abortSignal?.removeEventListener("abort", onConstructionAbort);
@@ -678,6 +696,7 @@ export async function createServiceChildRelayAdapter(
     : undefined;
 
   const adapter: ServiceChildRelayAdapter = {
+    memoryRootPid: child.pid,
     // The durable worker receipt binds the group owner, which survives application loss.
     get pid() {
       return params.ownedWorker ? anchorPid : commandPid;

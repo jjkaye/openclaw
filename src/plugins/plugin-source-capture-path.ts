@@ -22,7 +22,10 @@ export function isLegacyPluginSourceCaptureName(name: string): boolean {
   );
 }
 
-/** Node supports long Windows paths for I/O but `mkdtemp` still needs namespacing. */
+/**
+ * Node extends Windows paths past MAX_PATH for mkdir and file I/O, but not for mkdtemp.
+ * Update rehearsal roots are deep, so captures beneath them need the same extension.
+ */
 export function mkdtempPluginCaptureSync(prefix: string): string {
   if (process.platform !== "win32") {
     return fs.mkdtempSync(prefix);

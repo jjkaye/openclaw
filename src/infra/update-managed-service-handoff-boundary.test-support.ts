@@ -14,7 +14,7 @@ import { withinTest } from "../../test/helpers/promise.js";
 import { resolveTestNodeExecPath } from "../test-utils/node-process.js";
 import { writeRestartSentinel } from "./restart-sentinel.js";
 import { writeTriageUpdateFailure } from "./update-failure-report-artifact.js";
-import type { ManagedHandoffTempDirTracker } from "./update-managed-service-handoff-artifacts.test-support.js";
+import * as handoffArtifacts from "./update-managed-service-handoff-artifacts.test-support.js";
 import type { ManagedServiceBoundaryOptions } from "./update-managed-service-handoff-boundary-contract.test-support.js";
 import {
   awaitEmulatedRecoveryHandoffExit,
@@ -63,7 +63,7 @@ export function createManagedServiceManagerBoundary({
   cleanups,
 }: {
   spawnMock: Mock;
-  tempDirs: ManagedHandoffTempDirTracker;
+  tempDirs: handoffArtifacts.ManagedHandoffTempDirTracker;
   cleanups: Set<() => Promise<void>>;
 }) {
   let receipts: FixtureReceiptChannel;
@@ -152,13 +152,14 @@ export function createManagedServiceManagerBoundary({
       ledger: Boolean(run),
       options,
     });
+    await options?.prepareState?.({ env, recoveryModulePath, sourceRuntimeImport });
     let helper: import("node:child_process").ChildProcess | undefined;
     let helperCompletion: Promise<number | null> | undefined;
     let helperLogPath: string | undefined;
     const cleanup = createManagedServiceBoundaryCleanup(() => [helper, parent]);
     cleanups.add(cleanup);
     try {
-      await startManagedServiceUpdateHandoff({
+      const started = await startManagedServiceUpdateHandoff({
         ...(options?.systemScope ? { supervisor: "systemd" as const } : {}),
         runId: run?.runId,
         ...(options?.beforeParkNotice ? { beforePark: async () => {} } : {}),
@@ -180,10 +181,9 @@ export function createManagedServiceManagerBoundary({
         string[],
         { env: NodeJS.ProcessEnv },
       ];
-      const [scriptPath, generatedParamsPath] = generatedArgs;
-      if (!scriptPath || !generatedParamsPath) {
-        throw new Error("expected generated managed handoff script and parameters");
-      }
+      tempDirs.add(path.dirname(started.logPath));
+      const { scriptPath, paramsPath: generatedParamsPath } =
+        handoffArtifacts.readManagedHandoffArtifacts(generatedArgs);
       const generated = JSON.parse(await fs.readFile(generatedParamsPath, "utf8")) as Record<
         string,
         unknown
@@ -192,7 +192,6 @@ export function createManagedServiceManagerBoundary({
       const mockedChild = spawnMock.mock.results.at(-1)
         ?.value as import("node:child_process").ChildProcess;
       mockedChild.emit("exit", 0, null);
-      tempDirs.add(path.dirname(scriptPath));
       const paramsPath = path.join(root, "manager-helper.json");
       const commandFixture = createManagedServiceCommandFixture({
         kind,
@@ -663,8 +662,12 @@ export function createManagedServiceManagerBoundary({
           .filter(Boolean),
         parentSignal: parent.signalCode,
         parkAdmitted: stdout.includes("park-admitted\n"),
+        stdout,
+        stderr,
         state: JSON.parse(await fs.readFile(statePath, "utf8").catch(() => "{}")),
-        sentinel: readRestartSentinelPayload({ OPENCLAW_STATE_DIR: root }),
+        sentinel: options?.readSentinel
+          ? await options.readSentinel(env)
+          : readRestartSentinelPayload({ OPENCLAW_STATE_DIR: root }),
         log: await fs.readFile(String(generated.logPath), "utf8"),
         ...(await spawnFixture.readCommandDeadlines()),
         savedFailure: await readSavedFailure(String(generated.triageContextPath)),

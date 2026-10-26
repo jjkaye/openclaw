@@ -3,18 +3,9 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { root as openCaptureRoot } from "@openclaw/fs-safe/root";
+import { readProcessIdentity } from "@openclaw/proc-safe/identity";
 import { runWithFailedTrailer } from "./lib/failed-trailer.mts";
 import { runManagedCommand, waitForManagedProcessGroupExit } from "./lib/managed-child-process.mts";
-
-// release/2026.10.5 does not ship @openclaw/proc-safe; ESRCH is the absent-process fact main reads.
-function processExists(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
-  }
-}
 
 function validateSwiftTestingCompletion(eventStreamPath: string, expectedFilter?: string): void {
   const functions = new Set<string>();
@@ -115,14 +106,14 @@ await runWithFailedTrailer("macos-native", async () => {
     | {
         executable: string;
         testBundle: string;
-        filters: [string, string];
+        filters: string[];
       }
     | undefined;
   if (appHost) {
-    const [appPath, testBundle, retryFilter, relaunchFilter] = args;
-    if (args.length !== 4 || !appPath || !testBundle || !retryFilter || !relaunchFilter) {
+    const [appPath, testBundle, ...filters] = args;
+    if (!appPath || !testBundle || filters.length === 0 || filters.some((filter) => !filter)) {
       throw new Error(
-        "App-host mode requires a staged app, built test bundle, Retry filter, and relaunch filter.",
+        "App-host mode requires a staged app, built test bundle, and at least one test filter.",
       );
     }
     const app = fs.realpathSync(appPath);
@@ -132,7 +123,7 @@ await runWithFailedTrailer("macos-native", async () => {
     appHostConfiguration = {
       executable: path.join(app, "Contents/MacOS/OpenClawRecoveryTestHost"),
       testBundle,
-      filters: [retryFilter, relaunchFilter],
+      filters,
     };
   }
   if (profileMode !== "default" && profileMode !== "named" && !appHost) {
@@ -333,6 +324,8 @@ await runWithFailedTrailer("macos-native", async () => {
                 "inherited",
                 "browser-sign-in-before",
                 "browser-sign-in-after",
+                "dashboard-reconnect-before",
+                "dashboard-reconnect-after",
                 "guest-model-permitted",
                 "guest-model-null",
                 "guest-model-open",
@@ -434,7 +427,7 @@ await runWithFailedTrailer("macos-native", async () => {
           const groupGone = await waitForManagedProcessGroupExit({ pid }, 30_000, {
             errorPolicy: "indeterminate",
           });
-          retired &&= groupGone && !processExists(pid);
+          retired &&= groupGone && readProcessIdentity(pid) === null;
         }
         canRemove = retired;
         if (!canRemove) {

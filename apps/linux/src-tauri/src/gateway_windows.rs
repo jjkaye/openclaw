@@ -250,6 +250,27 @@ struct Routing {
 }
 
 impl Routing {
+    fn capture_remote_destinations(
+        &mut self,
+        mut current_url: impl FnMut(&str) -> Option<Url>,
+    ) -> Result<(), String> {
+        if self.primary_ownership != Some(GatewayOwnership::Remote) {
+            return Err(STALE.into());
+        }
+        // The ready handshake follows the first committed page. Before then,
+        // keep the requested destination already recorded by navigation.
+        for (label, route) in &mut self.windows {
+            if let Some(document) = route.document.as_mut().filter(|document| {
+                document.phase == NavigationPhase::Active && document.nonce.is_some()
+            }) {
+                if let Some(url) = current_url(label) {
+                    document.navigation_url = url;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn select_primary(
         &mut self,
         url: &Url,
@@ -1311,6 +1332,9 @@ fn scoped_script(document: &Document, body: &str) -> String {
 }
 
 impl GatewayWindows {
+    pub(crate) fn has_saved_profiles(&self) -> Result<bool, String> {
+        self.profiles.list().map(|profiles| !profiles.is_empty())
+    }
     pub fn new(profiles: Arc<GatewayProfiles>) -> Self {
         Self {
             profiles,
@@ -1371,20 +1395,14 @@ impl GatewayWindows {
             let mut state = self.routing.lock().map_err(|_| STALE)?;
             // History API transitions do not necessarily trigger a navigation
             // callback. Capture the live destination before fencing replacement.
-            for (label, route) in &mut state.windows {
-                if let (Some(document), Some(url)) = (
-                    route.document.as_mut(),
-                    app.get_webview(label).and_then(|view| view.url().ok()),
-                ) {
-                    document.navigation_url = url;
-                }
-            }
+            state.capture_remote_destinations(|label| {
+                app.get_webview(label).and_then(|view| view.url().ok())
+            })?;
             client.with_native_control_bootstrap(generation, |dashboard, script| {
-                if state.primary_ownership != Some(GatewayOwnership::Remote)
-                    || state
-                        .primary
-                        .as_ref()
-                        .is_none_or(|route| route.url != dashboard)
+                if state
+                    .primary
+                    .as_ref()
+                    .is_none_or(|route| route.url != dashboard)
                 {
                     return Err(STALE.into());
                 }
@@ -3430,6 +3448,64 @@ mod tests {
     }
 
     #[test]
+    fn remote_auth_refresh_reads_only_ready_remote_document_destinations() {
+        let mut routing = Routing::default();
+        for (label, phase) in [
+            ("active", NavigationPhase::Active),
+            ("preparing", NavigationPhase::Preparing),
+            ("failed", NavigationPhase::Failed),
+        ] {
+            routing.windows.insert(
+                label.into(),
+                WindowRoute {
+                    document: Some(Document {
+                        phase,
+                        ..document(label)
+                    }),
+                    ..Default::default()
+                },
+            );
+        }
+        routing.windows.insert(
+            "loading".into(),
+            WindowRoute {
+                document: Some(loading_document("loading", SelectionCompletion::Automatic)),
+                ..Default::default()
+            },
+        );
+        routing
+            .windows
+            .insert("empty".into(), WindowRoute::default());
+        routing.primary_ownership = Some(GatewayOwnership::Local);
+        assert!(routing
+            .capture_remote_destinations(|_| panic!("local startup has no remote auth to refresh"))
+            .is_err());
+
+        routing.primary_ownership = Some(GatewayOwnership::Remote);
+        let destination = Url::parse("https://gateway.example/team/chat/session").unwrap();
+        let mut reads = Vec::new();
+        routing
+            .capture_remote_destinations(|label| {
+                reads.push(label.to_string());
+                Some(destination.clone())
+            })
+            .unwrap();
+        assert_eq!(reads, ["active"]);
+        assert_eq!(
+            routing.windows["active"]
+                .document
+                .as_ref()
+                .unwrap()
+                .navigation_url,
+            destination
+        );
+        for label in ["preparing", "failed", "loading"] {
+            let document = routing.windows[label].document.as_ref().unwrap();
+            assert_eq!(document.navigation_url, document.url);
+        }
+    }
+
+    #[test]
     fn fast_native_hello_installs_accepted_auth_in_the_first_main_document() {
         let url = Url::parse("https://gateway.example/control").unwrap();
         let gateway = Url::parse("wss://gateway.example/control").unwrap();
@@ -4171,21 +4247,27 @@ mod tests {
 
     #[test]
     fn dashboard_authority_stays_inside_its_origin_and_path() {
-        let expected = Url::parse("https://gateway.example/team").unwrap();
-        for (url, allowed) in [
-            ("https://gateway.example/team", true),
-            ("https://gateway.example/team/chat/main", true),
-            ("https://gateway.example/teamwork", false),
-            ("https://gateway.example/", false),
-            ("https://other.example/team", false),
-            ("http://gateway.example/team", false),
-            ("https://user@gateway.example/team", false),
+        for base in [
+            "https://gateway.example/team",
+            "https://gateway.example/team/",
         ] {
-            assert_eq!(
-                matches_route(&Url::parse(url).unwrap(), &expected),
-                allowed,
-                "{url}"
-            );
+            let expected = Url::parse(base).unwrap();
+            for (url, allowed) in [
+                ("https://gateway.example/team", true),
+                ("https://gateway.example/team/chat/main", true),
+                ("https://gateway.example/teamwork", false),
+                ("https://gateway.example/", false),
+                ("https://gateway.example:444/team", false),
+                ("https://other.example/team", false),
+                ("http://gateway.example/team", false),
+                ("https://user@gateway.example/team", false),
+            ] {
+                assert_eq!(
+                    matches_route(&Url::parse(url).unwrap(), &expected),
+                    allowed,
+                    "{base}: {url}"
+                );
+            }
         }
         assert!(local_settings_url(
             &Url::parse("tauri://localhost/gateways.html").unwrap()

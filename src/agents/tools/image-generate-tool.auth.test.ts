@@ -8,6 +8,7 @@ import {
   createAuthProfileStoreFixture,
   createOAuthRefreshCredential,
 } from "../auth-profiles/credential-fixtures.test-support.js";
+import { prepareSharedAuthStoreOwnershipForNative } from "../auth-profiles/path-resolve.native.js";
 import {
   clearRuntimeAuthProfileStoreSnapshotCore,
   setRuntimeAuthProfileStoreSnapshot,
@@ -21,11 +22,7 @@ describe("image generation credential availability", () => {
       const agentDir = state.agentDir();
       const provider: ImageGenerationProvider = {
         id: "fixture-image",
-        defaultModel: "fixture-model",
-        capabilities: {
-          generate: { maxCount: 1 },
-          edit: { enabled: false, maxInputImages: 0 },
-        },
+        capabilities: { generate: {}, edit: { enabled: false } },
         generateImage: async () => {
           throw new Error("Provider listing must not generate images");
         },
@@ -34,6 +31,7 @@ describe("image generation credential availability", () => {
         .spyOn(mediaGenerationRegistry, "withImageGenerationProviders")
         .mockImplementation(async (_config, run) => await run([provider]));
       try {
+        prepareSharedAuthStoreOwnershipForNative(state.env);
         setRuntimeAuthProfileStoreSnapshot(createAuthProfileStoreFixture({}), agentDir);
         const authProfileStoreSource = await hasAnyAuthProfileStoreSourceAsync(agentDir);
         expect(authProfileStoreSource).toBe(false);

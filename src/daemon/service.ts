@@ -19,21 +19,22 @@ import {
   assertDaemonRuntimePinDefinition,
   assertDaemonRuntimePinPlan,
   commitDaemonRuntimePin,
+  withDaemonRuntimePinMigration,
   readDaemonRuntimePinForInstall,
 } from "./runtime-pin-state.js";
-import { stopStalledGatewayStartup } from "./schtasks-process.js";
+import { restartScheduledTask, startScheduledTask, stopScheduledTask } from "./schtasks-control.js";
 import {
   installScheduledTask,
+  stageScheduledTask,
+  uninstallScheduledTask,
+} from "./schtasks-install.js";
+import { readScheduledTaskCommand } from "./schtasks-layout.js";
+import { stopStalledGatewayStartup } from "./schtasks-process.js";
+import {
   isScheduledTaskEnabled,
   isScheduledTaskInstalled,
-  readScheduledTaskCommand,
   readScheduledTaskRuntime,
-  restartScheduledTask,
-  startScheduledTask,
-  stageScheduledTask,
-  stopScheduledTask,
-  uninstallScheduledTask,
-} from "./schtasks.js";
+} from "./schtasks-runtime.js";
 import { assertServiceInspectionFallbackAllowed } from "./service-inspection-error.js";
 import { withGatewayServiceOperationLock } from "./service-operation-lock.js";
 import { captureGatewayServiceRebind } from "./service-rebind.js";
@@ -299,21 +300,27 @@ function guardGatewayServiceMutation<
   },
   TResult,
 >(
+  kind: ServiceKind,
   action: string,
+  prepareRuntimePins: boolean,
   mutate: (args: TArgs) => Promise<TResult>,
   readCommand?: GatewayService["readCommand"],
   readRuntimePinRevision?: (env: GatewayServiceEnv) => string,
 ): (args: TArgs) => Promise<TResult> {
   return async (args) => {
-    // Mutations must satisfy both lifecycle ownership and durable-config
-    // version guards before invoking any platform service manager.
-    assertGatewayServiceMutationAllowed(action, process.env);
-    if (args.env && args.env !== process.env) {
-      assertGatewayServiceMutationAllowed(action, args.env);
+    // Node services share native custody and config guards, not Gateway installation identity.
+    if (kind === "gateway") {
+      assertGatewayServiceMutationAllowed(action, process.env);
+      if (args.env && args.env !== process.env) {
+        assertGatewayServiceMutationAllowed(action, args.env);
+      }
     }
     const assertCaller = args.assertCurrent;
     return await withGatewayServiceOperationLock(args.env ?? process.env, async (assertNative) => {
       await assertFutureConfigActionAllowed(action);
+      if (prepareRuntimePins) {
+        await withDaemonRuntimePinMigration(args.env ?? process.env, () => undefined);
+      }
       return await withGatewayServiceUpdateAuthority(
         assertCaller,
         async (assertCurrent) => {
@@ -357,7 +364,9 @@ function withGatewayServiceMutationGuards(
     readCommand?: GatewayService["readCommand"],
   ) =>
     guardGatewayServiceMutation(
+      kind,
       action,
+      true,
       async (args: GatewayServiceInstallArgs) => {
         const scope = { kind, env: { ...args.env } };
         const update = args.runtimePinUpdate ?? {
@@ -415,10 +424,12 @@ function withGatewayServiceMutationGuards(
     );
   return {
     ...service,
-    stage: write("rewrite the gateway service", service.stage),
-    install: write("install or rewrite the gateway service", service.install, service.readCommand),
+    stage: write(`rewrite the ${kind} service`, service.stage),
+    install: write(`install or rewrite the ${kind} service`, service.install, service.readCommand),
     uninstall: guardGatewayServiceMutation(
-      "uninstall the gateway service",
+      kind,
+      `uninstall the ${kind} service`,
+      true,
       async (args: GatewayServiceManageArgs & { assertCurrent?: () => void }) => {
         const scope = { kind, env: { ...args.env } };
         const expected = readDaemonRuntimePinForInstall(scope, null, true);
@@ -434,15 +445,20 @@ function withGatewayServiceMutationGuards(
         commitDaemonRuntimePin(scope, { expected }, null);
       },
     ),
-    start: guardGatewayServiceMutation("start the gateway service", service.start),
-    stop: guardGatewayServiceMutation("stop the gateway service", async (args) => {
+    start: guardGatewayServiceMutation(kind, `start the ${kind} service`, true, service.start),
+    stop: guardGatewayServiceMutation(kind, `stop the ${kind} service`, false, async (args) => {
       const stalled = kind === "gateway" ? captureStalledGatewayStartup(args.env) : undefined;
       await service.stop(args);
       if (stalled) {
         await stopStalledGatewayStartup(stalled, args.assertCurrent);
       }
     }),
-    restart: guardGatewayServiceMutation("restart the gateway service", service.restart),
+    restart: guardGatewayServiceMutation(
+      kind,
+      `restart the ${kind} service`,
+      true,
+      service.restart,
+    ),
   };
 }
 

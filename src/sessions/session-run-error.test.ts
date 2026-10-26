@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { appendSessionTranscriptReport } from "../config/sessions/session-accessor.js";
 import type { CustomMessageReportAppend } from "../config/sessions/session-accessor.sqlite-transcript-reports.types.js";
 import { SessionTranscriptWriterClaimReboundError } from "../config/sessions/session-transcript-writer-claim-error.js";
-import { recordGatewaySessionRunFailure, resolveSessionRunError } from "./session-run-error.js";
+import { resolveSessionRunError } from "./session-run-error-format.js";
+import { recordGatewaySessionRunFailure } from "./session-run-error.js";
 
 // mock-isolation: Capture run-failure notices without opening a real session store.
 vi.mock("../config/sessions/session-accessor.js", () => ({
@@ -42,6 +43,15 @@ describe("recordGatewaySessionRunFailure", () => {
       diagnostic: "Synthetic run failure",
       content: "Your request couldn't be completed: Synthetic run failure",
     },
+    {
+      name: "workspace permission error",
+      error: Object.assign(
+        new Error("EACCES: permission denied, scandir '/synthetic/workspace-main'"),
+        { code: "EACCES" },
+      ),
+      diagnostic: '{"code":"EACCES"}',
+      content: 'Your request couldn\'t be completed: {"code":"EACCES"}',
+    },
   ])("appends $name copy and retains its diagnostic", async ({ error, diagnostic, content }) => {
     let appended: CustomMessageReportAppend | undefined;
     vi.mocked(appendSessionTranscriptReport).mockImplementation(async (_target, report) => {
@@ -67,6 +77,7 @@ describe("recordGatewaySessionRunFailure", () => {
       customType: "run-failed-before-reply",
       content,
       display: true,
+      excludeFromContext: true,
       details: { runId: "failed-run", error: diagnostic },
     });
   });
@@ -81,9 +92,10 @@ describe("resolveSessionRunError", () => {
     },
   );
 
-  it("preserves ordinary session-row errors", () => {
-    expect(resolveSessionRunError({ error: "Synthetic run failure" }, "failed")).toBe(
-      "Synthetic run failure",
-    );
+  it.each([
+    "Synthetic run failure",
+    "EACCES: permission denied, scandir '/synthetic/workspace-main'",
+  ])("preserves ordinary session-row errors: %s", (error) => {
+    expect(resolveSessionRunError({ error }, "failed")).toBe(error);
   });
 });

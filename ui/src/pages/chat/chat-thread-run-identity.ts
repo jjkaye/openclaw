@@ -5,12 +5,9 @@ import {
 import { asNullableRecord as asRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { ChatItem } from "../../lib/chat/chat-types.ts";
-import {
-  userTurnRunId,
-  type ChatProjection,
-  type TurnInsertionBounds,
-} from "./chat-thread-items.ts";
-import { chatItemStartsUserTurn } from "./chat-turn-boundary.ts";
+import { userTurnRunId } from "../../lib/chat/history-message-identity.ts";
+import type { ChatProjection, TurnInsertionBounds } from "./chat-thread-items.ts";
+import { chatItemStartsUserTurn, isInterSessionMessage } from "./chat-turn-boundary.ts";
 import { persistedSteerTargetRunId } from "./stream-causal-boundary.ts";
 import { readLiveTerminalRunId } from "./terminal-message-identity.ts";
 import { buildToolStreamIdentity, extractToolMessageRefs } from "./tool-stream-identity.ts";
@@ -86,7 +83,14 @@ export function createRunTurnLookup(items: ChatItem[]) {
       // Accepted steers divide the transcript, not the run they continue.
       // Keep that run open, but cap unrelated runs at every user boundary.
       for (const item of items) {
-        if (!chatItemStartsUserTurn(item)) {
+        // Forwarded activity divides presentation, not the parent execution.
+        // Its projected assistant role must not cap that run's live output.
+        if (
+          !chatItemStartsUserTurn(item) ||
+          (item.kind === "message" &&
+            asRecord(item.message)?.role === "assistant" &&
+            isInterSessionMessage(item.message))
+        ) {
           continue;
         }
         if (previousInput) {

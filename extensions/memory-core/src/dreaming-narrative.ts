@@ -191,9 +191,11 @@ export type DreamNarrativeRequest = {
   runInBackground?: <T>(run: () => Promise<T>) => Promise<T>;
 };
 
-export type DreamNarrativeOutcome =
-  | { status: "completed" | "pending" | "skipped" }
-  | { status: "degraded"; error: string };
+export type DreamNarrativeOutcome = {
+  status: "completed" | "pending" | "skipped" | "degraded";
+};
+
+export type PreparedDreamNarrative = Pick<DreamNarrativeRequest, "data" | "model" | "timezone">;
 
 async function generateAndAppendDreamNarrative(
   params: DreamNarrativeRequest,
@@ -233,7 +235,7 @@ async function generateAndAppendDreamNarrative(
         nowMs,
         reason: "the narrative run produced no text",
       });
-      return { status: "degraded", error: "the narrative run produced no text" };
+      return { status: "degraded" };
     }
     const dreamsPath = await appendNarrativeEntry({
       workspaceDir: params.workspaceDir,
@@ -266,15 +268,14 @@ async function generateAndAppendDreamNarrative(
         ? "subagent runtime is request-scoped"
         : `the narrative run failed (${formatErrorMessage(error)})`,
     });
-    return { status: "degraded", error: formatErrorMessage(error) };
+    return { status: "degraded" };
   }
   return { status: "completed" };
 }
 
 /**
- * Single entry point for every dreaming phase. Cron sweeps detach so a stalled diary run
- * cannot hold the sweep open; heartbeat sweeps await so the phase reports the outcome.
- * A sweep without an owning agent still runs; only the subagent narrative is unavailable.
+ * Cron sweeps return before inference, but their service retains completion and
+ * publication until settlement. Heartbeat callers await the same work.
  */
 export async function runDreamNarrative(
   params: Omit<DreamNarrativeRequest, "agentId"> & { agentId?: string },

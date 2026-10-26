@@ -10,6 +10,8 @@ import {
 } from "openclaw/plugin-sdk/windows-spawn";
 import { CLAUDE_CLI_CLEAR_ENV } from "./cli-constants.js";
 
+const CLAUDE_CLI_AUTH_TIMEOUT_MS = 10_000;
+
 const CLAUDE_CLI_AUTH_METHODS = [
   "claude.ai",
   "api_key",
@@ -25,7 +27,8 @@ type ClaudeCliAuthStatus =
       authMethod?: (typeof CLAUDE_CLI_AUTH_METHODS)[number];
       email?: string;
     }
-  | { status: "missing" | "unreadable" };
+  | { status: "missing" | "not-installed" | "unreadable" }
+  | { status: "timeout"; timeoutMs: number };
 
 // Mirrors the CLI runner's child-env contract (src/agents/cli-runner/execute.ts): keys listed
 // here survive the Claude clear list for native-login runs, so readiness must probe them too.
@@ -71,20 +74,26 @@ export async function probeClaudeCliAuthStatus(params?: {
       maxOutputBytes: 64 * 1024,
       maxCombinedOutputBytes: 64 * 1024,
       terminateOnOutputLimit: true,
-      timeoutMs: 3_000,
+      timeoutMs: CLAUDE_CLI_AUTH_TIMEOUT_MS,
       signal: params?.signal,
       killProcessTree: true,
     });
     params?.signal?.throwIfAborted();
+    if (result.termination === "timeout") {
+      return { status: "timeout", timeoutMs: CLAUDE_CLI_AUTH_TIMEOUT_MS };
+    }
     if (result.termination !== "exit" || result.code === null) {
       return { status: "unreadable" };
     }
-    if (result.code !== 0) {
+    const parsed: unknown = JSON.parse(result.stdout);
+    if (!isRecord(parsed) || typeof parsed.loggedIn !== "boolean") {
+      return { status: "unreadable" };
+    }
+    if (!parsed.loggedIn) {
       return { status: "missing" };
     }
-    const parsed: unknown = JSON.parse(result.stdout);
-    if (!isRecord(parsed) || parsed.loggedIn !== true) {
-      return { status: "missing" };
+    if (result.code !== 0) {
+      return { status: "unreadable" };
     }
     const authMethod = CLAUDE_CLI_AUTH_METHODS.find((method) => method === parsed.authMethod);
     const email = authMethod === "claude.ai" ? normalizeOptionalString(parsed.email) : undefined;
@@ -93,8 +102,9 @@ export async function probeClaudeCliAuthStatus(params?: {
       ...(authMethod ? { authMethod } : {}),
       ...(email && email.length <= 320 && !/[\r\n]/u.test(email) ? { email } : {}),
     };
-  } catch {
+  } catch (error) {
     params?.signal?.throwIfAborted();
-    return { status: "unreadable" };
+    // A host without the executable cannot run native login; only an installed CLI is inconclusive.
+    return { status: isRecord(error) && error.code === "ENOENT" ? "not-installed" : "unreadable" };
   }
 }

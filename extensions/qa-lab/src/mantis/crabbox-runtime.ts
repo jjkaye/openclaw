@@ -4,6 +4,7 @@ import {
   resolveCrabboxBinary,
 } from "@openclaw/crabbox-provider/cli-runtime-api.js";
 import { normalizeOptionalString as trimToValue } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { shellEscapeBackslash as shellQuote } from "openclaw/plugin-sdk/string-normalization-runtime";
 import { isTruthyOptIn } from "../mantis-options.runtime.js";
 
 export type MantisCrabboxLeaseOptions = {
@@ -18,13 +19,16 @@ export type MantisCrabboxLeaseOptions = {
 function resolveMantisCrabboxLeaseOptions(
   opts: MantisCrabboxLeaseOptions,
   env: NodeJS.ProcessEnv,
-  defaults: { idleTimeout?: string; keepLease?: boolean; ttl?: string } = {},
+  defaults: { idleTimeout?: string; keepLease?: boolean; machineClass?: string; ttl?: string } = {},
 ) {
   return {
     provider:
       trimToValue(opts.provider) ?? trimToValue(env.OPENCLAW_MANTIS_CRABBOX_PROVIDER) ?? "hetzner",
     machineClass:
-      trimToValue(opts.machineClass) ?? trimToValue(env.OPENCLAW_MANTIS_CRABBOX_CLASS) ?? "beast",
+      trimToValue(opts.machineClass) ??
+      trimToValue(env.OPENCLAW_MANTIS_CRABBOX_CLASS) ??
+      defaults.machineClass ??
+      "beast",
     idleTimeout:
       trimToValue(opts.idleTimeout) ??
       trimToValue(env.OPENCLAW_MANTIS_CRABBOX_IDLE_TIMEOUT) ??
@@ -45,21 +49,8 @@ type CommandResult = {
   stdout: string;
 };
 
-type CommandFailureDiagnostics = CommandResult & { recoveryLeaseCandidates: string[] };
-
 // Keep private command output out of Error serialization and routine Mantis reports.
-const commandFailureDiagnostics = new WeakMap<Error, CommandFailureDiagnostics>();
-
-export function getCommandFailureDiagnostics(error: unknown) {
-  return error instanceof Error ? commandFailureDiagnostics.get(error) : undefined;
-}
-
-function boundedFailureOutput(output: string) {
-  const halfLimit = 8_192;
-  return output.length <= halfLimit * 2
-    ? output
-    : `${output.slice(0, halfLimit)}\n[output truncated]\n${output.slice(-halfLimit)}`;
-}
+const commandRecoveryLeases = new WeakMap<Error, string[]>();
 
 export type CommandRunner = typeof defaultCommandRunner;
 
@@ -87,23 +78,17 @@ export async function defaultCommandRunner(
       ...options,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    let stdout = "";
-    let stderr = "";
+    const output = { stdout: "", stderr: "" };
     let spawnError: Error | undefined;
-    child.stdout?.setEncoding("utf8");
-    child.stderr?.setEncoding("utf8");
-    child.stdout?.on("data", (text: string) => {
-      stdout += text;
-      if (options.stdio === "inherit") {
-        process.stdout.write(text);
-      }
-    });
-    child.stderr?.on("data", (text: string) => {
-      stderr += text;
-      if (options.stdio === "inherit") {
-        process.stderr.write(text);
-      }
-    });
+    for (const stream of ["stdout", "stderr"] as const) {
+      child[stream]?.setEncoding("utf8");
+      child[stream]?.on("data", (text: string) => {
+        output[stream] += text;
+        if (options.stdio === "inherit") {
+          process[stream].write(text);
+        }
+      });
+    }
     // Abort emits error before termination. Wait for close so native lease rollback
     // can finish and its final diagnostics are captured; exit 0 cannot erase abort.
     child.on("error", (error) => {
@@ -111,19 +96,19 @@ export async function defaultCommandRunner(
     });
     child.on("close", (code, signal) => {
       if (code === 0 && !spawnError) {
-        resolve({ stdout, stderr });
+        resolve(output);
         return;
       }
       const detail = signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`;
       const error =
         spawnError ??
         new Error(
-          `${command} ${args.join(" ")} failed with ${detail}${stderr ? `\n${stderr.trimEnd()}` : ""}`,
+          `${command} ${args.join(" ")} failed with ${detail}${output.stderr ? `\n${output.stderr.trimEnd()}` : ""}`,
         );
       // These native acquisition markers identify recovery candidates, not ready
-      // leases. Parse before truncation so verbose bootstrap cannot erase them.
+      // leases. Inspect the full output so verbose bootstrap cannot erase them.
       const recoveryLeaseCandidates: string[] = [];
-      for (const match of stderr.matchAll(
+      for (const match of output.stderr.matchAll(
         /^(?:leased (cbx_[a-f0-9]{12}) slug=|provisioned lease=(cbx_[a-f0-9]{12}) server=)/gmu,
       )) {
         const id = match[1] ?? match[2];
@@ -134,11 +119,7 @@ export async function defaultCommandRunner(
           }
         }
       }
-      commandFailureDiagnostics.set(error, {
-        stdout: boundedFailureOutput(stdout),
-        stderr: boundedFailureOutput(stderr),
-        recoveryLeaseCandidates,
-      });
+      commandRecoveryLeases.set(error, recoveryLeaseCandidates);
       reject(error);
     });
   });
@@ -167,9 +148,7 @@ function extractLeaseId(output: string) {
   return output.match(/\b(?:cbx_[a-f0-9]+|tbx_[A-Za-z0-9_-]+)\b/u)?.[0];
 }
 
-export function shellQuote(value: string) {
-  return `'${value.replaceAll("'", "'\\''")}'`;
-}
+export { shellQuote };
 
 export async function createMantisCrabboxSession(
   opts: MantisCrabboxLeaseOptions & { crabboxBin?: string; commandRunner?: CommandRunner },
@@ -221,7 +200,7 @@ export async function createMantisCrabboxSession(
         "inherit",
       ).catch((error: unknown) => {
         recoveryLeaseCandidates =
-          getCommandFailureDiagnostics(error)?.recoveryLeaseCandidates ?? [];
+          error instanceof Error ? (commandRecoveryLeases.get(error) ?? []) : [];
         throw error;
       });
       const acquired = extractLeaseId(`${result.stdout}\n${result.stderr}`);

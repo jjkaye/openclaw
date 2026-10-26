@@ -63,6 +63,11 @@ enum CLIInstallPolicy {
 }
 
 struct ManagedCLIUpdateSummary: Decodable, Equatable {
+    enum CoreUpdate: String, Decodable {
+        case completed
+        case pending
+    }
+
     struct Version: Decodable, Equatable {
         let version: String?
     }
@@ -74,6 +79,7 @@ struct ManagedCLIUpdateSummary: Decodable, Equatable {
     }
 
     let status: String
+    let coreUpdate: CoreUpdate?
     let reason: String?
     let before: Version?
     let after: Version?
@@ -225,16 +231,14 @@ enum CLIInstaller {
     static func managedStatus(
         expectedVersion: String? = GatewayEnvironment.expectedGatewayVersionString(),
         installedCLI: GatewayLaunchAgentManager.InstalledServiceCLI? = nil,
+        serviceProfile: AppProfile = .current,
         usesBundledRuntime: Bool = true) async -> Status
     {
         let location = self.managedExecutableLocation()
         if let installedCLI {
             let environment = GatewayLaunchAgentManager.daemonEnvironment(
-                runtime: nil,
                 installedCLI: installedCLI,
-                environment: ProcessInfo.processInfo.environment,
-                profile: .current,
-                searchPaths: CommandResolver.preferredPaths())
+                profile: serviceProfile)
             let response = await ShellExecutor.runDetailed(
                 command: installedCLI.prefix + ["--version"], cwd: nil, env: environment, timeout: 15)
             return response.success
@@ -599,12 +603,7 @@ enum CLIInstaller {
             repair: repair)
         if let installedCLI { command = installedCLI.prefix + command.dropFirst() }
         let environment = installedCLI.map {
-            GatewayLaunchAgentManager.daemonEnvironment(
-                runtime: nil,
-                installedCLI: $0,
-                environment: ProcessInfo.processInfo.environment,
-                profile: .current,
-                searchPaths: CommandResolver.preferredPaths())
+            GatewayLaunchAgentManager.daemonEnvironment(installedCLI: $0)
         } ?? self.probeEnvironment(location: executable)
         let canonicalAuthority: CanonicalUpdateAuthority?
         do {
@@ -640,7 +639,10 @@ enum CLIInstaller {
         let summary = self.parseManagedUpdateSummary(response.stdout)
 
         let reportedStatus = summary?.status
-        guard response.success, reportedStatus != "error", reportedStatus != "warning" else {
+        let acceptableStatus = repair
+            ? reportedStatus == "ok" || reportedStatus == "warning"
+            : reportedStatus != "error" && reportedStatus != "warning"
+        guard response.success, acceptableStatus, !repair || summary?.coreUpdate == .completed else {
             let reason = summary?.reason?.trimmingCharacters(in: .whitespacesAndNewlines)
             // Another updater can win between the version probe and CLI dispatch.
             // The CLI's downgrade refusal preserves that newer installation; verify it

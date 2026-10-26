@@ -1,7 +1,10 @@
+import { MANAGED_HANDOFF_PG_RESULT_SOURCE } from "./update-managed-service-handoff-pg-result-source.js";
 import { MANAGED_HANDOFF_RUNTIME_ENTRY } from "./update-managed-service-handoff-runtime-assets.js";
 
 // Terminal recording runs inside the sealed helper with its captured lifecycle owners.
-export const MANAGED_HANDOFF_RESULT_SOURCE = String.raw`
+export const MANAGED_HANDOFF_RESULT_SOURCE =
+  MANAGED_HANDOFF_PG_RESULT_SOURCE +
+  String.raw`
 let triageFailure;
 let runLedger;
 let runOutcome;
@@ -18,39 +21,41 @@ async function observeUnrecordedRecovery() {
     triageFailure.restored = previous.exitCode === 0 && !previous.failureFacts?.length;
     return;
   }
-  if (!params.serviceRecovery || restorationArmed || !params.recovery?.version) return;
   const startedAt = Date.now();
   let verified = false;
   let code = "gateway-probe-failed";
-  let detail = !params.serviceRecovery ? (params.foregroundOrigin
+  let detail = terminationRequested ? "Gateway recovery verification was cancelled."
+    : !params.serviceRecovery ? (params.foregroundOrigin
       ? "Foreground Gateway serving health remains unverified by its current owner."
       : "Gateway serving health remains unverified by its external service owner.")
     : closedUpdateResult?.recovery?.reason || "Recovery runtime identity is unavailable.";
   let verification;
   // A pre-activation refusal leaves the original service untouched. Observe that
   // generation without granting restart authority or claiming candidate activation.
-  try {
-    const { waitForGatewayUpdateRecovery } = await import(pathToFileURL(params.recoveryModulePath).href);
-    if (!ownsManagedUpdateLease()) return;
-    const health = await waitForGatewayUpdateRecovery(params.recovery.version, params.recovery.buildId, Math.min(params.recoveryTimeoutMs, 3000));
-    if (!ownsManagedUpdateLease()) return;
-    const running = health.runtime?.status === "running";
-    const versionMatch = health.gatewayVersion === params.recovery.version &&
-      (!params.recovery.buildId || health.gatewayBuildId === params.recovery.buildId);
-    verified = running && versionMatch && health.healthy === true;
-    verification = {
-      serviceRunning: running ? true : health.runtime?.status === "stopped" ? false : undefined,
-      pid: typeof health.runtime?.pid === "number" ? health.runtime.pid : undefined,
-      runningVersion: health.gatewayVersion ?? undefined,
-      runningBuildId: health.gatewayBuildId ?? undefined,
-      versionMatch, settled: health.healthy === true, coreReady: health.healthy === true,
-    };
-    code = health.runtime?.status === "stopped" ? "service-not-running"
-      : !running ? "gateway-probe-failed" : !versionMatch ? "version-mismatch" : "gateway-readiness-unverified";
-    detail = verified ? "Original Gateway is verified serving." : "Original Gateway serving health was not verified: " + code;
-  } catch (error) {
-    detail = "Original Gateway recovery probe failed.";
-    appendLog(detail + " " + String(error));
+  if (!terminationRequested && params.serviceRecovery && !restorationArmed && params.recovery?.version) {
+    try {
+      const { waitForGatewayUpdateRecovery } = await import(pathToFileURL(params.recoveryModulePath).href);
+      if (!ownsManagedUpdateLease()) return;
+      const health = await waitForGatewayUpdateRecovery(params.recovery.version, params.recovery.buildId, Math.min(params.recoveryTimeoutMs, 3000));
+      if (!ownsManagedUpdateLease()) return;
+      const running = health.runtime?.status === "running";
+      const versionMatch = health.gatewayVersion === params.recovery.version &&
+        (!params.recovery.buildId || health.gatewayBuildId === params.recovery.buildId);
+      verified = running && versionMatch && health.healthy === true;
+      verification = {
+        serviceRunning: running ? true : health.runtime?.status === "stopped" ? false : undefined,
+        pid: typeof health.runtime?.pid === "number" ? health.runtime.pid : undefined,
+        runningVersion: health.gatewayVersion ?? undefined,
+        runningBuildId: health.gatewayBuildId ?? undefined,
+        versionMatch, settled: health.healthy === true, coreReady: health.healthy === true,
+      };
+      code = health.runtime?.status === "stopped" ? "service-not-running"
+        : !running ? "gateway-probe-failed" : !versionMatch ? "version-mismatch" : "gateway-readiness-unverified";
+      detail = verified ? "Original Gateway is verified serving." : "Original Gateway serving health was not verified: " + code;
+    } catch (error) {
+      detail = "Original Gateway recovery probe failed.";
+      appendLog(detail + " " + String(error));
+    }
   }
   triageFailure.restored = verified;
   triageFailure.recoveryReason = verified ? undefined : detail;
@@ -72,6 +77,11 @@ async function finishManagedUpdateRun() {
   if (!runLedger || !runOutcome) return;
   if (foregroundParked && runOutcome.status === "succeeded") return;
   if (!ownsManagedUpdateLease()) throw new Error("managed update terminal writer lost its current claim");
+  const childFailure = closedUpdateResult?.steps?.find((step) => step.exitCode !== 0 && !step.advisory);
+  const childDetail = childFailure?.failureFacts?.find((fact) => fact.message)?.message ?? childFailure?.diagnostics?.[0];
+  const failureDetail = closedUpdateResult?.reason
+    ? closedUpdateResult.reason + (childDetail ? ": " + childDetail : "")
+    : handoffFailure;
   const terminalResult = {
     ...runOutcome,
     ...(closedUpdateResult ? { reason: closedUpdateResult.reason ?? runOutcome.reason, after: closedUpdateResult.after } : {}),
@@ -79,7 +89,7 @@ async function finishManagedUpdateRun() {
       steps: [...(closedUpdateResult?.steps ?? []), ...(recoveryObservation ? [recoveryObservation.step] : [])],
       recovery: closedUpdateResult?.recovery,
       verification: recoveryObservation?.verification ?? closedUpdateResult?.verification,
-      ...(handoffFailure && runOutcome.status === "failed" ? { failure: { step: "managed-service-handoff", detail: handoffFailure, exitCode: 1 } } : {}),
+      ...(handoffFailure && runOutcome.status === "failed" ? { failure: { step: "managed-service-handoff", detail: failureDetail, exitCode: 1 } } : {}),
     },
     ...(serviceDowntimeMs !== undefined ? { downtimeMs: serviceDowntimeMs } : {}),
   };

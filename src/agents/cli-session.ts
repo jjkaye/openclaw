@@ -7,7 +7,10 @@ import crypto from "node:crypto";
 import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { CliSessionBinding, SessionEntry } from "../config/sessions.js";
-import { normalizeCliSessionReseedReceipt } from "../config/sessions/cli-session-binding.js";
+import {
+  normalizeCliSessionReseedReceipt,
+  normalizeCliTranscriptCursor,
+} from "../config/sessions/cli-session-binding.js";
 import { readErrorName } from "../infra/errors.js";
 import { isFailoverError } from "./failover-error.js";
 import type { FailoverReason } from "./failover/signal.js";
@@ -32,20 +35,6 @@ export function hashCliSessionText(value: string | undefined): string | undefine
     return undefined;
   }
   return crypto.createHash("sha256").update(trimmed).digest("hex");
-}
-
-const CALLER_SURFACE_TOOL_NAMES = new Set([
-  "screen",
-  "show_widget",
-  "suggest_task",
-  "dismiss_task",
-]);
-
-export function hashCliToolNames(toolNames: readonly string[]): string | undefined {
-  // Caller-surface tools may change between ordinary, channel, and completion turns. The
-  // system prompt still restarts a warm process, while native session identity excludes them.
-  const stableNames = toolNames.filter((name) => !CALLER_SURFACE_TOOL_NAMES.has(name)).toSorted();
-  return hashCliSessionText(JSON.stringify(stableNames));
 }
 
 /** Projects explicit native continuity; diagnostic sessionId can name the local session. */
@@ -112,6 +101,13 @@ export function setCliSessionBinding(
       ? { authEpochVersion: binding.authEpochVersion }
       : {}),
   };
+  const transcriptCursor = normalizeCliTranscriptCursor(
+    binding.transcriptCursor ??
+      (previousBinding?.sessionId === trimmed ? previousBinding.transcriptCursor : undefined),
+  );
+  if (transcriptCursor) {
+    nextBinding.transcriptCursor = transcriptCursor;
+  }
   for (const field of [
     "extraSystemPromptHash",
     "messageToolPolicyHash",
@@ -194,8 +190,6 @@ type CliSessionInvalidatedReason =
   | "mcp"
   | "prompt-tools";
 
-type CliSessionContentDriftReason = "system-prompt" | "prompt-tools";
-
 export type CliSessionReuseResult =
   | { mode: "none" }
   | { mode: "reuse"; sessionId: string }
@@ -205,30 +199,6 @@ export type CliSessionReuseResult =
       drift: { reasons: "system-prompt"[] };
     }
   | { mode: "invalidate"; invalidatedReason: CliSessionInvalidatedReason };
-
-const CLI_SESSION_DRIFT_NOTE_PREFIX =
-  "OpenClaw resumed this CLI session after prompt content changed.";
-
-export function buildCliSessionDriftNote(reasons: readonly CliSessionContentDriftReason[]): string {
-  return `${CLI_SESSION_DRIFT_NOTE_PREFIX} Follow the current turn's instructions; changed=${reasons.join(",")}.`;
-}
-
-const CLI_SESSION_DRIFT_NOTE_PREFIXES = [
-  buildCliSessionDriftNote(["system-prompt"]),
-  // Older native transcripts still contain tool-drift notes; strip them on display.
-  buildCliSessionDriftNote(["prompt-tools"]),
-  buildCliSessionDriftNote(["system-prompt", "prompt-tools"]),
-].map((note) => `${note}\n\n`);
-
-// Match only complete notes the producer emits; similar native user text is not context.
-export function stripCliSessionDriftNote(text: string): string {
-  for (const prefix of CLI_SESSION_DRIFT_NOTE_PREFIXES) {
-    if (text.startsWith(prefix)) {
-      return text.slice(prefix.length);
-    }
-  }
-  return text;
-}
 
 const DEFAULT_MESSAGE_TOOL_POLICY_HASH = hashCliSessionText(
   JSON.stringify({ sourceReplyDeliveryMode: "automatic", requireExplicitMessageTarget: false }),

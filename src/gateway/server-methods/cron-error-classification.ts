@@ -10,6 +10,7 @@ export function isCronInvalidRequestError(err: unknown): boolean {
     message.startsWith("unknown cron job id:") ||
     message.startsWith("cron job already exists:") ||
     message.includes("cron job id must not be blank") ||
+    message.startsWith("cron bind") ||
     message.includes("cron declarationKey") ||
     message.includes("cron displayName") ||
     message.includes("cron announce delivery requires an explicit channel") ||
@@ -23,9 +24,7 @@ export function isCronInvalidRequestError(err: unknown): boolean {
     message.includes("cron trigger every interval") ||
     message.includes("cron job is missing sessionTarget") ||
     message.includes("invalid cron sessionTarget session id") ||
-    message.includes('main cron jobs require payload.kind="systemEvent"') ||
-    message.includes("script cron jobs require sessionTarget") ||
-    message.includes("isolated cron jobs require payload.kind") ||
+    message.startsWith('cron sessionTarget "') ||
     message.includes("has no upcoming run time and would never fire") ||
     message.includes('sessionTarget "main" is only valid for the default agent') ||
     message.includes('cron.update payload.kind="systemEvent" requires text') ||

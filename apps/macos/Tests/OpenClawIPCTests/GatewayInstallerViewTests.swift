@@ -131,7 +131,7 @@ struct GatewayInstallerViewTests {
         GatewayInstallerView(
             status: .init(
                 kind: kind,
-                nodeVersion: "26.12.1",
+                nodeVersion: "26.8.1",
                 gatewayVersion: "2026.7.1-2",
                 requiredGateway: "2026.9.3",
                 message: "Gateway setup fixture"),

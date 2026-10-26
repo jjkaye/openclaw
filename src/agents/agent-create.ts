@@ -23,7 +23,6 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { FsSafeError, root } from "../infra/fs-safe.js";
 import { normalizeAgentId, normalizeAgentIdStrict } from "../routing/session-key.js";
 import { runWithAgentCreationClaim } from "../state/agent-creation-claim.js";
-import { assertAgentDeletionRecoveryHoldPredicate } from "../state/agent-deletion-journal-recovery.kernel.js";
 import {
   readAgentDeletionJournalForCreation,
   readAgentDeletionRecoveryHoldsInWorker,
@@ -32,7 +31,7 @@ import type { HeldAgentDatabase } from "../state/agent-deletion-journal.types.js
 import { resolveAgentDeletionRecoveryHoldsInWorker } from "../state/agent-deletion-recovery.js";
 import { recordAgentProvenance, type AgentCreatedVia } from "../state/agent-provenance.js";
 import { createOpenClawAgentDatabasePathMatcher } from "../state/openclaw-agent-db.paths.js";
-import { withExistingOpenClawStateDatabaseCurrentReadOnly } from "../state/openclaw-state-db-readonly.js";
+import { prepareOpenClawAgentDatabaseExecution } from "../state/openclaw-agent-execution.js";
 import { isReservedSystemAgentId } from "../system-agent/agent-id.js";
 import { resolveUserPath } from "../utils.js";
 import { DuplicateAgentError } from "./agent-create-error.js";
@@ -41,13 +40,17 @@ import { claimCompletedAgentDeletion } from "./agent-lifecycle-registry.js";
 import { listAgentRoles, loadAgentRole } from "./agent-roles.js";
 import { toAgentEntriesRecord } from "./agent-scope-config.js";
 import { resolveAgentDir, resolveAgentWorkspaceDir } from "./agent-scope.js";
-import { resolveSharedAuthStoreOwnership } from "./auth-profiles/path-resolve.js";
+import { prepareSharedAuthStoreOwnership } from "./auth-profiles/path-resolve.js";
+import { resolveAuthProfileDatabasePath } from "./auth-profiles/sqlite.js";
 import {
   createAgentIdentityConfig,
   mergeIdentityMarkdownContent,
   sanitizeAgentIdentityLine,
 } from "./identity-file.js";
-import { createWorkspaceFileMutationGuard } from "./workspace-file-mutation-guard.js";
+import {
+  assertCurrentAgentDeletionRecoveryHolds,
+  createWorkspaceFileMutationGuard,
+} from "./workspace-file-mutation-guard.js";
 import type { WorkspaceStateGuard } from "./workspace-state-store.worker-contract.js";
 import {
   DEFAULT_IDENTITY_FILENAME,
@@ -127,6 +130,8 @@ type CreateAgentParams = {
   prepareConfigCommit?: () => Promise<ConfigCommitReceipt | void>;
   /** Observe published config before post-commit bookkeeping that may still fail. */
   onCommitted?: (result: CreateAgentSuccess & { config: OpenClawConfig }) => void;
+  /** Provider cadence resolved from staged onboarding before config publication. */
+  proactiveCadenceMs?: number;
   provenance?: { createdVia: AgentCreatedVia; creatorAgentId?: string };
 };
 
@@ -206,7 +211,7 @@ function describeLegacySessionOutcome(outcome: LegacyMainSessionMigrationOutcome
   switch (outcome.kind) {
     case "divergent-aliases":
     case "divergent-canonical":
-      return `${outcome.kind} for ${outcome.canonicalKey ?? "the canonical session"}; preserved claims ${claims.join(", ") || "could not be reconciled"} must be quarantined`;
+      return `${outcome.kind} for ${outcome.canonicalKey ?? "the current session"}; preserved claims ${claims.join(", ") || "could not be reconciled"} must be quarantined`;
     case "legacy-json-store":
       return `legacy JSON session store ${outcome.paths?.join(", ") ?? "requires import"}`;
     case "store-unreadable":
@@ -222,8 +227,7 @@ function describeLegacySessionOutcome(outcome: LegacyMainSessionMigrationOutcome
     case "no-legacy-rows":
       return "the current session-store layout has no matching completed migration ledger";
   }
-  const unreachable: never = outcome.kind;
-  return unreachable;
+  return outcome.kind satisfies never;
 }
 
 async function evaluateMainCreationGate(
@@ -257,7 +261,7 @@ async function evaluateMainCreationGate(
     );
   }
 
-  if (resolveSharedAuthStoreOwnership().location !== "state-db") {
+  if ((await prepareSharedAuthStoreOwnership()).location !== "state-db") {
     return createError(
       "shared-auth-store-owned-by-main",
       'Cannot create agent "main" while agents/main/agent owns the shared auth store. Run openclaw doctor --fix to relocate shared auth, then retry.',
@@ -319,8 +323,7 @@ export async function createAgent(params: CreateAgentParams): Promise<CreateAgen
   const agentId = validation.agentId;
   const isBootstrapMain = agentId === BOOTSTRAP_AGENT_ID && params.bootstrapMain === true;
   const automaticBootstrap = params.bootstrapMain === true || params.bootstrapFirstAgent === true;
-  // Staged auth for a recreated identity must open that identity's databases beneath its
-  // completed deletion record. The scope covers only the receipt, so early exits never hold it.
+  // Database preparation and staged auth for a recreated identity share its creation claim.
   const withCreationClaim = <T>(run: () => Promise<T>) =>
     runWithAgentCreationClaim({ agentId }, run);
 
@@ -360,10 +363,7 @@ export async function createAgent(params: CreateAgentParams): Promise<CreateAgen
     assertRecoveryPathCurrent();
     const predicate = recoveryHoldPredicate();
     if (predicate.applies) {
-      withExistingOpenClawStateDatabaseCurrentReadOnly(
-        (database) => assertAgentDeletionRecoveryHoldPredicate(database, predicate),
-        { allowNativeRead: true },
-      );
+      assertCurrentAgentDeletionRecoveryHolds(predicate);
     }
   };
   const hasBootstrapHold = async () =>
@@ -500,11 +500,6 @@ export async function createAgent(params: CreateAgentParams): Promise<CreateAgen
           const workspaceDir =
             explicitWorkspace ?? resolveAgentWorkspaceDir(currentConfig, agentId);
           const agentDir = explicitAgentDir ?? resolveAgentDir(currentConfig, agentId);
-          const materializeInjectedMain =
-            existingIndex >= 0 &&
-            isBootstrapMain &&
-            isInjectedBootstrapMainEntry(existingEntry) &&
-            !context.snapshot.exists;
           const creationBase = bootstrappingFirstAgent
             ? {
                 ...currentConfig,
@@ -514,17 +509,14 @@ export async function createAgent(params: CreateAgentParams): Promise<CreateAgen
                 },
               }
             : (params.stagedConfig?.config ?? currentConfig);
-          let nextConfig =
-            existingIndex < 0 || materializeInjectedMain
-              ? applyAgentConfig(creationBase, {
-                  agentId,
-                  name: safeName,
-                  workspace: workspaceDir,
-                  agentDir,
-                  model,
-                  identity,
-                })
-              : creationBase;
+          let nextConfig = applyAgentConfig(creationBase, {
+            agentId,
+            name: safeName,
+            workspace: workspaceDir,
+            agentDir,
+            model,
+            identity,
+          });
           if (params.entry || template) {
             const list = listAgentEntries(nextConfig);
             const index = findAgentEntryIndex(list, agentId);
@@ -635,12 +627,14 @@ export async function createAgent(params: CreateAgentParams): Promise<CreateAgen
           // The receipt owns compensation until the config transform publishes this result.
           // Capture the receipt before settlement so a failed close still reaches rollback.
           beforePersistentApply();
-          if (params.prepareConfigCommit) {
-            const prepareConfigCommit = params.prepareConfigCommit;
-            await withCreationClaim(async () => {
-              configCommitReceipt = (await prepareConfigCommit()) ?? undefined;
-            });
-          }
+          await withCreationClaim(async () => {
+            configCommitReceipt = (await params.prepareConfigCommit?.()) ?? undefined;
+            beforePersistentApply();
+            await prepareOpenClawAgentDatabaseExecution(
+              { agentId, path: resolveAuthProfileDatabasePath(agentDir) },
+              assertHost,
+            );
+          });
 
           return {
             nextConfig,
@@ -683,6 +677,12 @@ export async function createAgent(params: CreateAgentParams): Promise<CreateAgen
       }
       if (result.status === "created") {
         await recordAgentProvenance(agentId, params.provenance ?? { createdVia: "operator" });
+        const { provisionDefaultProactiveJob } = await import("../cron/default-proactive-job.js");
+        await provisionDefaultProactiveJob(result.config, agentId, {
+          cadenceMs: params.proactiveCadenceMs,
+          commitGuard: assertHost,
+          recoveryHoldPredicate: recoveryHoldPredicate(),
+        });
       }
       if (recoveryPaths.length > 0) {
         assertRecoveryCurrent();

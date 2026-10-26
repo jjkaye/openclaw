@@ -133,73 +133,40 @@ export function rewriteOpenEndedRepeats(source: string, flags = ""): string {
   let i = 0;
   while (i < source.length) {
     const char = source[i]!;
+    let end = i + 1;
+    let isAtom = true;
     if (char === "\\") {
       // Only canonical built-in sources reach this rewriter; operator-configured sources
       // compile unmodified at the caller, so their legacy escape and class boundaries keep
       // their exact language. The escape handling below is exact for the built-in sources.
-      const end = escapeAtomEnd(source, i);
+      end = escapeAtomEnd(source, i);
       if (end < 0) {
-        out += char;
-        i += 1;
-        atomStart = -1;
-        continue;
-      }
-      // Adjacent `\uD83D\uDE00` escapes form one complete atom under the `u` flag: a
-      // following quantifier must repeat the pair, not its trailing code unit. Rewriting
-      // them independently changes the configured pattern's language.
-      if (
+        end = i + 1;
+        isAtom = false;
+      } else if (
+        // Unicode surrogate escapes form one atom, just like a literal surrogate pair.
         flags.includes("u") &&
         isHighSurrogateEscape(source, i) &&
         source[end] === "\\" &&
         isLowSurrogateEscape(source, end)
       ) {
-        const pairEnd = escapeAtomEnd(source, end);
-        out += source.slice(i, pairEnd);
-        atomStart = i;
-        atomEnd = pairEnd;
-        i = pairEnd;
-        continue;
-      }
-      out += source.slice(i, end);
-      if (ASSERTION_ESCAPE_CHARS.has(source[i + 1]!)) {
-        atomStart = -1;
+        end = escapeAtomEnd(source, end);
       } else {
-        atomStart = i;
-        atomEnd = end;
+        isAtom = !ASSERTION_ESCAPE_CHARS.has(source[i + 1]!);
       }
-      i = end;
-      continue;
-    }
-    if (char === "[") {
-      const end = classAtomEnd(source, i);
+    } else if (char === "[") {
+      end = classAtomEnd(source, i);
       if (end < 0) {
         // Unsupported class shape: report the source as unsupported so the rewrite leaves
         // the configured expression unchanged and the pattern keeps its exact language.
         return source;
       }
-      out += source.slice(i, end);
-      atomStart = i;
-      atomEnd = end;
-      i = end;
-      continue;
-    }
-    if (char === "{") {
+    } else if (char === "{") {
       const open = OPEN_REPEAT_RE.exec(source.slice(i));
-      if (open && atomStart >= 0) {
-        const atom = source.slice(atomStart, atomEnd);
-        out += `{${open[1]}}${atom}*`;
-        i += open[0].length;
-        if (source[i] === "?") {
-          out += "?";
-          i += 1;
-        }
-        atomStart = -1;
-        continue;
-      }
-      const bounded = BOUNDED_REPEAT_RE.exec(source.slice(i));
-      if (bounded) {
-        out += bounded[0];
-        i += bounded[0].length;
+      const repeat = open && atomStart >= 0 ? open : BOUNDED_REPEAT_RE.exec(source.slice(i));
+      if (repeat) {
+        out += repeat === open ? `{${open[1]}}${source.slice(atomStart, atomEnd)}*` : repeat[0];
+        i += repeat[0].length;
         if (source[i] === "?") {
           out += "?";
           i += 1;
@@ -208,18 +175,8 @@ export function rewriteOpenEndedRepeats(source: string, flags = ""): string {
         continue;
       }
       // A brace that is neither quantifier is a literal single-character atom.
-      out += char;
-      atomStart = i;
-      atomEnd = i + 1;
-      i += 1;
-      continue;
-    }
-    out += char;
-    // A literal astral character is one atom only under the `u` flag: with `u`, a surrogate
-    // pair is a single code point, so splitting it between a quantifier and its atom changes
-    // the pattern's language. Without `u`, JavaScript quantifies only the trailing code unit,
-    // so the pair must keep its per-unit handling and the original language.
-    if (
+    } else if (
+      // Without `u`, JavaScript quantifies only the trailing surrogate code unit.
       flags.includes("u") &&
       char >= "\uD800" &&
       char <= "\uDBFF" &&
@@ -227,28 +184,14 @@ export function rewriteOpenEndedRepeats(source: string, flags = ""): string {
       source[i + 1]! >= "\uDC00" &&
       source[i + 1]! <= "\uDFFF"
     ) {
-      out += source[i + 1]!;
-      atomStart = i;
-      atomEnd = i + 2;
-      i += 2;
-      continue;
-    }
-    if (
-      char === "*" ||
-      char === "+" ||
-      char === "?" ||
-      char === "(" ||
-      char === ")" ||
-      char === "|" ||
-      char === "^" ||
-      char === "$"
-    ) {
-      atomStart = -1;
+      end = i + 2;
     } else {
-      atomStart = i;
-      atomEnd = i + 1;
+      isAtom = !"*+?()|^$".includes(char);
     }
-    i += 1;
+    out += source.slice(i, end);
+    atomStart = isAtom ? i : -1;
+    atomEnd = end;
+    i = end;
   }
   return out;
 }
@@ -323,32 +266,6 @@ export function setRedactPatternPrefilter(
 // Derived matchers live only as long as their owner pattern, never as long as a secret value.
 const indexedPatterns = new WeakMap<RegExp, RegExp>();
 
-function getIndexedCaptureStart(
-  pattern: ResolvedRedactPattern,
-  input: string,
-  match: string,
-  matchOffset: number,
-  captureIndex: number,
-): number | null {
-  if (!(pattern instanceof RegExp) || matchOffset < 0 || !input) {
-    return null;
-  }
-  let indexedPattern = indexedPatterns.get(pattern);
-  if (!indexedPattern) {
-    indexedPattern = new RegExp(
-      pattern.source,
-      `${pattern.flags.replace("d", "").replace("g", "")}dg`,
-    );
-    indexedPatterns.set(pattern, indexedPattern);
-  }
-  indexedPattern.lastIndex = matchOffset;
-  const indexedMatch = indexedPattern.exec(input);
-  const captureIndices = indexedMatch?.indices?.[captureIndex + 1];
-  return indexedMatch?.index === matchOffset && indexedMatch[0] === match && captureIndices
-    ? captureIndices[0] - matchOffset
-    : null;
-}
-
 type SecretCaptureSelection = {
   index: number;
   value: string;
@@ -373,14 +290,24 @@ export function getSecretCaptureStart(
   matchOffset: number,
   selected: SecretCaptureSelection,
 ): number {
-  const indexedTokenStart = getIndexedCaptureStart(
-    pattern,
-    input,
-    match,
-    matchOffset,
-    selected.index,
-  );
-  return indexedTokenStart ?? match.lastIndexOf(selected.value);
+  const captureIndex = selected.index;
+  if (!(pattern instanceof RegExp) || matchOffset < 0 || !input) {
+    return match.lastIndexOf(selected.value);
+  }
+  let indexedPattern = indexedPatterns.get(pattern);
+  if (!indexedPattern) {
+    indexedPattern = new RegExp(
+      pattern.source,
+      `${pattern.flags.replace("d", "").replace("g", "")}dg`,
+    );
+    indexedPatterns.set(pattern, indexedPattern);
+  }
+  indexedPattern.lastIndex = matchOffset;
+  const indexedMatch = indexedPattern.exec(input);
+  const captureIndices = indexedMatch?.indices?.[captureIndex + 1];
+  return indexedMatch?.index === matchOffset && indexedMatch[0] === match && captureIndices
+    ? captureIndices[0] - matchOffset
+    : match.lastIndexOf(selected.value);
 }
 
 const globalPatterns = new WeakMap<RegExp, RegExp>();

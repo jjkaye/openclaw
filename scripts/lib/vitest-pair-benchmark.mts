@@ -33,7 +33,7 @@ import {
 } from "./vitest-pair-benchmark-contract.mts";
 
 const CHILD_TIMEOUT_MS = 15 * 60 * 1000;
-export const VITEST_PAIR_HARNESS_DEADLINE_MS = 165 * 60 * 1000;
+const VITEST_PAIR_HARNESS_DEADLINE_MS = 165 * 60 * 1000;
 
 type RunCommandOptions = {
   bin: string;
@@ -245,27 +245,14 @@ function runVitestArgs(lane: BenchmarkLane, reportFile: string): string[] {
   if (!path.isAbsolute(reportFile)) {
     throw new Error("Vitest JSON report path must be absolute");
   }
-  if (lane.config) {
-    return [
-      "scripts/run-vitest.mjs",
-      "run",
-      "--config",
-      lane.config,
-      "--reporter=json",
-      "--includeTaskLocation",
-      "--outputFile",
-      reportFile,
-      ...lane.files,
-    ];
-  }
   return [
     "scripts/run-vitest.mjs",
-    ...lane.files,
-    "--",
+    ...(lane.config ? ["run", "--config", lane.config] : [...lane.files, "--"]),
     "--reporter=json",
     "--includeTaskLocation",
     "--outputFile",
     reportFile,
+    ...(lane.config ? lane.files : []),
   ];
 }
 
@@ -304,13 +291,8 @@ async function runBenchmarkCommand(
   let timing: ReturnType<typeof parseGnuTime> | undefined;
   let execution: BenchmarkExecutionSummary | null = null;
   const createRecord = (): BenchmarkRunRecord => ({
-    id: plan.id,
-    phase: plan.phase,
-    side: plan.side,
+    ...plan,
     lane: plan.lane.id,
-    round: plan.round,
-    pair: plan.pair,
-    cacheMode: plan.cacheMode,
     command,
     packageManager,
     startedAt,

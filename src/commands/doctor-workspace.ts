@@ -1,4 +1,3 @@
-/** Doctor checks and repairs for workspace memory files and legacy workspace hints. */
 import { isUtf8 } from "node:buffer";
 import fs from "node:fs";
 import path from "node:path";
@@ -9,6 +8,7 @@ import { DEFAULT_AGENTS_FILENAME } from "../agents/workspace.js";
 import { safeRealpathSync } from "../infra/boundary-path.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { findGitRoot } from "../infra/git-root.js";
+import { statIfExists as statPathIfExists } from "../infra/path-existence.js";
 import {
   CANONICAL_ROOT_MEMORY_FILENAME,
   LEGACY_ROOT_MEMORY_FILENAME,
@@ -84,15 +84,8 @@ export async function shouldSuggestMemorySystem(workspaceDir: string): Promise<b
 }
 
 async function statIfExists(filePath: string) {
-  try {
-    const stat = await fs.promises.stat(filePath);
-    return stat.isFile() ? { exists: true, bytes: stat.size } : { exists: false };
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
-      return { exists: false };
-    }
-    throw err;
-  }
+  const stat = await statPathIfExists(filePath);
+  return stat?.isFile() ? { exists: true, bytes: stat.size } : { exists: false };
 }
 
 async function listWorkspaceEntries(workspaceDir: string): Promise<Set<string>> {
@@ -273,9 +266,9 @@ export async function noteWorkspaceMemoryHealth(scope: WorkspaceMemoryDoctorScop
     if (detection.canonicalExists && detection.legacyExists) {
       const rootMemoryWarning = [
         "Split root durable memory files detected:",
-        `- canonical: ${shortenHomePath(detection.canonicalPath)} (${formatBytes(detection.canonicalBytes)})`,
+        `- current: ${shortenHomePath(detection.canonicalPath)} (${formatBytes(detection.canonicalBytes)})`,
         `- legacy: ${shortenHomePath(detection.legacyPath)} (${formatBytes(detection.legacyBytes)})`,
-        `OpenClaw uses ${CANONICAL_ROOT_MEMORY_FILENAME} as the canonical durable memory file.`,
+        `OpenClaw uses ${CANONICAL_ROOT_MEMORY_FILENAME} as the current durable memory file.`,
         `Dreaming writes durable promotions to ${CANONICAL_ROOT_MEMORY_FILENAME}, so older facts in ${LEGACY_ROOT_MEMORY_FILENAME} can be shadowed.`,
         `Run "openclaw doctor --fix" to merge the legacy file into ${CANONICAL_ROOT_MEMORY_FILENAME} with a backup.`,
       ].join("\n");
@@ -305,7 +298,7 @@ export async function maybeRepairWorkspaceMemoryHealth(params: {
       return;
     }
     const approvedLegacyMigration = await params.prompter.confirmRuntimeRepair({
-      message: `${prefix}Merge legacy root ${LEGACY_ROOT_MEMORY_FILENAME} into canonical ${CANONICAL_ROOT_MEMORY_FILENAME} and remove the shadowed file?`,
+      message: `${prefix}Merge legacy root ${LEGACY_ROOT_MEMORY_FILENAME} into the current ${CANONICAL_ROOT_MEMORY_FILENAME} and remove the shadowed file?`,
       initialValue: true,
     });
     if (!approvedLegacyMigration) {
@@ -317,7 +310,7 @@ export async function maybeRepairWorkspaceMemoryHealth(params: {
       note(
         [
           `${prefix}Workspace memory root repair skipped (${reason}):`,
-          `- canonical: ${migration.canonicalPath}`,
+          `- current: ${migration.canonicalPath}`,
           `- legacy: ${migration.legacyPath}`,
           migration.archivedLegacyPath
             ? `- preserved archive: ${migration.archivedLegacyPath}`
@@ -334,7 +327,7 @@ export async function maybeRepairWorkspaceMemoryHealth(params: {
     }
     const lines = [
       `${prefix}Workspace memory root merged:`,
-      `- canonical: ${migration.canonicalPath}`,
+      `- current: ${migration.canonicalPath}`,
       migration.archivedLegacyPath ? `- backup: ${migration.archivedLegacyPath}` : null,
       migration.mergedLegacy ? `- merged legacy content from: ${migration.legacyPath}` : null,
       `- removed legacy file: ${migration.legacyPath}`,

@@ -2,11 +2,6 @@ import { defineCodexBuildState } from "../build-state.js";
 import type { CodexAppServerClient } from "./client.js";
 
 const MAX_CLOSED_THREAD_RECEIPTS = 256;
-const THREAD_TERMINAL_NOTIFICATION_METHODS = new Set([
-  "thread/archived",
-  "thread/deleted",
-  "thread/closed",
-]);
 const closureState = defineCodexBuildState("openclaw.codexAppServerClosedThreads", () => ({
   closedThreadsByClient: new WeakMap<CodexAppServerClient, Set<string>>(),
   observedClients: new WeakSet<CodexAppServerClient>(),
@@ -17,17 +12,9 @@ function recordCodexAppServerThreadClosed(client: CodexAppServerClient, threadId
   receipts.delete(threadId);
   receipts.add(threadId);
   while (receipts.size > MAX_CLOSED_THREAD_RECEIPTS) {
-    const oldestThreadId = receipts.values().next().value;
-    if (oldestThreadId === undefined) {
-      break;
-    }
-    receipts.delete(oldestThreadId);
+    receipts.delete(receipts.values().next().value!);
   }
   closureState.closedThreadsByClient.set(client, receipts);
-}
-
-export function isCodexAppServerThreadTerminalNotification(method: string): boolean {
-  return THREAD_TERMINAL_NOTIFICATION_METHODS.has(method);
 }
 
 export function ensureCodexAppServerThreadClosureTracking(client: CodexAppServerClient): void {
@@ -36,14 +23,12 @@ export function ensureCodexAppServerThreadClosureTracking(client: CodexAppServer
   }
   closureState.observedClients.add(client);
   client.addNotificationHandler((notification) => {
+    const params = notification.params;
     const threadId =
-      notification.params && typeof notification.params === "object"
-        ? Reflect.get(notification.params, "threadId")
+      typeof params === "object" && params !== null && "threadId" in params
+        ? params.threadId
         : undefined;
-    if (
-      isCodexAppServerThreadTerminalNotification(notification.method) &&
-      typeof threadId === "string"
-    ) {
+    if (notification.method === "thread/closed" && typeof threadId === "string") {
       recordCodexAppServerThreadClosed(client, threadId);
     }
   });

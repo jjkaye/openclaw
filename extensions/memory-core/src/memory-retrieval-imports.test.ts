@@ -12,7 +12,10 @@ it("loads retrieval query and identity selectors without session storage", async
       import("./memory/manager-session-sync-state.js"),
       import("./memory/keyword-query.js"),
     ]);
-  expect(planKeywordSearch({ query: "API deployment" }).matchQuery).toBe('"API" AND "deployment"');
+  expect(planKeywordSearch({ query: "API deployment", matchAny: true }).tokens).toEqual([
+    "API",
+    "deployment",
+  ]);
   const entry = {
     generatedByDreamingNarrative: false,
     generatedByCronRun: false,

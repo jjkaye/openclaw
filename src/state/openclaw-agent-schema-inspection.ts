@@ -27,11 +27,8 @@ import {
   getOpenClawAgentMigrationSchema,
 } from "./openclaw-agent-db-schema-helpers.js";
 import type { OpenClawAgentSchemaPreflightResult } from "./openclaw-database-preflight.types.js";
-import {
-  canReuseOpenClawAgentIntegrityVerification,
-  type readOpenClawAgentIntegrityVerification,
-} from "./openclaw-quarantine-store.js";
 import { OPENCLAW_SQLITE_BUSY_TIMEOUT_MS } from "./openclaw-state-db-contract.js";
+import { resolveSchemaMigrationIntegrityCheck } from "./schema-migration-backup-scope.js";
 
 export type AgentSchemaInspectionInput = {
   pathname: string;
@@ -42,8 +39,7 @@ export type AgentSchemaInspectionInput = {
   inspectOwnership?: boolean;
   requireStartupMigrationReadiness?: boolean;
   deferRuntimeIntegrity?: boolean;
-  startupIntegrityStateDir?: string;
-  startupIntegrityVerification?: ReturnType<typeof readOpenClawAgentIntegrityVerification>;
+  startupIntegrityVerification?: { verifiedAt: number };
   inspectEmptyStore?: boolean;
 };
 
@@ -159,20 +155,27 @@ export function inspectAgentDatabaseSchema(
       const migrationPending =
         version !== input.supportedVersion ||
         hasPendingCurrentVersionAgentDatabaseMigration(database);
-      if (
-        canReuseOpenClawAgentIntegrityVerification(
-          input.pathname,
-          input.startupIntegrityVerification,
-          migrationPending,
-        )
-      ) {
+      if (input.startupIntegrityVerification !== undefined && !migrationPending) {
         inspection.integrityGateOutcome = "cached";
       } else if (input.deferRuntimeIntegrity && !migrationPending) {
         // The pending Gateway owner claims the live lease and validates before writes.
         inspection.preparationPending = true;
       } else {
-        assertSqliteIntegrity(database, input.pathname);
+        assertSqliteIntegrity(
+          database,
+          input.pathname,
+          version < input.supportedVersion
+            ? resolveSchemaMigrationIntegrityCheck({
+                kind: "agent",
+                foundVersion: version,
+                supportedVersion: input.supportedVersion,
+              })
+            : undefined,
+        );
         inspection.integrityGateOutcome = "healthy";
+      }
+      if (migrationPending && version === input.supportedVersion) {
+        inspection.preparationPending = true;
       }
       assertCanonicalAgentPersistenceVersion(database, input.pathname, version);
     }

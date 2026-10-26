@@ -1,8 +1,12 @@
+import { safeParseJsonRecord } from "@openclaw/normalization-core/json-coercion";
+import { asPositiveSafeInteger } from "@openclaw/normalization-core/number-coercion";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import type { GatewayStorageFailure } from "../../infra/sqlite-error-diagnostics.js";
+import { classifyGatewayStorageFailure } from "../../infra/sqlite-error-diagnostics.js";
 import { redactSensitiveText } from "../../logging/redact.js";
 import {
+  CONTEXT_OVERFLOW_ERROR_MESSAGE,
   extractErrorHttpStatus,
   formatTransportErrorCopy,
   parseApiErrorInfo,
@@ -41,6 +45,8 @@ export const ERROR_DETAILS_HINT =
   "For details, open Settings → Logs in the Control UI or run `openclaw logs --follow` in your terminal.";
 
 const STORAGE_FAILURE_COPY: Record<GatewayStorageFailure, string> = {
+  unavailable:
+    "The database connection was lost. This operation was rolled back; nothing from it was saved. Please retry.",
   SQLITE_BUSY:
     "OpenClaw is busy saving your conversation. Wait a moment, then check the conversation before trying again.",
   SQLITE_LOCKED:
@@ -53,6 +59,10 @@ const STORAGE_FAILURE_COPY: Record<GatewayStorageFailure, string> = {
     "OpenClaw couldn't save your conversation. Check the storage on the computer running OpenClaw before continuing.",
   transcript_writer_fenced:
     "This conversation changed while OpenClaw was working. Check its latest messages before continuing.",
+  session_actor_reconciliation:
+    "OpenClaw couldn't confirm the last update to this conversation. Some work may have been saved. Wait for current work to finish, then reopen the conversation and check its history before trying again. If it still fails, restart OpenClaw.",
+  "57014":
+    "PostgreSQL canceled a database operation or its statement timed out. Check the conversation for completed work before trying again. If it happens again, ask the operator to check PostgreSQL timeouts and server activity.",
 };
 
 const RUNTIME_COORDINATION_FAILURE_CODE_COPY: Readonly<Record<string, string>> = {
@@ -76,8 +86,7 @@ const ASSISTANT_REQUEST_FAILURE_COPY = {
   timeout:
     "The request took too long. Check the conversation for any completed work before trying again.",
   tls_certificate: `Couldn't connect securely to the AI service. ${ERROR_DETAILS_HINT}`,
-  context_overflow:
-    "This conversation is too long for the model. Try /compact, or start a new conversation with /new.",
+  context_overflow: CONTEXT_OVERFLOW_ERROR_MESSAGE,
   model_not_found:
     "This model was not found. Choose another model in the Control UI or run `openclaw configure`.",
   session_expired:
@@ -114,7 +123,7 @@ export function renderAssistantRequestFailureCopy(
     return `⚠️ ${copy}`;
   }
   const hasStatus =
-    typeof facts.status === "number" &&
+    facts.status !== undefined &&
     Number.isInteger(facts.status) &&
     facts.status >= 100 &&
     facts.status <= 599;
@@ -151,6 +160,11 @@ export function renderFormatErrorCopy(raw: string): string {
   }
   if (isSessionTranscriptValidationErrorMessage(candidate)) {
     return "OpenClaw couldn't read this conversation's history. Ask the Gateway operator to try `openclaw doctor --fix`. If it still fails, preserve the history and contact support with the Gateway logs.";
+  }
+  const embeddingModel = candidate.match(/^"([\w./:-]{1,200})" does not support chat$/u)?.[1];
+  if (embeddingModel) {
+    const model = escapeMarkdownText(redactSensitiveText(embeddingModel, { mode: "tools" }));
+    return `${model} is an embedding model and cannot chat; pick a chat model with /model (or remove it from models.providers.ollama.models).`;
   }
   if (PROVIDER_CACHE_CONTROL_LIMIT_RE.test(candidate)) {
     return "The AI service couldn't accept this conversation. Start a new conversation with /new, or choose another model in the Control UI.";
@@ -223,13 +237,44 @@ export function renderAssistantFormatFailureCopy(
   return undefined;
 }
 
+/** Render loading facts without trusting provider diagnostics or recovery instructions. */
+export function renderModelLoadFailureCopy(message: {
+  model?: unknown;
+  errorCode?: unknown;
+  errorBody?: unknown;
+}): string | undefined {
+  if (
+    message.errorCode !== "model_load_failed" ||
+    typeof message.errorBody !== "string" ||
+    typeof message.model !== "string"
+  ) {
+    return undefined;
+  }
+  const contextLength = asPositiveSafeInteger(
+    safeParseJsonRecord(message.errorBody)?.requestedContextLength,
+  );
+  const model = redactSensitiveText(message.model, { mode: "tools" })
+    .replace(/[\p{Cc}\p{Cf}\s]+/gu, " ")
+    .trim();
+  if (!contextLength || !model) {
+    return undefined;
+  }
+  const label = escapeMarkdownText(truncateUtf16Safe(model, 200));
+  return `Could not load model "${label}" with ${contextLength} context tokens. Wait for loading to finish on the model server, then retry, or lower the model's configured context size.`;
+}
+
 /** Classify saved error facts without loading providers or publishing their raw diagnostics. */
 export function renderRecordedAssistantFailureCopy(message: {
+  model?: unknown;
   errorMessage?: unknown;
   errorBody?: unknown;
   errorCode?: unknown;
   errorType?: unknown;
 }): string | undefined {
+  const modelLoadCopy = renderModelLoadFailureCopy(message);
+  if (modelLoadCopy) {
+    return modelLoadCopy;
+  }
   const approvalMessage = resolveExecutionApprovalFailureMessage(
     typeof message.errorMessage === "string" ? message.errorMessage : undefined,
   );
@@ -265,7 +310,7 @@ export function renderRecordedAssistantFailureCopy(message: {
           isContextOverflowErrorFromTables(value)),
     )
   ) {
-    return "This conversation is too long for the model. Try /compact, or start a new conversation with /new.";
+    return CONTEXT_OVERFLOW_ERROR_MESSAGE;
   }
   const formatCopy =
     !classification?.reason || classification.reason === "format"
@@ -275,6 +320,7 @@ export function renderRecordedAssistantFailureCopy(message: {
     return formatCopy;
   }
   const classifiedCopy = renderAssistantRequestFailureCopy({
+    storageFailure: classifyGatewayStorageFailure(message),
     code,
     status,
     // The legacy timeout retry bucket also includes explicit server failures.

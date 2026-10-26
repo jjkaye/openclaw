@@ -1,20 +1,13 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { withOpenClawTestState } from "openclaw/plugin-sdk/test-state";
 import { expect, it, vi } from "vitest";
 import type { OpenClawPluginServiceContext } from "../runtime-api.js";
 import { createEmptyAcpxKeyedStore } from "./empty-keyed-store.test-support.js";
+import { fixtureSession, ownerAgentScript } from "./runtime-process.test-support.js";
 import type { CompleteAcpRuntime } from "./runtime-proxy.js";
 import { createAcpxRuntimeService } from "./service.js";
-
-const ownerAgentScript = fileURLToPath(
-  new URL("../../../test/fixtures/acp/owner-agent.mjs", import.meta.url),
-);
-
-function fixtureSession(sessionKey: string) {
-  return { sessionKey, agent: "fixture", mode: "persistent" as const };
-}
 
 it("probes without a default workspace and launches sessions in their requested cwd", async () => {
   await withOpenClawTestState(

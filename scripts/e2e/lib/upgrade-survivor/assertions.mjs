@@ -25,6 +25,7 @@ import {
   seedLegacyExecApprovalPolicy,
 } from "./exec-approval-fixture.mjs";
 import { readDatabase } from "./observations.mjs";
+import { captureSessionArchives, readSessionArchiveBytes } from "./session-archive-proof.mjs";
 import * as sessionSourceFixture from "./session-source-fixture.mjs";
 import {
   assertUpgradeVolumeMigrated,
@@ -666,6 +667,9 @@ function captureLegacyOperatorPendingDelivery([stateDir, artifactRoot]) {
   }
   let witness;
   try {
+    // Managed candidate workers strip NODE_OPTIONS. The external service shim
+    // observes after Doctor, before startup recovery and terminal cleanup.
+    captureSessionArchives(stateDir, path.join(artifactRoot, "session-archives"));
     readDatabase(path.join(stateDir, "agents/ops/agent/openclaw-agent.sqlite"), (db) => {
       witness = { row: readLegacyOperatorPendingDelivery(db) };
     });
@@ -736,14 +740,17 @@ function assertLegacyOperatorPendingDelivery([updateJson, updateErr]) {
     .readdirSync(runsDir)
     .filter((name) => name.endsWith(".json"))
     .map((name) => readJson(path.join(runsDir, name)))
-    .filter((run) => run.completedAt)
-    .flatMap((run) => run.targets.flatMap((target) => target.completedMoves))
+    .filter((run) => run.completedAt && !run.failedAt)
+    .flatMap((run) =>
+      run.targets
+        .filter((target) => target.validationBeforeArchive === "passed")
+        .flatMap((target) => target.completedMoves),
+    )
     .some(
       (move) =>
         move.kind === "legacy-store" &&
         move.sourcePath === fixture.storePath &&
-        fs.existsSync(move.archivePath) &&
-        fs.readFileSync(move.archivePath, "utf8") === fixture.original,
+        readSessionArchiveBytes(move).toString("utf8") === fixture.original,
     );
   assert(archived, "published update did not archive the original legacy session bytes");
   assert(liveRow, "startup removed the imported legacy session");
@@ -781,7 +788,7 @@ function assertLegacyOperatorPendingDelivery([updateJson, updateErr]) {
     );
   }
   console.log(
-    "Published updater: legacy pending delivery imported into SQLite; original JSON archived unchanged.",
+    "Published updater: legacy pending delivery imported into SQLite; original JSON archived unchanged and retained or verifiably retired.",
   );
 }
 
@@ -1168,40 +1175,11 @@ function assertSessionMetadataMigrated(stateDir, stage) {
   assert(direct?.sessionId === LEGACY_SESSION_DIRECT_ID, "direct legacy session row missing");
   assert(group?.sessionId === LEGACY_SESSION_GROUP_ID, "channel legacy session row missing");
   if (getScenario() === "acpx-openclaw-tools-bridge") {
-    let acp;
-    if (stage === "baseline") {
-      acp = group.acp;
-    } else {
-      readDatabase(path.join(stateDir, "state", "openclaw.sqlite"), (db) => {
-        const rows = db
-          .prepare(
-            `SELECT backend, agent, runtime_session_name, identity_json, mode,
-                    runtime_options_json, cwd, state, last_activity_at, last_error
-             FROM acp_sessions
-             WHERE session_id = ?`,
-          )
-          .all(LEGACY_SESSION_GROUP_ID);
-        assert(rows.length <= 1, "saved ACP session binding is ambiguous");
-        const row = rows[0];
-        if (row) {
-          acp = {
-            backend: row.backend,
-            agent: row.agent,
-            runtimeSessionName: row.runtime_session_name,
-            ...(row.identity_json ? { identity: JSON.parse(row.identity_json) } : {}),
-            mode: row.mode === "oneshot" ? "oneshot" : "persistent",
-            ...(row.runtime_options_json
-              ? { runtimeOptions: JSON.parse(row.runtime_options_json) }
-              : {}),
-            ...(row.cwd != null ? { cwd: row.cwd } : {}),
-            state: row.state === "running" || row.state === "error" ? row.state : "idle",
-            lastActivityAt: row.last_activity_at,
-            ...(row.last_error != null ? { lastError: row.last_error } : {}),
-          };
-        }
-      });
-    }
-    assertStrict.deepEqual(acp, LEGACY_ACP_META, "saved ACP session or model selection changed");
+    assertStrict.deepEqual(
+      readSavedAcpMetadata(stateDir, group),
+      LEGACY_ACP_META,
+      "saved ACP session or model selection changed",
+    );
   }
   const migratedSessions = [
     [LEGACY_SESSION_MAIN_ID, main],
@@ -1259,6 +1237,47 @@ function assertSessionMetadataMigrated(stateDir, stage) {
     main.skillsSnapshot?.resolvedSkills === undefined,
     "heavy resolvedSkills cache was persisted into migrated session metadata",
   );
+}
+
+function readSavedAcpMetadata(stateDir, group) {
+  const dbPath = path.join(stateDir, "state", "openclaw.sqlite");
+  if (!fs.existsSync(dbPath)) {
+    return group.acp;
+  }
+  return readDatabase(dbPath, (db) => {
+    if (
+      !db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'acp_sessions'")
+        .get()
+    ) {
+      // Frozen releases predating shared ACP storage still own inline metadata.
+      return group.acp;
+    }
+    // Read-only external-fixture contract: this is the exact v1 identity for
+    // ["main", "agent:main:slack:channel:cupgrade"], not a runtime key encoder.
+    // Keep the observer independent of candidate imports and database admission.
+    const row = db
+      .prepare("SELECT * FROM acp_sessions WHERE session_key = ?")
+      .get("@acp:v1:WyJtYWluIiwiYWdlbnQ6bWFpbjpzbGFjazpjaGFubmVsOmN1cGdyYWRlIl0");
+    if (!row) {
+      return undefined;
+    }
+    assert(row.session_id === LEGACY_SESSION_GROUP_ID, "saved ACP session binding changed");
+    return {
+      backend: row.backend,
+      agent: row.agent,
+      runtimeSessionName: row.runtime_session_name,
+      ...(row.identity_json != null ? { identity: JSON.parse(row.identity_json) } : {}),
+      mode: row.mode,
+      ...(row.runtime_options_json != null
+        ? { runtimeOptions: JSON.parse(row.runtime_options_json) }
+        : {}),
+      ...(row.cwd != null ? { cwd: row.cwd } : {}),
+      state: row.state,
+      lastActivityAt: row.last_activity_at,
+      ...(row.last_error != null ? { lastError: row.last_error } : {}),
+    };
+  });
 }
 
 function readMigratedSessionStore(stateDir, targetStorePath) {
@@ -1339,7 +1358,7 @@ function readMigratedSessionStore(stateDir, targetStorePath) {
 
 function readInstalledPluginIndex() {
   const stateDir = requireEnv("OPENCLAW_STATE_DIR");
-  const index = readPluginInstallIndex({ stateDir });
+  const index = readPluginInstallIndex({ stateDir, summary: true });
   assert(index.installRecords, "installed plugin index missing");
   return index;
 }
@@ -1852,7 +1871,30 @@ function assertSuccessfulUpdateResult(result, expectedVersion) {
           step?.exitCode === 0 ||
           (step?.name === "openclaw doctor" &&
             step.exitCode === 86 &&
-            step.advisory?.kind === "package-post-install-doctor"),
+            step.advisory?.kind === "package-post-install-doctor") ||
+          (step?.name === "candidate-gateway-startup-cleanup" &&
+            step.exitCode === null &&
+            step.advisory?.kind === "recoverable-maintenance" &&
+            !step.termination &&
+            !step.signal &&
+            !step.killed &&
+            !step.outputLimitExceeded &&
+            !step.failureFacts?.length &&
+            result.steps.some(
+              (primary) => primary?.name === "candidate-gateway-startup" && primary.exitCode === 0,
+            )) ||
+          // Doctor lint exits 1 for selected INFO findings after verified activation.
+          (step?.name === "post-activation doctor inspections" &&
+            step.exitCode === 1 &&
+            step.advisory?.kind === "recoverable-maintenance" &&
+            step.termination === "exit" &&
+            !step.signal &&
+            !step.killed &&
+            !step.outputLimitExceeded &&
+            !step.failureFacts?.length &&
+            Array.isArray(step.doctorLintFindings) &&
+            step.doctorLintFindings.length > 0 &&
+            step.doctorLintFindings.every((finding) => finding?.severity === "info")),
       ),
     "successful update contained a failed core step",
   );

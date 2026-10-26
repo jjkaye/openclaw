@@ -1,3 +1,4 @@
+import { markToolExecutionRefused } from "./tool-effect-receipt.js";
 import { createToolExecutionMatcher } from "./tool-policy-shared.js";
 import type { AnyAgentTool } from "./tools/common.js";
 import { textResult } from "./tools/tool-results.js";
@@ -5,7 +6,15 @@ import { textResult } from "./tools/tool-results.js";
 type ToolDefinition = Pick<AnyAgentTool, "name" | "parameters" | "description">;
 
 export type AgentToolAvailabilityBinding = {
-  prepare: (tool: ToolDefinition, callableTools: ReadonlyMap<string, ToolDefinition>) => void;
+  /**
+   * `offeredTools` shape the definition, so it stays stable across turns;
+   * `callableTools` decide what this turn may execute.
+   */
+  prepare: (
+    tool: ToolDefinition,
+    callableTools: ReadonlyMap<string, ToolDefinition>,
+    offeredTools: ReadonlyMap<string, ToolDefinition>,
+  ) => void;
   prepareBeforeNormalization?: true;
   executionSchema?: (schema: unknown) => unknown;
 };
@@ -32,6 +41,11 @@ export function getAgentToolAvailabilityBinding(
   return availabilityBindings.get(tool)?.binding;
 }
 
+/** Offered definitions can remain present even when this turn cannot execute them. */
+export function isAgentToolExecutionAvailable(tool: object): boolean {
+  return availabilityBindings.get(tool)?.executionDenied !== true;
+}
+
 export function copyAgentToolAvailability<T extends object>(source: object, target: T): T {
   const metadata = availabilityBindings.get(source);
   if (metadata) {
@@ -49,15 +63,25 @@ export function markAgentToolExecutionUnavailable<T extends object>(tool: T): T 
   return tool;
 }
 
-/** Keep a stable definition while refusing execution for this turn. */
+/**
+ * Keeps a tool's definition, so every turn of a session shares one prompt prefix,
+ * while this turn may not run it.
+ */
 export function gateAgentToolExecution<T extends AnyAgentTool>(tool: T, message: string): T {
   return markAgentToolExecutionUnavailable(
     copyAgentToolAvailability(tool, {
       ...tool,
+      // Preparation can perform work too; a denied call must not enter the source path.
       prepareArguments: undefined,
       prepareBeforeToolCallParams: undefined,
       finalizeBeforeToolCallParams: undefined,
-      execute: async () => textResult(message, { gated: true }),
+      // A denial is guidance for the model, not a tool failure that fails the run;
+      // a failure-like `status` detail would reclassify it as an error.
+      execute: async () =>
+        markToolExecutionRefused(textResult(message, { gated: true }), {
+          kind: "gated",
+          reason: message,
+        }),
     }),
   );
 }
@@ -87,7 +111,7 @@ export function finalizeAgentToolAvailability<T extends ToolDefinition>(
   for (const tool of tools) {
     const binding = availabilityBindings.get(tool)?.binding;
     if (binding && (!options?.beforeNormalization || binding.prepareBeforeNormalization)) {
-      binding.prepare(tool, callableTools);
+      binding.prepare(tool, callableTools, winners);
       options?.onPrepared?.(tool);
     }
   }

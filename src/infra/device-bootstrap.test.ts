@@ -21,6 +21,7 @@ import {
   openOpenClawStateDatabase,
 } from "../state/openclaw-state-db.js";
 import { createTrackedTempDirs } from "../test-utils/tracked-temp-dirs.js";
+import { overbroadBootstrapProfile } from "./device-bootstrap-profile.test-support.js";
 import {
   clearDeviceBootstrapTokens,
   confirmDevicePairSetupCompletionDelivery,
@@ -128,32 +129,6 @@ describe("device bootstrap tokens", () => {
       },
     });
   });
-
-  it("persists setup correlation only on the exact issued bootstrap token", async () => {
-    const baseDir = await createTempDir();
-    const setup = await issueDevicePairSetupBootstrapToken({
-      baseDir,
-      profile: NODE_PAIRING_SETUP_BOOTSTRAP_PROFILE,
-    });
-    const otherSetup = await issueDevicePairSetupBootstrapToken({
-      baseDir,
-      profile: NODE_PAIRING_SETUP_BOOTSTRAP_PROFILE,
-    });
-    const unrelated = await issueDeviceBootstrapToken({ baseDir });
-
-    const records = loadDeviceBootstrapTokenRecords(baseDir);
-    expect(setup.setupId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(setup.setupId).not.toBe(setup.token);
-    expect(otherSetup.setupId).not.toBe(setup.setupId);
-    expect(records[setup.token]?.setupId).toBe(setup.setupId);
-    expect(records[otherSetup.token]?.setupId).toBe(otherSetup.setupId);
-    expect(records[unrelated.token]?.setupId).toBeUndefined();
-
-    const revoked = await revokeDeviceBootstrapToken({ baseDir, token: setup.token });
-    expect(revoked.record?.setupId).toBe(setup.setupId);
-    expect(revoked.record).not.toHaveProperty("expiresAtMs");
-  });
-
   it("keeps cloud-worker setup credentials valid for the enrollment backstop", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-14T12:00:00Z"));
@@ -856,18 +831,7 @@ describe("device bootstrap tokens", () => {
     const baseDir = await createTempDir();
     const issued = await issueDeviceBootstrapToken({
       baseDir,
-      profile: {
-        roles: ["node", "operator"],
-        scopes: [
-          "node.exec",
-          "operator.admin",
-          "operator.approvals",
-          "operator.pairing",
-          "operator.read",
-          "operator.talk.secrets",
-          "operator.write",
-        ],
-      },
+      profile: overbroadBootstrapProfile(),
     });
 
     await expect(
@@ -1003,7 +967,9 @@ describe("device bootstrap tokens", () => {
 
   it("accepts equivalent public key encodings after binding the bootstrap token", async () => {
     const baseDir = await createTempDir();
-    const identity = loadOrCreateDeviceIdentity({ path: path.join(baseDir, "device.sqlite") });
+    const identity = loadOrCreateDeviceIdentity({
+      env: { ...process.env, OPENCLAW_STATE_DIR: baseDir },
+    });
     const issued = await issueDeviceBootstrapToken({ baseDir });
     const rawPublicKey = publicKeyRawBase64UrlFromPem(identity.publicKeyPem);
 

@@ -8,7 +8,6 @@ import {
   parseConfigJson5,
 } from "../../config/io.read-helpers.js";
 import {
-  assertConfigFileWritePathSnapshot,
   captureConfigFileWritePathProof,
   type ConfigFileWritePathSnapshot,
 } from "../../config/io.write-safety.js";
@@ -19,7 +18,7 @@ import {
   readBackupConfigCaptureFile,
   resolveBackupConfigCapture,
 } from "../../infra/backup-config-capture.js";
-import { hasNodeErrorCode } from "../../infra/path-guards.js";
+import { ignoreMissingPath } from "../../infra/errno.js";
 
 type UpdateConfigFileSnapshot = {
   path: string;
@@ -34,12 +33,7 @@ export type UpdateConfigSnapshot = UpdateConfigFileSnapshot & {
 };
 
 export async function readUpdateConfigSnapshot(path: string): Promise<UpdateConfigSnapshot> {
-  const raw = await fs.readFile(path, "utf8").catch((error: unknown) => {
-    if (!hasNodeErrorCode(error, "ENOENT")) {
-      throw error;
-    }
-    return null;
-  });
+  const raw = (await fs.readFile(path, "utf8").catch(ignoreMissingPath)) ?? null;
   return { path, raw, hash: hashConfigRaw(raw) };
 }
 
@@ -61,9 +55,6 @@ export async function captureUpdateConfigSnapshot(
       // Capture authored files only; candidate Doctor owns state verification.
       pluginValidation: "core-only",
     }).readConfigFileSnapshotForWrite();
-    if (selected.snapshot.raw !== root.raw) {
-      throw new ConfigMutationConflictError("config changed while preparing update capture");
-    }
     // Doctor can repair an unresolved include; incomplete preimages cannot authorize rollback.
     if (selected.snapshot.includeProvenance === undefined) {
       return { ...root, doctorOwned: false };
@@ -85,9 +76,6 @@ export async function captureUpdateConfigSnapshot(
       proof.assertCurrent();
       const existing = files.get(file.canonicalPath);
       if (existing) {
-        if (existing.raw !== raw) {
-          throw new ConfigMutationConflictError("config include changed during update capture");
-        }
         existing.pathSnapshot.entries.push(...proof.snapshot.entries);
       } else {
         files.set(file.canonicalPath, {
@@ -97,10 +85,6 @@ export async function captureUpdateConfigSnapshot(
           pathSnapshot: proof.snapshot,
         });
       }
-    }
-    // Full include revalidation reopens state; path identity and raw checks stay file-only.
-    for (const file of files.values()) {
-      assertConfigFileWritePathSnapshot(file.pathSnapshot, fsNode);
     }
     const capturedRoot = files.get(rootTarget);
     if (!capturedRoot) {

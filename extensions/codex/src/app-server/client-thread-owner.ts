@@ -1,5 +1,5 @@
 import { embeddedAgentLog, formatErrorMessage } from "openclaw/plugin-sdk/agent-harness-runtime";
-import type { CodexServiceTier } from "./protocol.js";
+import type { CodexServiceTier, JsonObject } from "./protocol.js";
 
 export type ThreadOwnerToken = {
   /** Immutable creation policy follows the exact claim through deferred background cleanup. */
@@ -40,6 +40,8 @@ export function isThreadBackgroundOnly(
  * share one refreshable section recording what was last delivered to the thread.
  */
 export type CodexEphemeralThreadPolicy = {
+  autoCompactTokenLimit?: number;
+  autoCompactTokenLimitScope?: string;
   developerInstructions?: string;
   refreshableInstructions?: string;
   /**
@@ -198,14 +200,28 @@ export function revertRetainedThreadInstructions(
   }
 }
 
-export function createCodexEphemeralThreadPolicy({
-  developerInstructions,
-  refreshableInstructions,
-}: Pick<
-  CodexEphemeralThreadPolicy,
-  "developerInstructions" | "refreshableInstructions"
->): CodexEphemeralThreadPolicy {
+export function createCodexEphemeralThreadPolicy(
+  {
+    developerInstructions,
+    refreshableInstructions,
+    config,
+  }: Pick<CodexEphemeralThreadPolicy, "developerInstructions" | "refreshableInstructions"> & {
+    config?: {
+      model_auto_compact_token_limit?: unknown;
+      model_auto_compact_token_limit_scope?: unknown;
+    };
+  },
+  nativeConfig?: JsonObject,
+): CodexEphemeralThreadPolicy {
+  const limit =
+    config?.model_auto_compact_token_limit ?? nativeConfig?.model_auto_compact_token_limit;
+  const scope =
+    config?.model_auto_compact_token_limit_scope ??
+    nativeConfig?.model_auto_compact_token_limit_scope ??
+    "total";
   return {
+    ...(typeof limit === "number" ? { autoCompactTokenLimit: limit } : {}),
+    ...(typeof scope === "string" ? { autoCompactTokenLimitScope: scope } : {}),
     developerInstructions,
     refreshableInstructions,
     nativeRefreshableInstructions: refreshableInstructions,

@@ -48,11 +48,14 @@ workflow; use `openclaw update` or [create a backup first](#before-updating-crea
 
 The updater retains the previous package during activation and keeps it when
 failed recovery cannot prove a working installation. Migration recovery originals
-remain until explicit [update cleanup](/cli/update#update-cleanup). These are
+and original-state update captures remain until explicit
+[update cleanup](/cli/update#update-cleanup). These are
 separate recovery mechanisms: cleanup does not manage package or Git runtime
 backups, and retained migration originals are not a full pre-update backup.
 Preserve every recovery location named in the update report until you have
 verified the installation.
+If a launcher backup cannot be restored, the update error names the affected
+launcher and the retained backup path.
 
 Launcher backups compare the link type and target, plus ownership when it can
 be preserved. Symlink permission bits do not block an update; macOS link modes
@@ -150,8 +153,10 @@ openclaw update cleanup --dry-run
 ### Full-state recovery requires a backup
 
 Package updates keep pre-migration SQLite snapshots alongside the package
-backup until verified successful activation removes them with that backup.
-Rollback, failed or unverified completion, and refused restoration retain them.
+backup until verified successful activation removes restorable snapshots with that backup.
+Snapshots whose source write generations could not be sealed remain available
+for manual recovery even after successful activation. Rollback, failed or
+unverified completion, and refused restoration also retain snapshots.
 If cleanup cannot finish, the update reports a maintenance warning with the
 retained path. Older snapshot directories are not automatically removed: their
 ownership and successful outcome cannot be proven from existing receipts.
@@ -178,6 +183,10 @@ already-running older updater.
 While those fingerprints are tracked, the new version's Doctor also reads databases
 through private copies for its schema checks. A Doctor that fails before writing
 therefore leaves the snapshots restorable, and the package rolls back.
+A short-lived OpenClaw command holding state when Doctor starts maintenance does
+not cause that rollback: Doctor first waits for it to finish, while keeping time for
+its own work inside the update step (see
+[how updates run](/cli/update/how-updates-run#when-restart-is-skipped-or-fails)).
 On Windows, an eligible capture first runs the same native SQLite exclusion check
 used by rollback. This settles any retained WAL before recording write fingerprints,
 so later check cleanup is not mistaken for another writer. If another connection
@@ -317,6 +326,15 @@ and follow the reported process-inspection guidance before retrying repair.
 The installed updater owns this process supervision: a first update driven by
 2026.9.5 remains limited by that older parent's settlement checks.
 
+Delegated update and Doctor workers also watch their recorded parent processes.
+If an updater exits while a worker is stalled, the worker requests shutdown and
+allows ten seconds for settlement before exiting. State remains protected until
+the worker has stopped; the next CLI or Gateway start can then reclaim its dead
+maintenance owner. A surviving maintenance owner is identified by role and PID
+in the refusal, with `openclaw update status --json` for update progress. Package
+recovery still verifies the installed candidate before settling its activation
+receipt, and retains the printed repair command when recovery is unsafe.
+
 Before starting a preserved candidate, the updater checks shared and existing
 agent database schemas against the candidate's contract. If migrations remain
 pending after the failed Doctor has stopped, it runs the candidate Doctor again
@@ -388,9 +406,10 @@ and use of your own account/tokens. Only an affirmative Yes proceeds. Enter, `n`
 cancellation, or 30 seconds without an answer skips the launch, prints a manual
 recovery command, and preserves diagnostics and the failed update's exit status.
 Explicit `openclaw triage` does not ask for this confirmation.
-JSON, `--yes`, and non-interactive update invocations can start one owned automatic
-repair after an eligible failure; other failures retain diagnostics and handoff
-commands. For diagnostic collection
+JSON, `--yes`, and update invocations without a TTY never start a repair agent.
+They save diagnostics and print `openclaw triage --run --update-result <path>`
+for explicit opt-in repair. Managed handoffs and foreground `gateway run` startup
+failures also collect diagnostics only. For diagnostic collection
 alone, use `openclaw triage --non-interactive`; add `--update-result <path>` to
 include a saved update-failure artifact. See [Triage](/cli/triage) for command
 formatting and installation targeting.
@@ -407,7 +426,7 @@ The failed update retains its nonzero exit code even if the agent repairs it.
 
 - For `openclaw update --channel dev` on source checkouts, the updater auto-bootstraps `pnpm` when needed. If you see a pnpm/corepack bootstrap error, install `pnpm` manually (or re-enable `corepack`) and rerun the update.
 - Check: [Troubleshooting](/gateway/troubleshooting)
-- Ask in Discord: [https://discord.gg/clawd](https://discord.gg/clawd)
+- For official OpenClaw support, visit [community.openclaw.ai](https://community.openclaw.ai/).
 
 ### Unattended repair on your own inference
 

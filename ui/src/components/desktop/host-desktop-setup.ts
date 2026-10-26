@@ -1,28 +1,16 @@
 import type { EnvironmentSummary } from "@openclaw/gateway-protocol";
-import { t } from "../../i18n/index.ts";
 import { registerSystemsEnglish } from "../../i18n/locales/en-systems.ts";
 import type { RuntimeConfigCapability } from "../../lib/config/runtime-config-capability.ts";
 import { formatUiError } from "../../lib/format-error.ts";
+import { registerEnglishCatalog, t } from "../../lib/reactive/i18n.ts";
 
-registerSystemsEnglish();
+registerEnglishCatalog(registerSystemsEnglish);
 
 /** Config authority needed to turn Host Desktop on; hosts without it only point to an administrator. */
 export type HostDesktopRuntimeConfig = Pick<
   RuntimeConfigCapability,
   "canPatch" | "ensureLoaded" | "patch"
 > & { state: Pick<RuntimeConfigCapability["state"], "lastError"> };
-
-export function isAutomaticSource(source: string): boolean {
-  return source === "pending" || source === "resolved";
-}
-
-export function isAutoPicker(
-  source: string,
-  embedded: boolean,
-  sessionKey: string | null,
-): boolean {
-  return isAutomaticSource(source) && embedded && sessionKey !== null;
-}
 
 /** Title and hint i18n keys for the Gateway host's Desktop setup state. */
 export function hostDesktopSetupCopy(
@@ -81,11 +69,11 @@ export type DesktopHostSetup = {
 };
 
 /** Owns the Gateway host's Host Desktop setup offer for one automatic panel. */
-export function createDesktopHostSetupOwner(host: {
-  readonly runtimeConfig: HostDesktopRuntimeConfig | null;
-  requestUpdate: () => void;
-  refreshHostDesktop: () => void;
-}) {
+export function createDesktopHostSetupOwner(
+  host: { readonly runtimeConfig: HostDesktopRuntimeConfig | null },
+  notify: () => void,
+  recheck: () => void,
+) {
   let environment: EnvironmentSummary | null = null;
   let busy = false;
   let error: string | null = null;
@@ -101,7 +89,7 @@ export function createDesktopHostSetupOwner(host: {
     const isCurrent = () => current === generation && host.runtimeConfig === runtimeConfig;
     busy = true;
     error = null;
-    host.requestUpdate();
+    notify();
     const failure = await enableHostDesktop(
       runtimeConfig,
       "desktop: enable host desktop",
@@ -112,10 +100,10 @@ export function createDesktopHostSetupOwner(host: {
     }
     busy = false;
     error = typeof failure === "string" ? failure : null;
-    host.requestUpdate();
+    notify();
     if (failure === null) {
       // Retest so the Gateway desktop connects now that the host reports it.
-      host.refreshHostDesktop();
+      recheck();
     }
   }
 
@@ -137,7 +125,7 @@ export function createDesktopHostSetupOwner(host: {
             busy,
             error,
             onEnable: () => void enable(),
-            onCheckAgain: host.refreshHostDesktop,
+            onCheckAgain: recheck,
           }
         : null;
     },

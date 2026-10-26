@@ -7,14 +7,14 @@
     "@noble/ciphers": "2.4.0",
     "@noble/curves": "2.4.0",
     "@noble/hashes": "2.4.0",
-    "zod": "4.6.5"
+    "zod": "4.6.7"
   },
   "openclaw": {
     "extensions": [
       "./index.ts"
     ],
     "install": {
-      "minHostVersion": ">=2026.7.2"
+      "minHostVersion": ">=2026.10.3"
     },
     "setupEntry": "./setup-entry.ts",
     "channel": {

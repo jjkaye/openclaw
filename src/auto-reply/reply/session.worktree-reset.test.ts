@@ -3,8 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { resolveIngressWorkspaceOverrideForSessionRun } from "../../agents/spawned-context.js";
 import { managedWorktrees } from "../../agents/worktrees/service.js";
-import type { OpenClawConfig } from "../../config/config.js";
-import { captureRuntimeConfigAsyncReader } from "../../config/io.js";
+import { captureRuntimeConfigAsyncReader, type OpenClawConfig } from "../../config/config.js";
 import {
   loadSessionEntry,
   upsertSessionEntryCore,
@@ -12,7 +11,7 @@ import {
 import { resolveWorkerPlacementSessionTarget } from "../../gateway/server-worker-placement-session-target.js";
 import { createWorktreeSpawnRepositoryFixture } from "../../gateway/server.sessions.create-worktree-spawn.test-support.js";
 import { createGatewaySession } from "../../gateway/session-create-service.js";
-import { resolveGatewaySessionStoreTargetWithStore } from "../../gateway/session-utils-store-lookup.js";
+import { resolveGatewaySessionStoreTargetInWorker } from "../../gateway/session-utils-store-worker.js";
 import { resolveCanonicalSessionEntryFromStoreKeys } from "../../gateway/session-utils-store.js";
 import { prepareSessionWorktree } from "../../gateway/session-worktree-preparation.js";
 import { registerProjectRegistry } from "../../projects/project-registry.js";
@@ -107,9 +106,9 @@ describe("reply reset with a native session worktree", () => {
           cwd: retained?.spawnedCwd,
         }),
       ).toBe(runWorkspace);
-      const placement = await resolveWorkerPlacementSessionTarget({
+      using placement = await resolveWorkerPlacementSessionTarget({
         sessionRuntime: {
-          resolveGatewaySessionStoreTargetWithStore,
+          resolveGatewaySessionStoreTargetInWorker,
           resolveCanonicalSessionEntryFromStoreKeys,
           managedWorktrees,
         },

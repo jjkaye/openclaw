@@ -17,8 +17,12 @@ import type { CodexAppServerLiveThreadOwnership } from "./client-thread-owner.js
 import type { CodexAppServerClient } from "./client.js";
 import type {
   MonitorOptions,
+  NativeDescendantCancellation,
+  NativeDescendantCancellationResult,
   NativeSubagentMonitorClient,
   NativeSubagentMonitorRuntime,
+  NativeSubagentsReadRequest,
+  NativeSubagentsSnapshot,
   NativeModelToolInputRequest,
   NativeModelSourceCapture,
   NativeModelSourceRequest,
@@ -27,6 +31,11 @@ import type {
 import type { NativeParentRegistration } from "./native-subagent-parent-owner.js";
 
 type NativeMonitor = {
+  readNativeSubagents(request: NativeSubagentsReadRequest): NativeSubagentsSnapshot;
+  withDescendantCancellation<T>(
+    params: NativeDescendantCancellation,
+    run: (cancel: () => Promise<NativeDescendantCancellationResult>) => Promise<T>,
+  ): Promise<T>;
   registerParent(params: NativeParentRegistration): Promise<ParentRegistrationHandle>;
   retireParent(parentThreadId: string): Promise<void>;
   captureModelSource(
@@ -96,9 +105,7 @@ export function createCodexNativeSubagentMonitorRuntime<T extends NativeMonitorC
         }
         await entry.ownership.release(threadId);
         clearReleaseRetry(entry);
-        if (childThreadOwnership.get(threadId) === entry) {
-          childThreadOwnership.delete(threadId);
-        }
+        childThreadOwnership.delete(threadId);
       };
       const scheduleReleaseRetry = (threadId: string, entry: ChildThreadOwnership) => {
         if (childThreadOwnership.get(threadId) !== entry || entry.releaseRetryTimer !== undefined) {
@@ -137,6 +144,13 @@ export function createCodexNativeSubagentMonitorRuntime<T extends NativeMonitorC
       };
       monitor = new Monitor(client, runtime ?? defaultNativeSubagentMonitorRuntime, {
         retainClient,
+        interruptChildAndWait: (threadId, turnId, assertCurrent, timeoutMs) =>
+          interruptCodexTurnAndWaitBestEffort(client, {
+            threadId,
+            turnId,
+            assertCurrent,
+            timeoutMs,
+          }),
         interruptModelExecution: (threadId, turnId) => {
           void interruptCodexTurnAndWaitBestEffort(client, { threadId, turnId });
         },
@@ -229,6 +243,12 @@ export function createCodexNativeSubagentMonitorRuntime<T extends NativeMonitorC
   return {
     Monitor,
     register: registerMonitor,
+    readNativeSubagents: ({
+      client,
+      ...request
+    }: NativeSubagentsReadRequest & {
+      client: CodexAppServerClient;
+    }) => monitors.get(client)?.readNativeSubagents(request),
     captureModelSource: ({
       client,
       ...request
@@ -246,6 +266,13 @@ export function createCodexNativeSubagentMonitorRuntime<T extends NativeMonitorC
       }
       return monitor.prepareModelInput(request);
     },
+    withDescendantCancellation: <Result>(
+      client: CodexAppServerClient,
+      params: NativeDescendantCancellation,
+      run: (cancel: () => Promise<NativeDescendantCancellationResult>) => Promise<Result>,
+    ): Promise<Result> =>
+      monitors.get(client)?.withDescendantCancellation(params, run) ??
+      run(async () => ({ killed: 0, cancelledRequesters: [] })),
     retireParent: (client: CodexAppServerClient, parentThreadId: string): Promise<void> =>
       monitors.get(client)?.retireParent(parentThreadId) ?? Promise.resolve(),
   };

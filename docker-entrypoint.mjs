@@ -88,7 +88,8 @@ async function activate() {
   const program = command[0] && executable(command[0]);
   if (!program) {
     console.error("OpenClaw container activation command was not found");
-    process.exit(127);
+    process.exitCode = 127;
+    return;
   }
   const invocation = gatewayInvocation(program);
   if (invocation) {

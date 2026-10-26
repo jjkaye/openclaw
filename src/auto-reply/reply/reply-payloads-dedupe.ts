@@ -5,7 +5,7 @@ import {
 import {
   isMessagingToolDuplicate,
   normalizeTextForComparison,
-} from "../../agents/embedded-agent-helpers.js";
+} from "../../agents/embedded-agent-helpers/messaging-dedupe.js";
 import type { MessagingToolSend } from "../../agents/embedded-agent-messaging.types.js";
 import { getChannelPlugin } from "../../channels/plugins/index.js";
 import { getLoadedChannelPluginForRead } from "../../channels/plugins/registry-loaded.js";
@@ -218,14 +218,10 @@ export function resolveMessagingToolPayloadDedupe(params: MessagingToolDedupeRou
   const matchingTargets = getMatchingMessagingToolReplyTargets(params);
   const matchingRoute = matchingTargets.length > 0;
   const routeSentTexts = matchingTargets.flatMap((target) =>
-    typeof target.text === "string" && target.text.trim() ? [target.text] : [],
+    target.text?.trim() ? [target.text] : [],
   );
-  const routeSentMediaUrls = matchingTargets.flatMap((target) =>
-    Array.isArray(target.mediaUrls)
-      ? target.mediaUrls.filter(
-          (url): url is string => typeof url === "string" && Boolean(url.trim()),
-        )
-      : [],
+  const routeSentMediaUrls = matchingTargets.flatMap(
+    (target) => target.mediaUrls?.filter((url) => url.trim()) ?? [],
   );
   const allTargetsMatchRoute = matchingRoute && matchingTargets.length === sentTargets.length;
 

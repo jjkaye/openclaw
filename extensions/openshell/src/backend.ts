@@ -8,7 +8,7 @@ import {
 } from "@openclaw/fs-safe/atomic";
 import { GUEST_FILESYSTEM_PYTHON } from "@openclaw/fs-safe/guest";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
-import { KeyedAsyncQueue } from "openclaw/plugin-sdk/keyed-async-queue";
+import { enqueueKeyedTask } from "openclaw/plugin-sdk/keyed-async-queue";
 import { lstatIfExists } from "openclaw/plugin-sdk/path-existence-runtime";
 import type {
   CreateSandboxBackendParams,
@@ -41,7 +41,7 @@ import { safeParseJson } from "openclaw/plugin-sdk/text-utility-runtime";
 import type { OpenShellFsBridgeContext, OpenShellSandboxBackend } from "./backend.types.js";
 import { createOpenShellSshSession, runOpenShellCli, type OpenShellExecContext } from "./cli.js";
 import { resolveOpenShellPluginConfig, type ResolvedOpenShellPluginConfig } from "./config.js";
-import { createOpenShellFsBridge } from "./fs-bridge.js";
+import { OpenShellFsBridge } from "./fs-bridge.js";
 import {
   DEFAULT_OPEN_SHELL_MIRROR_EXCLUDE_DIRS,
   replaceDirectoryContents,
@@ -68,7 +68,7 @@ type OpenShellWorkspaceLease = {
 };
 
 // Mirror commands own their snapshot until publication; remote runtimes only serialize initialization.
-const openShellWorkspaceOperations = new KeyedAsyncQueue();
+const openShellWorkspaceOperations = new Map<string, Promise<void>>();
 let openShellDetachedCreateSupport: { key: string; promise: Promise<boolean> } | undefined;
 const MATERIALIZED_SKILLS_REMOTE_PARTS = [".openclaw", "sandbox-skills"] as const;
 // Prints "0" when every managed root is missing or empty, "1" otherwise. Any
@@ -270,16 +270,13 @@ class OpenShellSandboxBackendImpl {
   }
 
   private createMirrorFsBridge(sandbox: OpenShellFsBridgeContext): SandboxFsBridge {
-    const bridge = createOpenShellFsBridge({
-      sandbox,
-      backend: {
-        remoteAgentWorkspaceDir: this.params.remoteAgentWorkspaceDir,
-        mkdirpRemotePath: (remotePath, signal) => this.mkdirpRemotePath(remotePath, signal),
-        removeRemotePath: (remotePath, params) => this.removeRemotePath(remotePath, params),
-        renameRemotePath: (from, to, signal) => this.renameRemotePath(from, to, signal),
-        syncLocalPathToRemote: (localPath, remotePath) =>
-          this.syncLocalPathToRemote(localPath, remotePath),
-      },
+    const bridge = new OpenShellFsBridge(sandbox, {
+      remoteAgentWorkspaceDir: this.params.remoteAgentWorkspaceDir,
+      mkdirpRemotePath: (remotePath, signal) => this.mkdirpRemotePath(remotePath, signal),
+      removeRemotePath: (remotePath, params) => this.removeRemotePath(remotePath, params),
+      renameRemotePath: (from, to, signal) => this.renameRemotePath(from, to, signal),
+      syncLocalPathToRemote: (localPath, remotePath) =>
+        this.syncLocalPathToRemote(localPath, remotePath),
     });
     // Hold one lease across validation and both commits, not just the remote step.
     // Otherwise exec publication can erase a successful file-tool write or expose partial reads.
@@ -329,20 +326,13 @@ class OpenShellSandboxBackendImpl {
         sandboxName,
       ])}`,
     ].toSorted();
-    const releases: Array<() => void> = [];
-    for (const key of keys) {
-      const acquired = createDeferred<() => void>();
-      void openShellWorkspaceOperations.enqueue(key, () => new Promise<void>(acquired.resolve));
-      releases.push(await acquired.promise);
-    }
-    return {
-      release: () => {
-        for (const release of releases.toReversed()) {
-          // Deferred resolution is idempotent, including repeated finalization cleanup.
-          release();
-        }
-      },
-    };
+    const acquired = createDeferred<() => void>();
+    void enqueueKeyedTask({
+      tails: openShellWorkspaceOperations,
+      keys,
+      task: () => new Promise<void>(acquired.resolve),
+    });
+    return { release: await acquired.promise };
   }
 
   async prepareExec(params: {

@@ -102,10 +102,8 @@ actor TalkModeRuntime {
     var pendingRealtimeRelayStartLifecycleGeneration: Int?
     var realtimeRestartGeneration: UInt64 = 0
     var realtimeRestartTask: Task<Void, Never>?
-    var realtimeReconfigurationGeneration: UInt64 = 0
     let realtimeTalkBootstrapProvider: RealtimeTalkBootstrapProvider
     #if DEBUG
-    var realtimeConfigApplicationCheckpoint: (@Sendable () async -> Void)?
     var recognitionCleanupProbe: (@Sendable () -> Void)?
     #endif
     private var lastInterruptedAtSeconds: Double?
@@ -141,7 +139,7 @@ actor TalkModeRuntime {
         if enabled {
             await start()
         } else {
-            await self.stop(reconfigurationGeneration: nil, lifecycleGeneration: nil)
+            await self.stop(lifecycleGeneration: nil)
         }
     }
 
@@ -312,7 +310,6 @@ actor TalkModeRuntime {
             self.logger.error("talk recognizer unavailable")
             return false
         }
-        self.logger.debug("talk recognizer locale=\(recognizer.locale.identifier, privacy: .public)")
 
         let selection = AudioInputDeviceObserver.resolveSelection(selectedInputUID)
         // Preparation above crosses MainActor. Hardware can become owned/running only
@@ -499,7 +496,7 @@ actor TalkModeRuntime {
         }
         let sendChime = await MainActor.run { self.state()?.voiceWakeSendChime ?? .none }
         if sendChime != .none {
-            await MainActor.run { VoiceWakeChimePlayer.play(sendChime, reason: "talk.send") }
+            await MainActor.run { VoiceWakeChimePlayer.play(sendChime) }
         }
         self.stopRecognition()
         await sendAndSpeak(text)
@@ -574,10 +571,6 @@ extension TalkModeRuntime {
             await self.gateway.mainSessionKey()
         }
         let runId = UUID().uuidString
-        self.logger.info(
-            "talk send start runId=\(runId, privacy: .public) " +
-                "session=\(sessionKey, privacy: .public) " +
-                "chars=\(prompt.count, privacy: .public)")
 
         do {
             let route = try await self.gateway.captureRequiredRoute()
@@ -591,10 +584,6 @@ extension TalkModeRuntime {
                 ifCurrentRoute: route)
             guard self.isCurrent(gen) else { return }
             let normalizedStatus = ChatSendStatus.normalized(response.status)
-            self.logger.info(
-                "talk chat.send ok runId=\(response.runId, privacy: .public) " +
-                    "status=\(normalizedStatus, privacy: .public) " +
-                    "session=\(sessionKey, privacy: .public)")
             if ChatSendStatus.acceptance(of: response.status) == .terminalFailure {
                 self.logger.warning(
                     "talk chat.send terminal ack runId=\(response.runId, privacy: .public) " +
@@ -627,7 +616,6 @@ extension TalkModeRuntime {
             }
             guard !self.isPaused else { return }
 
-            self.logger.info("talk assistant text len=\(assistantText.count, privacy: .public)")
             await self.playAssistant(text: assistantText)
             guard self.isCurrent(gen) else { return }
             await self.resumeListeningIfNeeded()
@@ -927,31 +915,21 @@ extension TalkModeRuntime {
         if !parse.unknownKeys.isEmpty {
             self.logger
                 .warning(
-                    "talk directive ignored keys: " +
-                        "\(parse.unknownKeys.joined(separator: ","), privacy: .public)")
+                    "talk directive ignored unknown keys count=\(parse.unknownKeys.count, privacy: .public)")
         }
 
         let requestedVoice = directive?.voiceId?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedVoice = TalkVoiceAliases.resolve(requestedVoice, aliases: self.config?.snapshot.voiceAliases ?? [:])
         if let requestedVoice, !requestedVoice.isEmpty, resolvedVoice == nil {
-            self.logger.warning("talk unknown voice alias \(requestedVoice, privacy: .public)")
+            self.logger.warning("talk unknown voice alias")
         }
-        if let voice = resolvedVoice {
-            if directive?.once == true {
-                self.logger.info("talk voice override (once) voiceId=\(voice, privacy: .public)")
-            } else {
-                self.currentVoiceId = voice
-                self.voiceOverrideActive = true
-                self.logger.info("talk voice override voiceId=\(voice, privacy: .public)")
-            }
+        if let voice = resolvedVoice, directive?.once != true {
+            self.currentVoiceId = voice
+            self.voiceOverrideActive = true
         }
 
-        if let model = directive?.modelId {
-            if directive?.once == true {
-                self.logger.info("talk model override (once) modelId=\(model, privacy: .public)")
-            } else {
-                self.modelOverride = model
-            }
+        if let model = directive?.modelId, directive?.once != true {
+            self.modelOverride = model
         }
 
         let apiKey = self.config?.apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1209,13 +1187,10 @@ extension TalkModeRuntime {
 
     func stopSpeaking(
         reason: TalkStopReason,
-        reconfigurationGeneration expectedReconfigurationGeneration: UInt64? = nil,
         lifecycleGeneration expectedLifecycleGeneration: Int? = nil) async
     {
         let ownsReconfiguration = {
-            self.ownsReconfiguration(
-                expectedReconfigurationGeneration,
-                lifecycleGeneration: expectedLifecycleGeneration)
+            expectedLifecycleGeneration.map { $0 == self.lifecycleGeneration } ?? true
         }
         guard ownsReconfiguration() else { return }
         if let realtimeSession {

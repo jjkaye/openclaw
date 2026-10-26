@@ -1,4 +1,3 @@
-// Managed gateway service lifecycle before and after an update.
 import { confirm, isCancel } from "@clack/prompts";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { stylePromptMessage } from "../../../packages/terminal-core/src/prompt-style.js";
@@ -17,6 +16,7 @@ import { formatErrorMessage } from "../../infra/errors.js";
 import { readGatewayOwnerLease } from "../../infra/gateway-owner-lease.js";
 import { recordUpdateRunPhase } from "../../infra/update-run-ledger.js";
 import type { UpdateRunResult } from "../../infra/update-runner-types.js";
+import type { UpdateStepResult } from "../../infra/update-step-result.js";
 import {
   CommandProcessCleanupError,
   hasCommandProcessCleanupError,
@@ -39,6 +39,7 @@ import { UpdateCommandRecoveryPendingError } from "./update-command-recovery-err
 import {
   recordServiceReconciliationWarning,
   recordServiceReconciliationWarnings,
+  recordServiceTimedStep,
 } from "./update-command-result.js";
 import {
   DEFINITION_DENIAL,
@@ -176,6 +177,7 @@ export async function maybeRestartService(params: {
     if (params.opts.run !== run || run?.executorFence !== executor) {
       throw new Error("Native restart lost its original update executor.");
     }
+    run?.deadline?.signal.throwIfAborted();
     executor?.assertCurrent();
   };
   assertCurrent();
@@ -186,12 +188,20 @@ export async function maybeRestartService(params: {
   );
   const recordPhase = (phase: "restarting" | "verifying") => {
     assertCurrent();
-    if (params.opts.run) {
-      recordUpdateRunPhase(params.opts.run.runId, phase, undefined, { env: params.opts.run.env });
-      recordMutableUpdateSignalPhase(params.opts.run, phase);
+    if (run) {
+      recordUpdateRunPhase(run.runId, phase, undefined, run);
+      recordMutableUpdateSignalPhase(run, phase);
     }
   };
   let verificationObserved = false;
+  let lastProgressAt = -Infinity;
+  const onProgress = (stage: string, reason: string) => {
+    if (performance.now() - lastProgressAt < 30_000) {
+      return;
+    }
+    lastProgressAt = performance.now();
+    defaultRuntime[params.opts.json ? "error" : "log"](`Gateway readiness (${stage}): ${reason}`);
+  };
   const failed = async (outcome: "failed" | "restart-health-failed" = "failed") => {
     // A restart can fail before health verification starts; recovery owns that phase.
     recordPhase("verifying");
@@ -215,8 +225,10 @@ export async function maybeRestartService(params: {
       return await failed();
     }
   }
+  const original = params.originalManagedServiceRuntime;
   let activation = {
     ...params,
+    signal: run?.deadline?.signal,
     // A default update step must not truncate a Windows service's cold-start budget.
     timeoutMs:
       process.platform === "win32" && params.opts.timeout === undefined
@@ -227,7 +239,17 @@ export async function maybeRestartService(params: {
     assertCurrent,
     onWarnings: (warnings: string[]) =>
       recordServiceReconciliationWarnings(params.result, warnings, run, assertCurrent),
+    onTimedStep: (step: UpdateStepResult) => recordServiceTimedStep(params.result, step, run),
   };
+  if (original && !original.definition.runtimePin) {
+    if (!original.version) {
+      throw new Error("Original service runtime or schema support was not verified.");
+    }
+    activation.refreshServiceEnv = activation.serviceRuntimeRefreshRequired = false;
+    activation.nodeRunner = original.nodeRunner;
+    activation.expectedGatewayIdentity = { version: original.version, buildId: original.buildId };
+    activation.serviceUpdateVerdict = original.service.serviceUpdateVerdict;
+  }
   const verdict = activation.serviceUpdateVerdict;
   let preserveDefinition =
     verdict?.kind === "unresolved" || (verdict?.kind === "owned" && !verdict.refreshDefinition);
@@ -298,7 +320,8 @@ export async function maybeRestartService(params: {
     if (failure instanceof ServiceStartRefusalError) {
       return failure.refusal;
     }
-    const deadline = createGatewayRestartDeadline({ timeoutMs: activation.timeoutMs });
+    const deadline =
+      run?.deadline ?? createGatewayRestartDeadline({ timeoutMs: activation.timeoutMs });
     try {
       const runtime = await deadline.run(() =>
         deadline.read("service startup refusal", () =>
@@ -319,7 +342,9 @@ export async function maybeRestartService(params: {
       assertCurrent();
       return error instanceof ServiceStartRefusalError ? error.refusal : undefined;
     } finally {
-      deadline.dispose();
+      if (!run?.deadline) {
+        deadline.dispose();
+      }
     }
   };
   let activationAccepted = false;
@@ -341,6 +366,7 @@ export async function maybeRestartService(params: {
       serviceEnv: activation.serviceEnv,
       gatewayPort: activation.gatewayPort,
       timeoutMs: activation.timeoutMs,
+      onProgress,
       expectedVersion: expectedGatewayVersion,
       expectedBuildId: expectedGatewayBuildId,
       requireRunningService: opts.requireRunningService,
@@ -393,13 +419,15 @@ export async function maybeRestartService(params: {
           service: resolveGatewayService(),
           port: activation.gatewayPort,
           timeoutMs: activation.timeoutMs,
+          onProgress,
           expectedVersion: expectedGatewayVersion,
           ...(expectedGatewayBuildId ? { expectedBuildId: expectedGatewayBuildId } : {}),
           env: activation.serviceEnv,
         });
         assertReadinessCurrent();
-        if (recovery.launchAgentRecovery?.attempted) {
-          activationAccepted = recovery.launchAgentRecovery.recovered;
+        const nativeRecovery = recovery.launchAgentRecovery;
+        if (nativeRecovery?.status === "recovered" || nativeRecovery?.status === "failed") {
+          activationAccepted = nativeRecovery.status === "recovered";
         }
         return recovery;
       },
@@ -489,12 +517,13 @@ export async function maybeRestartService(params: {
             healthOnly: true,
             gatewayPort: activation.gatewayPort,
             timeoutMs: activation.timeoutMs,
+            deadline: run?.deadline,
+            onProgress,
             expectedVersion: expectedGatewayVersion,
             ...(expectedGatewayBuildId ? { expectedBuildId: expectedGatewayBuildId } : {}),
             requirePluginHealth: false,
             serviceEnv: activation.serviceEnv,
             requireRunningService: true,
-            settle: { probes: 12 },
             assertCurrent,
           });
           assertCurrent();
@@ -553,7 +582,8 @@ export async function maybeRestartService(params: {
             },
           });
           assertCurrent();
-          const deadline = createGatewayRestartDeadline({ timeoutMs: activation.timeoutMs });
+          const deadline =
+            run?.deadline ?? createGatewayRestartDeadline({ timeoutMs: activation.timeoutMs });
           try {
             activation = {
               ...activation,
@@ -573,7 +603,9 @@ export async function maybeRestartService(params: {
             }
             throw error;
           } finally {
-            deadline.dispose();
+            if (!run?.deadline) {
+              deadline.dispose();
+            }
           }
           assertCurrent();
           expectedGatewayVersion = normalizeOptionalString(activation.result.after?.version);

@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { PluginInstanceUnavailableError } from "../../plugins/plugin-instance-error.js";
 import { PluginInstance } from "../../plugins/plugin-instance.js";
@@ -17,43 +17,30 @@ import { createQueueTestRun, installQueueRuntimeErrorSilencer } from "./queue.te
 import { clearFollowupQueue, getExistingFollowupQueue } from "./queue/state.js";
 
 installQueueRuntimeErrorSilencer();
-afterEach(() => {
-  resetGatewayWorkAdmission();
-});
+afterEach(resetGatewayWorkAdmission);
 
 it.each(["followup", "collect"] as const)(
   "resolves the current provider for queued %s input after its predecessor retires",
   async (mode) => {
     const released = createDeferred();
     const started = createDeferred();
-    const finished = createDeferred();
     const key = `generation-reload-${mode}`;
     const original = captureActivePluginRegistrySnapshot();
     const predecessor = new PluginInstance("queue-generation-fixture");
     const stale = createEmptyPluginRegistry();
     const current = createEmptyPluginRegistry();
     const retiredHook = predecessor.wrap(() => "retired");
-    stale.providers.push({
-      pluginId: "queue-generation-fixture",
-      source: "synthetic",
-      provider: {
-        id: "queue-generation-fixture",
-        label: "Fixture",
-        auth: [],
-        formatApiKey: retiredHook,
-      },
-    });
-    const currentHook = vi.fn(() => "current provider reply");
-    current.providers.push({
-      pluginId: "queue-generation-fixture",
-      source: "synthetic",
-      provider: {
-        id: "queue-generation-fixture",
-        label: "Fixture",
-        auth: [],
-        formatApiKey: currentHook,
-      },
-    });
+    const currentHook = () => "current provider reply";
+    for (const [registry, formatApiKey] of [
+      [stale, retiredHook],
+      [current, currentHook],
+    ] as const) {
+      registry.providers.push({
+        pluginId: "queue-generation-fixture",
+        source: "synthetic",
+        provider: { id: "queue-generation-fixture", label: "Fixture", auth: [], formatApiKey },
+      });
+    }
     const queued = createQueueTestRun({ prompt: "accepted before reload" });
     const delivered: Array<{ prompt: string; reply: string | undefined }> = [];
     try {
@@ -77,7 +64,6 @@ it.each(["followup", "collect"] as const)(
                 key: "synthetic-only",
               }),
             });
-            finished.resolve();
           });
         },
       );
@@ -86,13 +72,17 @@ it.each(["followup", "collect"] as const)(
       await predecessor.dispose();
       expect(() => retiredHook()).toThrow(PluginInstanceUnavailableError);
       setActivePluginRegistry(current);
+      const claim = queued.controllerInput!.claim!;
       released.resolve();
-      await finished.promise;
-      expect(delivered).toHaveLength(1);
-      expect(delivered[0]?.prompt).toContain("accepted before reload");
-      expect(delivered[0]?.reply).toBe("current provider reply");
-      expect(currentHook).toHaveBeenCalledOnce();
-      await vi.waitFor(() => expect(getExistingFollowupQueue(key)).toBeUndefined());
+      await queued.controllerInput!.settlement.promise;
+      await claim.settlement.promise;
+      expect(delivered).toEqual([
+        {
+          prompt: expect.stringContaining("accepted before reload"),
+          reply: "current provider reply",
+        },
+      ]);
+      expect(getExistingFollowupQueue(key)).toBeUndefined();
     } finally {
       released.resolve();
       clearFollowupQueue(key);

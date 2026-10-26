@@ -4,7 +4,6 @@ import type { UrbitSSEClient } from "./urbit/sse-client.js";
 
 export const TLON_PENDING_APPROVAL_LIMIT = 100;
 
-/** Pending approval request stored for persistence */
 export type PendingApproval = {
   id: string;
   type: "dm" | "channel" | "group";
@@ -54,7 +53,6 @@ export type TlonSettingsStore = {
   defaultAuthorizedShips?: string[];
   /** Ship that receives approval requests for DMs, channel mentions, and group invites */
   ownerShip?: string;
-  /** Pending approval requests awaiting owner response */
   pendingApprovals?: PendingApproval[];
 };
 
@@ -211,7 +209,7 @@ export function createSettingsManager(api: UrbitSSEClient, logger?: SettingsLogg
         const allData = raw as { all?: Record<string, Record<string, unknown>> };
         const deskData = allData?.all?.[SETTINGS_DESK];
         current = parseSettingsResponse(deskData ?? {});
-        logger?.log?.(`[settings] Loaded: ${JSON.stringify(current)}`);
+        logger?.log?.("[settings] Loaded");
         return current;
       } catch (err) {
         // Settings desk may not exist yet - that's fine, use defaults
@@ -231,7 +229,7 @@ export function createSettingsManager(api: UrbitSSEClient, logger?: SettingsLogg
             return;
           }
 
-          logger?.log?.(`[settings] Update: ${update.key} = ${JSON.stringify(update.value)}`);
+          logger?.log?.(`[settings] Update: ${update.key}`);
           current = applySettingsUpdate(current, update.key, update.value);
           try {
             onChange(current);

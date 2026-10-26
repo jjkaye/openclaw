@@ -39,12 +39,7 @@ function normalizeIdentityMaterial(contents: string): string {
   return normalized.endsWith("\n") ? normalized : `${normalized}\n`;
 }
 
-function normalizeEndpoint(ssh: WorkerSshEndpoint): {
-  sshTarget: string;
-  scpTarget: string;
-  host: string;
-  port: number;
-} {
+function normalizeEndpoint(ssh: WorkerSshEndpoint) {
   const host = ssh.host.trim();
   const user = ssh.user.trim();
   if (!Number.isInteger(ssh.port) || ssh.port < 1 || ssh.port > 65_535) {
@@ -307,6 +302,19 @@ export function workerSshCommandPrefix(
     "-T",
     "-p",
     String(port),
+  ];
+}
+
+export function workerSshCommand(
+  prepared: PreparedWorkerSsh,
+  argv: readonly string[],
+  port = prepared.port,
+): string[] {
+  return [
+    ...workerSshCommandPrefix(prepared, port),
+    "--",
+    prepared.sshTarget,
+    workerSshRemoteCommand(argv),
   ];
 }
 

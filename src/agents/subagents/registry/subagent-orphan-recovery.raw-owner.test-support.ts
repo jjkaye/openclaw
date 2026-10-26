@@ -1,14 +1,10 @@
-import { expect, it } from "vitest";
 import {
   loadExactSessionEntry,
   replaceSessionEntry,
 } from "../../../config/sessions/session-accessor.js";
 import { rotateAgentEventLifecycleGeneration } from "../../../infra/agent-events.js";
-import { runSubagentAnnounceFlow } from "../announce/subagent-announce.js";
-import { subagentRuns } from "./subagent-registry-memory.js";
-import { loadSubagentRegistryFromSqlite } from "./subagent-registry-state.fixture.test-support.js";
+import { writeSubagentSessionEntry } from "./subagent-registry.persistence.test-support.js";
 import {
-  addSubagentRunForTests,
   initSubagentRegistry,
   resetSubagentRegistryForTests,
 } from "./subagent-registry.test-helpers.js";
@@ -17,81 +13,95 @@ import {
   type useSubagentRestartRecoveryFixture,
 } from "./subagent-restart-recovery.test-support.js";
 
-export function registerRawChildRestoreOwnershipTest(
+export async function restartRegistry(
   fixture: ReturnType<typeof useSubagentRestartRecoveryFixture>,
+  beforeInit?: () => void | Promise<void>,
 ) {
-  const { activateGatewayRuntime, dispatchAgent } = fixture;
+  await resetSubagentRegistryForTests({ persist: false });
+  await beforeInit?.();
+  rotateAgentEventLifecycleGeneration();
+  await initSubagentRegistry();
+  await fixture.activateGatewayRuntime();
+  await fixture.settle();
+}
 
-  it("restores a completed raw-key child from its recorded agent instead of an aborted namesake", async () => {
-    const childSessionKey = "global";
-    const runId = "raw-owner-restore";
-    const startedAt = Date.now() - 1_000;
-    const endedAt = startedAt + 500;
-    for (const agentId of ["main", "research"]) {
-      await replaceSessionEntry(
-        { agentId, sessionKey: childSessionKey },
-        {
-          sessionId: `${agentId}-restore-session`,
-          lifecycleRevision: `${agentId}-restore-revision`,
-          lifecycleRunId: agentId === "research" ? runId : "unrelated-main-run",
-          status: agentId === "research" ? "done" : "interrupted",
-          abortedLastRun: agentId === "main",
-          startedAt,
-          endedAt,
-          updatedAt: endedAt,
-        },
-      );
-    }
-    const mainBefore = loadExactSessionEntry({
-      agentId: "main",
-      sessionKey: childSessionKey,
-    })?.entry;
-    expect(mainBefore).toMatchObject({
-      sessionId: "main-restore-session",
-      status: "interrupted",
-      abortedLastRun: true,
-    });
-    await addSubagentRunForTests(
+export function readSession(sessionKey: string, agentId = "main") {
+  return loadExactSessionEntry({ agentId, sessionKey })?.entry;
+}
+
+export async function rawChildFixture(phase: "recovery" | "restore") {
+  const childSessionKey = "global";
+  const runId = `raw-owner-${phase}`;
+  const startedAt = Date.now() - 1_000;
+  const endedAt = startedAt + 500;
+  const restored = phase === "restore";
+  for (const agentId of ["main", "research"]) {
+    await replaceSessionEntry(
+      { agentId, sessionKey: childSessionKey },
+      {
+        sessionId: `${agentId}-${phase}-session`,
+        lifecycleRevision: `${agentId}-${phase}-revision`,
+        lifecycleRunId: agentId === "research" ? runId : "unrelated-main-run",
+        ...(restored ? { status: agentId === "research" ? "done" : "interrupted", endedAt } : {}),
+        abortedLastRun: !restored || agentId === "main",
+        startedAt,
+        updatedAt: restored ? endedAt : startedAt,
+      },
+    );
+  }
+  return {
+    runId,
+    childSessionKey,
+    startedAt,
+    endedAt,
+    mainBefore: readSession(childSessionKey),
+    run: (overrides: Parameters<typeof makeRunRecord>[0] = {}) =>
       makeRunRecord({
         runId,
         childSessionKey,
         childAgentId: "research",
-        createdAt: startedAt,
-        expectsCompletionMessage: true,
-        endedReason: "subagent-complete",
-        execution: { status: "terminal", startedAt, endedAt, outcome: { status: "ok" } },
-        completion: { required: true, resultText: "Research result", capturedAt: endedAt },
-        delivery: { status: "pending" },
+        childSessionIdentity: {
+          sessionId: `research-${phase}-session`,
+          lifecycleRevision: `research-${phase}-revision`,
+        },
+        ...overrides,
       }),
-    );
-    await fixture.settle();
-    await resetSubagentRegistryForTests({ persist: false });
-    rotateAgentEventLifecycleGeneration();
-    expect(subagentRuns.has(runId)).toBe(false);
+  };
+}
 
-    await initSubagentRegistry();
-    await activateGatewayRuntime();
-    await fixture.settle();
-
-    expect(runSubagentAnnounceFlow).toHaveBeenCalledWith(
-      expect.objectContaining({ childRunId: runId, outcome: { status: "ok" } }),
-    );
-    expect(loadSubagentRegistryFromSqlite().get(runId)).toMatchObject({
-      childAgentId: "research",
-      cleanupCompletedAt: expect.any(Number),
-      execution: { status: "terminal", endedAt, outcome: { status: "ok" } },
-      delivery: { status: "delivered" },
-    });
-    expect(loadExactSessionEntry({ agentId: "main", sessionKey: childSessionKey })?.entry).toEqual(
-      mainBefore,
-    );
-    expect(
-      loadExactSessionEntry({ agentId: "research", sessionKey: childSessionKey })?.entry,
-    ).toMatchObject({
-      sessionId: "research-restore-session",
-      status: "done",
-      abortedLastRun: false,
-    });
-    expect(dispatchAgent).not.toHaveBeenCalled();
-  });
+export function createRecoverySessions(
+  fixture: ReturnType<typeof useSubagentRestartRecoveryFixture>,
+) {
+  const writeSession = (
+    params: Omit<Parameters<typeof writeSubagentSessionEntry>[0], "stateDir" | "agentId">,
+  ) => writeSubagentSessionEntry({ stateDir: fixture.stateDir, agentId: "main", ...params });
+  function childFixture(name: string, revision: string | null = `${name}-revision`) {
+    const lifecycleRevision = revision ?? undefined;
+    const runId = `run-${name}`;
+    const childSessionKey = `agent:main:subagent:${name}`;
+    const sessionId = `sess-${name}`;
+    return {
+      runId,
+      childSessionKey,
+      sessionId,
+      run: (overrides: Parameters<typeof makeRunRecord>[0] = {}) =>
+        makeRunRecord({
+          runId,
+          childSessionKey,
+          childSessionIdentity: { sessionId, lifecycleRevision },
+          ...overrides,
+        }),
+      write: (
+        overrides: Omit<Parameters<typeof writeSession>[0], "sessionKey" | "defaultSessionId"> = {},
+      ) =>
+        writeSession({
+          sessionKey: childSessionKey,
+          defaultSessionId: sessionId,
+          lifecycleRevision,
+          ...overrides,
+        }),
+      read: () => readSession(childSessionKey),
+    };
+  }
+  return { writeSession, childFixture };
 }

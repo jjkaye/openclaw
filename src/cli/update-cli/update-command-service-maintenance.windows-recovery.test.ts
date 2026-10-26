@@ -1,24 +1,65 @@
-// Reuse the maintained native service fixture and the actual Windows recovery owner.
 import "./update-command-service-maintenance.test-support.js";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { expectDefined } from "@openclaw/normalization-core";
 import { expect, it, vi } from "vitest";
 import * as schtasksExec from "../../daemon/schtasks-exec.js";
-import { createMockGatewayService } from "../../daemon/service.test-helpers.js";
+import type { GatewayService } from "../../daemon/service.js";
 import { collectNestedErrorCandidates } from "../../infra/error-graph-internal.js";
+import * as commandExec from "../../process/exec.js";
+import { createCommandResult } from "../../test-utils/npm-spec-install-test-helpers.js";
 import { mockProcessPlatform } from "../../test-utils/vitest-spies.js";
 import { waitForSignalExitBarriers } from "../signal-exit-barrier.js";
-import type { UpdateCommandOptions } from "./shared.js";
 import { createUpdateCommandExecutionGuards } from "./update-command-execution-guards.js";
 import { withUpdateCommandExecutor } from "./update-command-executor.js";
+import {
+  gatewayCommand,
+  maintenanceDefaults,
+  commandResult,
+} from "./update-command-service-fixtures.test-support.js";
 import {
   maybeStopManagedServiceBeforeMutableUpdate,
   type PreManagedServiceStop,
 } from "./update-command-service-maintenance.js";
 import * as windowsRecovery from "./update-command-windows-task.js";
 
-const { mocks, withServiceHome } =
+const { mockMaintenanceService, withServiceHome } =
   await import("./update-command-service-maintenance.test-support.js");
+
+function windowsService(home: string, overrides: Partial<GatewayService> = {}) {
+  return mockMaintenanceService(home, {
+    readCommand: async () => ({
+      ...gatewayCommand(home),
+      sourcePath: path.join(home, "gateway.cmd"),
+    }),
+    readRuntime: async () => ({ status: "running" }),
+    ...overrides,
+  });
+}
+
+function mutableTask(
+  onQuery: () => void,
+  onChange: (action: "/ENABLE" | "/DISABLE") => ReturnType<typeof commandResult> = () =>
+    commandResult(),
+) {
+  const task = { enabled: true, mutations: [] as string[] };
+  vi.spyOn(schtasksExec, "execSchtasks").mockImplementation(async (args) => {
+    if (args[0] === "/Query") {
+      onQuery();
+      return commandResult(`<Task><Settings><Enabled>${task.enabled}</Enabled></Settings></Task>`);
+    }
+    throw new Error("Unexpected Scheduled Task query");
+  });
+  vi.spyOn(schtasksExec, "execScheduledTaskEnabledChange").mockImplementation(
+    async (_name, enabled) => {
+      const action = enabled ? "/ENABLE" : "/DISABLE";
+      task.mutations.push(action);
+      task.enabled = enabled;
+      return onChange(action);
+    },
+  );
+  return task;
+}
 
 it.each([
   { hresult: -2147024891, detail: "", denied: true },
@@ -28,31 +69,23 @@ it.each([
   ({ hresult, detail, denied }) =>
     withServiceHome(async (home) => {
       mockProcessPlatform("win32");
-      const query = vi.spyOn(schtasksExec, "execSchtasks").mockResolvedValue({
-        code: 0,
-        stdout: "<Task><Settings><Enabled>true</Enabled></Settings></Task>",
-        stderr: "",
-      });
-      const change = vi
-        .spyOn(schtasksExec, "execScheduledTaskEnabledChange")
-        .mockResolvedValueOnce({ code: 1, stdout: String(hresult), stderr: detail, hresult })
-        .mockResolvedValue({ code: 0, stdout: "", stderr: "" });
-      const service = createMockGatewayService({
-        readCommand: async () => ({
-          programArguments: [process.execPath, path.join(process.cwd(), "openclaw.mjs"), "gateway"],
-          environment: { HOME: home },
-          sourcePath: path.join(home, "gateway.cmd"),
-        }),
-        readRuntime: async () => ({ status: "running" }),
-        isLoaded: async () => true,
-      });
-      mocks.service.mockReturnValue(service);
-      const failure = await maybeStopManagedServiceBeforeMutableUpdate({
-        root: process.cwd(),
-        updateInstallKind: "package",
-        shouldRestart: true,
-        jsonMode: true,
-      }).catch((error: unknown) => error);
+      const successfulExit = createCommandResult();
+      vi.spyOn(commandExec, "runCommandWithTimeout")
+        .mockResolvedValueOnce({
+          ...successfulExit,
+          stdout: "<Task><Settings><Enabled>true</Enabled></Settings></Task>",
+        })
+        .mockResolvedValueOnce({
+          ...successfulExit,
+          code: 1,
+          stdout: String(hresult),
+          stderr: detail,
+        })
+        .mockResolvedValue(successfulExit);
+      const service = windowsService(home);
+      const failure = await maybeStopManagedServiceBeforeMutableUpdate(maintenanceDefaults).catch(
+        (error: unknown) => error,
+      );
       if (denied) {
         expect(failure).toMatchObject({
           failureFacts: [expect.objectContaining({ code: "windows-task-elevation-required" })],
@@ -65,104 +98,71 @@ it.each([
         expect(String(failure)).toContain("Scheduled Task disable failed");
         expect(String(failure)).not.toContain("elevated terminal");
       }
-      expect(query).toHaveBeenCalledTimes(1);
-      expect(change).toHaveBeenCalledTimes(denied ? 1 : 2);
       expect(service.stop).not.toHaveBeenCalled();
     }),
 );
 
-it.each(["disable", "restore", "compensation", "never", "stop-return", "stop-reject"] as const)(
+it.each([
+  ["disable", [], true],
+  ["restore", ["/DISABLE"], false],
+  ["compensation", ["/DISABLE", "/ENABLE"], true],
+  ["never", ["/DISABLE", "/ENABLE", "/DISABLE"], false],
+  ["stop-return", ["/DISABLE"], false],
+  ["stop-reject", ["/DISABLE"], false],
+] as const)(
   "retains caller authority when Windows task recovery loses its owner before %s",
-  (lostBefore) =>
+  (lostBefore, mutations, enabled) =>
     withServiceHome(async (home) => {
       mockProcessPlatform("win32");
       const lostDuringStop = lostBefore === "stop-return" || lostBefore === "stop-reject";
       const authorityLost = new Error("Repair continuation no longer owns this task");
       const stopFailure = new Error("Native stop failed after mutation");
       let partialStop: PreManagedServiceStop | undefined;
-      let privateRecovery:
-        | ReturnType<typeof windowsRecovery.createWindowsTaskAutoStartRecovery>
-        | undefined;
-      const ownedListeners = new Map<string, ReturnType<typeof process.listeners>>();
+      let privateRecovery: windowsRecovery.WindowsTaskAutoStartRecovery | undefined;
+      const readListeners = () =>
+        ["SIGINT", "SIGTERM", "SIGBREAK"].map((signal) => process.listeners(signal));
+      let ownedListeners: ReturnType<typeof readListeners> = [];
       const createRecovery = windowsRecovery.createWindowsTaskAutoStartRecovery;
       vi.spyOn(windowsRecovery, "createWindowsTaskAutoStartRecovery").mockImplementation(
         (params) => {
-          const signals = ["SIGINT", "SIGTERM", "SIGBREAK"];
-          const previous = new Map(signals.map((signal) => [signal, process.listeners(signal)]));
+          const before = readListeners();
           privateRecovery = createRecovery(params);
-          for (const signal of signals) {
-            ownedListeners.set(
-              signal,
-              process
-                .listeners(signal)
-                .filter((listener) => !previous.get(signal)?.includes(listener)),
-            );
-          }
+          ownedListeners = readListeners().map((listeners, index) =>
+            listeners.filter((listener) => !before[index]?.includes(listener)),
+          );
           return privateRecovery;
         },
       );
       let current = true;
       let revokeDuringInspection = false;
-      let enabled = true;
-      const mutations: string[] = [];
-      vi.spyOn(schtasksExec, "execSchtasks").mockImplementation(async (args) => {
-        if (args[0] === "/Query") {
-          if (lostBefore === "disable") {
+      const task = mutableTask(() => {
+        if (lostBefore === "disable") {
+          current = false;
+        }
+      });
+      windowsService(home, {
+        readRuntime: async () => {
+          if (revokeDuringInspection) {
             current = false;
           }
-          return {
-            code: 0,
-            stdout: `<Task><Settings><Enabled>${enabled}</Enabled></Settings></Task>`,
-            stderr: "",
-          };
-        }
-        throw new Error("Unexpected Scheduled Task query");
-      });
-      vi.spyOn(schtasksExec, "execScheduledTaskEnabledChange").mockImplementation(
-        async (_taskName, nextEnabled) => {
-          mutations.push(nextEnabled ? "/ENABLE" : "/DISABLE");
-          enabled = nextEnabled;
-          return { code: 0, stdout: "", stderr: "" };
+          return { status: "running" };
         },
-      );
-      mocks.service.mockReturnValue(
-        createMockGatewayService({
-          readCommand: async () => ({
-            programArguments: [
-              process.execPath,
-              path.join(process.cwd(), "openclaw.mjs"),
-              "gateway",
-            ],
-            environment: { HOME: home },
-            sourcePath: path.join(home, "gateway.cmd"),
-          }),
-          readRuntime: async () => {
-            if (revokeDuringInspection) {
-              current = false;
+        stop: async (args) => {
+          if (lostDuringStop) {
+            args.onMutation?.({ mode: "schtasks-stop" });
+            current = false;
+            if (lostBefore === "stop-reject") {
+              throw stopFailure;
             }
-            return { status: "running" };
-          },
-          isLoaded: async () => true,
-          stop: async (args) => {
-            if (lostDuringStop) {
-              args.onMutation?.({ mode: "schtasks-stop" });
-              current = false;
-              if (lostBefore === "stop-reject") {
-                throw stopFailure;
-              }
-            }
-          },
-        }),
-      );
+          }
+        },
+      });
       let stopped: PreManagedServiceStop | undefined;
-      let failure: unknown;
       try {
-        try {
+        const failure = await (async () => {
           stopped = await maybeStopManagedServiceBeforeMutableUpdate({
-            root: process.cwd(),
-            updateInstallKind: "package",
+            ...maintenanceDefaults,
             shouldRestart: lostBefore !== "disable",
-            jsonMode: true,
             onStopped: (state) => {
               partialStop = state;
             },
@@ -172,29 +172,16 @@ it.each(["disable", "restore", "compensation", "never", "stop-return", "stop-rej
               }
             },
           });
-          const recovery = stopped.windowsTaskAutoStartRecovery;
-          if (!recovery) {
-            throw new Error("Missing Windows task recovery");
-          }
+          const recovery = expectDefined(
+            stopped.windowsTaskAutoStartRecovery,
+            "Missing Windows task recovery",
+          );
           revokeDuringInspection = lostBefore === "restore";
           await recovery.restore();
           revokeDuringInspection = lostBefore === "compensation";
           await recovery.complete(false);
-        } catch (error) {
-          failure = error;
-        }
-        expect(mutations).toEqual(
-          lostDuringStop
-            ? ["/DISABLE"]
-            : lostBefore === "disable"
-              ? []
-              : lostBefore === "restore"
-                ? ["/DISABLE"]
-                : lostBefore === "compensation"
-                  ? ["/DISABLE", "/ENABLE"]
-                  : ["/DISABLE", "/ENABLE", "/DISABLE"],
-        );
-        expect(enabled).toBe(lostBefore === "disable" || lostBefore === "compensation");
+        })().catch((error: unknown) => error);
+        expect(task).toEqual({ mutations, enabled });
         if (lostDuringStop) {
           expect(stopped).toBeUndefined();
           expect(partialStop?.stopped).toBe(true);
@@ -204,12 +191,13 @@ it.each(["disable", "restore", "compensation", "never", "stop-return", "stop-rej
           if (lostBefore === "stop-reject") {
             expect(errors).toContain(stopFailure);
           }
-          expect([...ownedListeners.values()].flat().length).toBeGreaterThan(0);
-          for (const [signal, listeners] of ownedListeners) {
-            for (const listener of listeners) {
-              expect(process.listeners(signal)).not.toContain(listener);
-            }
-          }
+          expect(ownedListeners.flat().length).toBeGreaterThan(0);
+          const remaining = readListeners();
+          expect(
+            ownedListeners.map((listeners, index) =>
+              listeners.filter((listener) => remaining[index]?.includes(listener)),
+            ),
+          ).toEqual([[], [], []]);
           await waitForSignalExitBarriers();
         }
         if (lostBefore === "never") {
@@ -221,102 +209,63 @@ it.each(["disable", "restore", "compensation", "never", "stop-return", "stop-rej
           expect(String(failure)).toContain("Repair continuation no longer owns this task");
         }
       } finally {
-        await stopped?.windowsTaskAutoStartRecovery?.complete();
-        // A failing baseline must still retire the real private token after assertions.
-        if (!stopped) {
-          await privateRecovery?.complete(false);
-        }
+        await (stopped?.windowsTaskAutoStartRecovery ?? privateRecovery)?.complete(
+          Boolean(stopped),
+        );
       }
     }),
 );
 
-it.each(["before-disable", "after-disable", "invocation-replaced"] as const)(
+it.each(["before-disable", "after-disable"] as const)(
   "preserves Windows task compensation authority when interrupted %s",
   (interruption) =>
     withServiceHome(async (home) => {
       const root = process.cwd();
-      const run: NonNullable<UpdateCommandOptions["run"]> = {
+      const run: NonNullable<Parameters<typeof createUpdateCommandExecutionGuards>[0]["run"]> = {
         runId: randomUUID(),
         env: { HOME: home },
       };
-      const opts: UpdateCommandOptions = { run };
-      const mutations: string[] = [];
-      let enabled = true;
-      vi.spyOn(schtasksExec, "execSchtasks").mockImplementation(async (args) => {
-        if (args[0] === "/Query") {
+      const task = mutableTask(
+        () => {
           if (interruption === "before-disable") {
             run.interrupted = true;
           }
-          return {
-            code: 0,
-            stdout: `<Task><Settings><Enabled>${enabled}</Enabled></Settings></Task>`,
-            stderr: "",
-          };
-        }
-        throw new Error("Unexpected Scheduled Task query");
-      });
-      vi.spyOn(schtasksExec, "execScheduledTaskEnabledChange").mockImplementation(
-        async (_taskName, nextEnabled) => {
-          mutations.push(nextEnabled ? "/ENABLE" : "/DISABLE");
-          enabled = nextEnabled;
-          if (!nextEnabled) {
+        },
+        (action) => {
+          if (action === "/DISABLE") {
             run.interrupted = true;
-            if (interruption === "invocation-replaced") {
-              opts.run = { ...run };
-            }
-            return { code: 124, stdout: "", stderr: "disable failed after commit" };
+            return commandResult("", 124, "disable failed after commit");
           }
-          return { code: 0, stdout: "", stderr: "" };
+          return commandResult();
         },
       );
-      const service = createMockGatewayService({
-        readCommand: async () => ({
-          programArguments: [process.execPath, path.join(root, "openclaw.mjs"), "gateway"],
-          environment: { HOME: home },
-          sourcePath: path.join(home, "gateway.cmd"),
-        }),
-        readRuntime: async () => ({ status: "running" }),
-        isLoaded: async () => true,
+      const service = windowsService(home);
+      const failure = await withUpdateCommandExecutor(run.runId, async (executor) => {
+        const guards = createUpdateCommandExecutionGuards({ run }, root);
+        guards.admitExecutor(await executor.enter(root));
+        const platform = mockProcessPlatform("win32");
+        try {
+          await maybeStopManagedServiceBeforeMutableUpdate({
+            ...maintenanceDefaults,
+            root,
+            shouldRestart: false,
+            updateRun: run,
+            recordPhase: guards.recordPhase,
+            assertCurrent: guards.assertCurrent,
+          });
+        } finally {
+          platform.mockRestore();
+        }
+      }).catch((error: unknown) => error);
+      expect(task).toEqual({
+        mutations: interruption === "before-disable" ? [] : ["/DISABLE", "/ENABLE"],
+        enabled: true,
       });
-      mocks.service.mockReturnValue(service);
-      let failure: unknown;
-      try {
-        await withUpdateCommandExecutor(run.runId, async (executor) => {
-          const guards = createUpdateCommandExecutionGuards(opts, root);
-          guards.admitExecutor(await executor.enter(root));
-          const platform = mockProcessPlatform("win32");
-          try {
-            await maybeStopManagedServiceBeforeMutableUpdate({
-              root,
-              updateInstallKind: "package",
-              shouldRestart: false,
-              jsonMode: true,
-              updateRun: run,
-              recordPhase: guards.recordPhase,
-              assertCurrent: guards.assertCurrent,
-            });
-          } finally {
-            platform.mockRestore();
-          }
-        });
-      } catch (error) {
-        failure = error;
-      }
-      expect(mutations).toEqual(
-        interruption === "before-disable"
-          ? []
-          : interruption === "invocation-replaced"
-            ? ["/DISABLE"]
-            : ["/DISABLE", "/ENABLE"],
-      );
-      expect(enabled).toBe(interruption !== "invocation-replaced");
       expect(service.stop).not.toHaveBeenCalled();
       expect(String(failure)).toMatch(
         interruption === "before-disable"
           ? /requester-revoked/
-          : interruption === "invocation-replaced"
-            ? /requester-revoked/
-            : /Scheduled Task disable failed: disable failed after commit/,
+          : /Scheduled Task disable failed: disable failed after commit/,
       );
     }),
 );

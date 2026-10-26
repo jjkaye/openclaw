@@ -1,3 +1,4 @@
+import { classifyDoctorMaintenanceRefusal } from "../commands/doctor-maintenance-inspection.js";
 import { hasCommandProcessCleanupError } from "../process/exec-result.js";
 import { resolveControlUiAssetHealth } from "./control-ui-assets.js";
 import { readPackageVersion } from "./package-json.js";
@@ -383,7 +384,7 @@ export async function updateGitCheckout(params: {
         steps,
       });
       if (!fetched.ok) {
-        return { status: "error" as const, reason: "fetch-failed" };
+        return { status: "error" as const, reason: fetched.reason ?? "fetch-failed" };
       }
       const inspectTarget = async (revision: string, root = inspectionRoot) => {
         await prepareGitMutation({
@@ -406,6 +407,7 @@ export async function updateGitCheckout(params: {
         channel,
         devTarget,
         refreshedRemotes: fetched.refreshedRemotes,
+        devSource: fetched.devSource,
         beforeSha,
         beforeRuntimeVerified: recovery.serviceRestartSafe,
         sourceRuntimePrepared: opts.sourceRuntimePrepared,
@@ -460,9 +462,7 @@ export async function updateGitCheckout(params: {
         return selected;
       }
       if (!publishedCandidate) {
-        const upstreamRef = selected.selectedDevUpstream
-          ? `refs/remotes/${selected.selectedDevUpstream}`
-          : undefined;
+        const upstreamRef = selected.selectedDevUpstream ?? undefined;
         const imported = await importCandidate(selected.candidateSha, upstreamRef);
         if (imported.status !== "ok") {
           return imported;
@@ -538,15 +538,20 @@ export async function updateGitCheckout(params: {
         return await rollbackError("checkout-failed");
       }
     }
-    if (!runtimePromotion) {
+    const promotedRuntime = runtimePromotion;
+    if (!promotedRuntime) {
       return await rollbackError("runtime-verification-failed");
     }
     try {
-      await runtimePromotion.activate();
-    } catch (error) {
-      steps.push(
-        failureStep("git-runtime-activation", "activate validated runtime", String(error)),
-      );
+      // Timed like other activation work; a thrown activation records the failed step.
+      await runStep({
+        ...workStep("git-runtime-activation", [], gitRoot),
+        runCommand: async () => {
+          await promotedRuntime.activate();
+          return { code: 0, stdout: "", stderr: "" };
+        },
+      });
+    } catch {
       return await rollbackError("runtime-verification-failed");
     }
 
@@ -558,7 +563,7 @@ export async function updateGitCheckout(params: {
         }
       };
       runtimeRetained = true;
-      const promotion = runtimePromotion;
+      const promotion = promotedRuntime;
       await opts.onTransaction(
         createGitRuntimeTransaction({
           root: gitRoot,
@@ -606,16 +611,25 @@ export async function updateGitCheckout(params: {
     // Source conversion migrates only after its prepared global exposure is swapped.
     if (!opts.prepareGitExposure) {
       stateMigrationStarted = true;
-      recovery = { serviceRestartSafe: false, reason: "state-migration-started" };
+      recovery = {
+        serviceRestartSafe: false,
+        reason: "state-migration-started",
+        dataAtRisk: "state-migrated-no-rollback",
+      };
       const doctorSteps: UpdateStepResult[] = [];
       let doctorStep: UpdateStepResult | null;
       try {
         doctorStep = await opts.runGitDoctor(gitRoot, doctorSteps);
       } catch (error) {
+        const refusal = classifyDoctorMaintenanceRefusal(error);
+        if (refusal.kind === "data-at-risk") {
+          recovery.dataAtRisk = refusal.reason;
+        }
         steps.push(...doctorSteps);
         throw error;
       }
       steps.push(
+        ...doctorSteps.filter((result) => result !== doctorStep),
         doctorStep ??
           failureStep(
             "openclaw doctor",

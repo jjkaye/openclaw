@@ -7,7 +7,7 @@ import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { isRecord } from "../../packages/normalization-core/src/record-coerce.ts";
-// This zero-install hook runs on Node 24.22.1+, where native TypeScript stripping is enabled.
+// This zero-install hook runs on Node 24.16.0+, where native TypeScript stripping is enabled.
 import { truncateUtf16Safe } from "../../packages/normalization-core/src/utf16-slice.ts";
 import { cancelResponseReaderSoon, readBoundedResponseText } from "../lib/bounded-response.mjs";
 import {
@@ -108,6 +108,14 @@ export function collectProdResolvedPackagesFromLockfile(lockfileText) {
   const versionsByPackage = new Map();
   const seenSnapshots = new Set();
   const queue = [...lockfile.importers];
+  // tsdown.ai bundles this development dependency into the shipped AI runtime.
+  const bundledMistral = lockfile.importerRoots
+    .get("packages/ai")
+    ?.get("devDependencies")
+    ?.find(({ dependencyName }) => dependencyName === "@mistralai/mistralai");
+  if (bundledMistral) {
+    queue.push(bundledMistral);
+  }
 
   while (queue.length > 0) {
     const next = queue.pop();
@@ -583,7 +591,7 @@ export async function runPnpmAuditProd({
         reason: `No matching ${normalizedMinSeverity} or higher advisories returned by npm bulk for production dependencies.`,
       };
       stdout.write(
-        `${result.reason} Upstream repository advisories were not checked; this is not comprehensive vulnerability clearance.\n`,
+        `${result.reason} Upstream repository advisories were not checked; this is not a full vulnerability assessment.\n`,
       );
       return 0;
     }

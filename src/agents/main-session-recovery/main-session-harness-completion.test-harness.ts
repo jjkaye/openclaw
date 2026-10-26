@@ -11,9 +11,10 @@ import { readSessionMessagesAsync } from "../../gateway/session-transcript-reade
 import { openOpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
 import { withEnvAsync } from "../../test-utils/env.js";
 import { buildCurrentRunRestartRecoveryClaim } from "../agent-command-restart-recovery.js";
-import { readAdmittedHarnessCompletionInput } from "../agent-harness-completion-recovery.js";
+import { readAdmittedHarnessCompletionInputAsync } from "../agent-harness-completion-recovery.js";
 import { captureAdmittedHarnessCompletionForTest } from "../agent-harness-completion.test-support.js";
 import type { SessionEntryFixture } from "../subagent-test-fixtures.test-helpers.js";
+import { markOrphanedMainSessionForRecovery } from "./main-session-restart-recovery-marking.js";
 
 type HarnessRecoveryFixture = {
   tmpDir: string;
@@ -252,12 +253,12 @@ export function registerHarnessCompletionRecoveryCases(
           expect(
             binding &&
               current &&
-              readAdmittedHarnessCompletionInput({
+              (await readAdmittedHarnessCompletionInputAsync({
                 claim: binding,
                 entry: current,
                 storePath,
                 operationalRunId,
-              }),
+              })),
           ).toBe(true);
           await expectRecovery({ started: 0, settled: 0, failed: 1, skipped: 0 });
           expect(callGateway).not.toHaveBeenCalled();
@@ -369,21 +370,36 @@ export function registerHarnessCompletionRecoveryCases(
     },
   );
 
-  it.each(["delegated", "unscoped control-ui", "unverified internal", "internal system"] as const)(
-    "refuses %s recovery without surviving sender authority",
+  it.each([
+    "delegated",
+    "delegated with pending final",
+    "delegated with sibling run",
+    "unscoped control-ui",
+    "unverified internal",
+    "internal system",
+  ] as const)(
+    "refuses %s replay without surviving sender authority and preserves remaining custody",
     async (source) => {
-      const { expectRecovery, loadSessionEntry } = getFixture();
+      const { expectRecovery, loadSessionEntry, sendRecoveryNotice } = getFixture();
+      const delegated = source.startsWith("delegated");
+      const retiresTurn = source === "delegated" || source === "unscoped control-ui";
+      const pending =
+        source === "delegated with pending final" ? preparedFinal("delegated") : undefined;
+      const siblingRuns =
+        source === "delegated with sibling run"
+          ? [{ runId: "independent-accepted-run", lifecycleGeneration: "before-restart" }]
+          : undefined;
       const { storePath, sessionKey } = await writeMainSession(
         source === "unscoped control-ui"
           ? { restartRecoverySourceIngress: "control-ui" }
-          : source !== "delegated"
+          : !delegated
             ? {
                 restartRecoverySourceIngress: "internal",
                 pendingFinalDelivery: preparedFinal("unverified"),
               }
-            : {},
+            : { pendingFinalDelivery: pending, restartRecoveryRuns: siblingRuns },
         [
-          ...(source === "delegated" || source === "unscoped control-ui"
+          ...(delegated || source === "unscoped control-ui"
             ? [
                 {
                   role: "user",
@@ -411,16 +427,41 @@ export function registerHarnessCompletionRecoveryCases(
           },
         ],
       );
-      await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1 });
+      await expectRecovery({
+        started: 0,
+        settled: retiresTurn ? 1 : 0,
+        failed: 0,
+        skipped: retiresTurn ? 0 : 1,
+      });
       expect(callGateway).not.toHaveBeenCalled();
       const saved = loadSessionEntry({ sessionKey, storePath });
       expect(saved?.abortedLastRun).toBe(false);
-      if (source === "delegated" || source === "unscoped control-ui") {
-        // Without remaining custody, sender loss retires the input instead of tombstoning.
+      if (retiresTurn) {
         expect(saved?.status).toBe("interrupted");
         expect(saved?.mainRestartRecovery).toBeUndefined();
+        expect(saved?.restartRecoveryTerminalDeliveryEvidence).toBeUndefined();
+        expect(sendRecoveryNotice).not.toHaveBeenCalled();
+        expect(saved?.sessionId).toBeDefined();
+        if (!saved) {
+          throw new Error("Missing settled session");
+        }
+        expect(
+          await markOrphanedMainSessionForRecovery({
+            target: { agentId: "main", storePath, sessionKey },
+            expectedSessionId: saved.sessionId,
+            cfg: {},
+          }),
+        ).toEqual({ marked: 0, skipped: 0 });
+        expect(saved.lastRunId).toBeDefined();
+        expect(saved.restartRecoveryTerminalRunIds).toContain(saved.lastRunId);
       } else {
         expect(saved?.mainRestartRecovery?.tombstone).toEqual(expect.any(Object));
+        if (pending) {
+          expect(saved?.pendingFinalDelivery).toEqual(pending);
+        }
+        if (siblingRuns) {
+          expect(saved?.restartRecoveryRuns).toEqual(siblingRuns);
+        }
       }
       await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 0 });
       expect(callGateway).not.toHaveBeenCalled();

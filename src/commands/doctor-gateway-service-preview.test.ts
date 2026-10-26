@@ -35,7 +35,7 @@ it.each([false, true])(
     await fs.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "openclaw" }));
     const entrypoint = path.join(root, "dist", "index.js");
     await fs.writeFile(entrypoint, "export {};\n");
-    const node = "/home/test/.nvm/versions/node/v24.22.1/bin/node";
+    const node = "/home/test/.nvm/versions/node/v24.16.0/bin/node";
     const command = {
       programArguments: [node, entrypoint, "gateway", "--port", "18789"],
       environment: { PATH: "/old/bin" },
@@ -47,8 +47,8 @@ it.each([false, true])(
       ok: false,
       issues: [
         {
-          code: "gateway-node-version-manager",
-          message: "version-managed Node",
+          code: approved ? "gateway-runtime-node" : "gateway-runtime-node-version-manager",
+          message: approved ? "unsupported Node capability" : "version-managed Node",
           level: "recommended",
         },
       ],
@@ -81,6 +81,7 @@ it.each([false, true])(
       expect(message).not.toContain("recommended defaults");
       return approved;
     });
+    const onFinding = vi.fn();
     await withEnvAsync(
       {
         OPENCLAW_GATEWAY_TOKEN: undefined,
@@ -90,20 +91,33 @@ it.each([false, true])(
       async () => {
         await maybeRepairGatewayServiceConfig({ gateway: {} }, "local", makeDoctorIo(), prompter, {
           writeConfig: mocks.writeConfig,
+          onFinding,
         });
       },
     );
     expect(prompter.confirmRuntimeRepair).toHaveBeenCalledOnce();
     expect(mocks.install).toHaveBeenCalledTimes(Number(approved));
     if (approved) {
-      expect(mocks.note).toHaveBeenCalledWith(
-        expect.stringContaining("Install system Node"),
-        "Gateway service findings still unresolved",
+      expect(onFinding).toHaveBeenCalledWith(
+        expect.objectContaining({
+          severity: "error",
+          category: "fix-now",
+          message: expect.stringContaining("No supported system Node"),
+          fixHint: expect.stringContaining("Install system Node"),
+        }),
+      );
+      expect(onFinding).toHaveBeenCalledWith(
+        expect.objectContaining({
+          category: "recommended",
+          message: "This repair retains a source-checkout entrypoint.",
+          fixHint: expect.stringContaining("gateway install --force"),
+        }),
       );
       expect(mocks.install).toHaveBeenCalledWith(
         expect.objectContaining({ programArguments: command.programArguments }),
       );
     } else {
+      expect(onFinding).not.toHaveBeenCalled();
       expect(
         mocks.note.mock.calls.some(
           ([, title]) => title === "Gateway service findings still unresolved",
@@ -133,7 +147,7 @@ it("previews a supported system runtime instead of claiming the runtime warning 
   mocks.resolveSystemNodeInfo.mockResolvedValue({
     path: "/usr/bin/node",
     status: "supported",
-    version: "24.22.1",
+    version: "24.16.0",
   });
   const prompter = makeDoctorPrompts();
   prompter.confirmRuntimeRepair.mockResolvedValue(false);

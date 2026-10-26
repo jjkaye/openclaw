@@ -3,17 +3,25 @@ import {
   openExistingOpenClawStateWriter,
   type ExistingOpenClawStateWriter,
 } from "../state/openclaw-state-db-existing-write.js";
+import { isPostgresSqlConnection } from "./sql-connection.js";
 import { setSqliteBusyTimeout } from "./sqlite-busy-timeout.js";
 import { isSqliteLockError } from "./sqlite-error-diagnostics.js";
-import { SqliteWorkerAdmissionTimeoutError } from "./sqlite-worker-contract.js";
+import {
+  retrySqliteWorkerAdmission,
+  SQLITE_WORKER_ADMISSION_DEADLINE_MS,
+} from "./sqlite-worker-admission-retry.js";
 import { requestSqliteWorkerOperationAdmission } from "./sqlite-worker-operation-admission.js";
 import { resolveUpdateRunCodecEnv, type UpdateRunLedgerOptions } from "./update-run-codec.js";
+import { createUpdateRun } from "./update-run-ledger.js";
 import type {
   UpdateRunWriteCommand,
   UpdateRunWriteOperations,
 } from "./update-run-mutation.types.js";
 import { readRecovery } from "./update-run-recovery-store.js";
+import { recordUpdateRunVerificationRecord } from "./update-run-verification.js";
 import {
+  applyFinishUpdateRun,
+  applyUpdateRunDiagnostics,
   applyUpdateRunPhase,
   applyUpdateRunStep,
   isRequiredUpdateRunStep,
@@ -37,30 +45,18 @@ export function withUpdateRunWriteAdmission<T>(
     requestSqliteWorkerOperationAdmission({
       stage,
       facts: undefined,
-      // The serving Gateway's writers have a five-second lock budget. A busy
-      // updater host must release this lock well before that budget expires.
-      ...(stage === "commit" ? { deadlineMs: 1_000 } : {}),
+      ...(stage === "commit" ? { deadlineMs: SQLITE_WORKER_ADMISSION_DEADLINE_MS } : {}),
     });
-  for (;;) {
-    try {
-      return operation(assertCurrent);
-    } catch (error) {
-      // Transaction helpers finish rollback before throwing. Cleanup/rollback
-      // failures and authority refusals escape; neither certifies a safe retry.
-      if (!(error instanceof SqliteWorkerAdmissionTimeoutError)) {
-        throw error;
-      }
-      // Fresh transaction admission waits outside BEGIN, so a stalled host no
-      // longer holds SQLite's writer. Each attempt rereads authoritative rows.
-    }
-  }
+  // A slow host policy snapshot can exceed every commit grant. Repeating it
+  // forever rewrites the same database without ever recording progress.
+  return retrySqliteWorkerAdmission(() => operation(assertCurrent), { maxAttempts: 3 });
 }
 
 export function recordUpdateRunMutationInWorker(
   command: UpdateRunWriteCommand,
   stateOptions: UpdateRunLedgerOptions,
   assertCurrent: (stage: "transaction" | "commit") => void,
-  writer: ExistingOpenClawStateWriter,
+  writer: () => ExistingOpenClawStateWriter,
 ): UpdateRunWriteOperations["updateRuns.recordStep"]["output"] {
   const { input } = command;
   // Recovery exclusion must serialize behind the competing writer too.
@@ -81,13 +77,19 @@ export function recordUpdateRunMutationInWorker(
     ...options,
     env: resolveUpdateRunCodecEnv(options.env, input.redactionFacts),
   };
+  if (command.type === "updateRuns.create") {
+    return {
+      kind: "recorded",
+      record: createUpdateRun(command.input.run, codecOptions, assertCurrent),
+    };
+  }
   let entered = false;
   try {
     assertCurrent("transaction");
-    return writer.run(({ db }) => {
+    return writer().run(({ db }) => {
       entered = true;
       // The longer wait is for BEGIN only; mutation and commit keep the normal lock budget.
-      if (busyTimeoutMs > OPENCLAW_SQLITE_BUSY_TIMEOUT_MS) {
+      if (!isPostgresSqlConnection(db) && busyTimeoutMs > OPENCLAW_SQLITE_BUSY_TIMEOUT_MS) {
         setSqliteBusyTimeout(db, OPENCLAW_SQLITE_BUSY_TIMEOUT_MS);
       }
       if (input.requireNoRecovery) {
@@ -103,8 +105,25 @@ export function recordUpdateRunMutationInWorker(
         (current) => {
           if (command.type === "updateRuns.recordPhase") {
             applyUpdateRunPhase(current, command.input.phase, command.input.patch);
-          } else {
+          } else if (command.type === "updateRuns.recordStep") {
             applyUpdateRunStep(current, command.input.step);
+          } else if (command.type === "updateRuns.finish") {
+            applyFinishUpdateRun(current, command.input.result);
+          } else if (command.type === "updateRuns.recordVerification") {
+            recordUpdateRunVerificationRecord(current, command.input.verification, command.input);
+          } else {
+            const diagnostics = command.input.diagnostics;
+            applyUpdateRunDiagnostics(
+              current,
+              command.input.preserveRecovery
+                ? {
+                    ...diagnostics,
+                    recovery: current.verification.recovery ?? diagnostics.recovery,
+                    rollbackOutcome:
+                      current.verification.rollbackOutcome ?? diagnostics.rollbackOutcome,
+                  }
+                : diagnostics,
+            );
           }
         },
         codecOptions,

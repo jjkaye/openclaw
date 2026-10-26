@@ -78,15 +78,17 @@ export type OpenClawDatabasePreflightOptions = {
   env: NodeJS.ProcessEnv;
   onAgentDatabaseDiscovery?: (prepared: PreparedAgentDatabaseMigrationDiscovery) => void;
   onAgentInspection?: (stats: AgentDatabasePreflightStats) => void;
+  /** Reuse the registry targets captured by this admission for subsequent startup discovery. */
+  onRegisteredAgentDatabases?: (targets: readonly { agentId: string; path: string }[]) => void;
   scope?: "state";
   signal?: AbortSignal;
-  /** Updates use the isolated online reader; other inspections preserve source artifacts. */
+  /** False permits isolated online readers and SQLite read marks; true preserves source bytes. */
   preserveSourceArtifacts?: boolean;
   /** Omit for current-runtime checks; updates pass their complete target pair. */
   supportedVersions?: OpenClawSchemaVersions;
   verifyCurrentSchemaShape?: boolean;
   requireStartupMigrationReadiness?: boolean;
-  /** Consume this startup owner's unchanged compatibility headers once, never readiness proof. */
+  /** Consume this startup owner's compatibility headers once, never readiness proof. */
   reuseStartupSchemaPreparation?: boolean;
   configuredAgentDatabaseTargets?:
     | readonly { agentId: string; path: string }[]
