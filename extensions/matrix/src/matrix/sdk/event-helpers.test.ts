@@ -7,18 +7,18 @@ import {
   parseMxc,
 } from "./event-helpers.js";
 
+const message = {
+  event_id: "$root",
+  sender: "@alice:example.org",
+  type: "m.room.message",
+  origin_server_ts: 1000,
+  content: { body: "original", msgtype: "m.text" },
+};
 function messageEvent(
   overrides: ConstructorParameters<typeof MatrixEvent>[0] = {},
   wire?: Record<string, unknown>,
 ) {
-  const event = new MatrixEvent({
-    event_id: "$root",
-    sender: "@alice:example.org",
-    type: "m.room.message",
-    origin_server_ts: 1000,
-    content: { body: "original", msgtype: "m.text" },
-    ...overrides,
-  });
+  const event = new MatrixEvent({ ...message, content: { ...message.content }, ...overrides });
   if (wire) {
     event.makeEncrypted(
       "m.room.encrypted",
@@ -53,8 +53,9 @@ describe("event-helpers", () => {
     const reply = { "m.in_reply_to": { event_id: "$parent" } };
     const event = messageEvent({}, { "m.relates_to": reply });
 
-    expect(matrixEventToRaw(event).content["m.relates_to"]).toEqual(reply);
-    expect(matrixEventToRaw(event)).not.toHaveProperty("decryptionFailure");
+    const raw = matrixEventToRaw(event);
+    expect(raw.content["m.relates_to"]).toEqual(reply);
+    expect(raw).not.toHaveProperty("decryptionFailure");
   });
 
   it("retains the SDK decryption-failure fact without replacing its display content", () => {
@@ -92,11 +93,7 @@ describe("event-helpers", () => {
     const edit = { body: "edited", msgtype: "m.text" };
     event.makeReplaced(messageEvent({ content: { "m.new_content": edit } }));
     expect(matrixEventToRaw(event, { contentMode: "original" })).toEqual({
-      event_id: "$root",
-      sender: "@alice:example.org",
-      type: "m.room.message",
-      origin_server_ts: 1000,
-      content: { body: "original", msgtype: "m.text" },
+      ...message,
       unsigned,
     });
   });
