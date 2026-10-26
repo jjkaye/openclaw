@@ -28,7 +28,6 @@ import {
   loadSessionEntry,
   upsertSessionEntryCore,
 } from "../../config/sessions/session-accessor.js";
-import * as transcriptReports from "../../config/sessions/session-accessor.sqlite-transcript-reports.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import * as sessionMailbox from "../../sessions/session-controller.mailbox.js";
 import { createDeferredCore } from "../../shared/deferred.js";
@@ -156,7 +155,7 @@ async function patchSession(patch: Record<string, unknown>, config = cfg) {
 }
 
 it.each([false, true])(
-  "records accepted model changes outside model context (incognito: %s)",
+  "does not write history for model selections before a message is sent (incognito: %s)",
   (incognito) =>
     withState(async (state) => {
       const target = {
@@ -198,23 +197,11 @@ it.each([false, true])(
       const reopened = await SessionManager.openAsync(target, state.workspaceDir);
       expect(reopened.getEntries()).toMatchObject([
         { type: "message", message },
-        { customType: "session-model-change", display: true, details: { from: "x", to: "y" } },
-        { customType: "session-model-change", display: true, details: { from: "y", to: "x" } },
         { type: "message", message: followup },
       ]);
       expect(reopened.buildSessionContext().messages).toEqual([message, followup]);
     }),
 );
-
-it("keeps an accepted model when its history notice cannot be saved", () =>
-  withState(async () => {
-    await seedSession();
-    vi.spyOn(transcriptReports, "appendSessionTranscriptReport").mockRejectedValueOnce(
-      new Error("fixture notice write failed"),
-    );
-    expect((await patchSession({ model: "fixture/y" }))[0]).toBe(true);
-    expect(loadSessionEntry(scope)?.modelOverride).toBe("y");
-  }));
 
 it("preserves requested thinking when switching away from and back to a reasoning model", () =>
   withState(async () => {

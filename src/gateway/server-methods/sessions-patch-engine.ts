@@ -4,7 +4,6 @@ import type {
   SessionsPatchParams,
 } from "../../../packages/gateway-protocol/src/index.js";
 import type { AdmittedRunOperatorAuthority } from "../../agents/admitted-run-context.js";
-import { resolveSessionModelRef } from "../../agents/session-model-ref.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import { isInternalSessionEffectsKey } from "../../config/sessions/internal-session-key.js";
 import type { SqliteLifecycleTargetSnapshot } from "../../config/sessions/session-accessor.sqlite-entry-equality.js";
@@ -365,10 +364,6 @@ export async function executeSessionPatchMutations(params: {
                         store: workingStore,
                         ...(target.requestedAgentId ? { agentId: target.requestedAgentId } : {}),
                       });
-                      const previousModel =
-                        target.fullPatch.model !== undefined && existingEntry
-                          ? resolveSessionModelRef(cfg, existingEntry, target.targetAgentId)
-                          : undefined;
                       const accessError = targetAccessError(
                         existingEntry,
                         target.targetAgentId,
@@ -566,9 +561,6 @@ export async function executeSessionPatchMutations(params: {
                         labelOwners,
                         assertCurrent: assertCommitAllowed,
                       });
-                      if (previousModel) {
-                        replacement.outcome.previousModel = previousModel;
-                      }
                       if (replacement.replacement) {
                         replacements.push(replacement.replacement);
                         if (!existingEntry && params.onCreatedSessionCommitted) {
@@ -638,17 +630,13 @@ export async function executeSessionPatchMutations(params: {
                     recordSessionStatusModelPatchOutcome(outcome.applied);
                   }
                   if (outcome.ok && outcome.applied) {
-                    await patchEffects.applySessionPatchModelEffects({
+                    modelSelection.refreshSessionPatchQueuedSelection({
                       cfg,
                       entry: outcome.entry,
                       patch: target.fullPatch,
-                      previousModel: outcome.previousModel,
                       sessionKey: target.canonicalKey,
                       agentId: target.targetAgentId,
-                      storePath: target.storePath,
-                      env: storage?.env,
                       catalog: (await catalogs.available(target.targetAgentId))?.entries,
-                      assertCurrent: assertCommitAllowed,
                     });
                   }
                 }
