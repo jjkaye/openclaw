@@ -48,7 +48,7 @@ import {
   discardPrewarmedChatSnapshot,
   peekPrewarmedChatSnapshot,
 } from "./session-snapshot-prewarm.ts";
-const CHAT_SNAPSHOT_PROJECTION_VERSION = 4;
+const CHAT_SNAPSHOT_PROJECTION_VERSION = 5;
 const CHAT_SNAPSHOT_MESSAGE_LIMIT = 80;
 const CHAT_SNAPSHOT_WRITE_DELAY_MS = 500;
 const CHAT_SNAPSHOT_IDLE_TIMEOUT_MS = 1000;

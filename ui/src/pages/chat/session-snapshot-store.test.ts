@@ -99,7 +99,7 @@ async function persist(store: SessionSnapshotStore, cacheKey: string, value: Cha
   store.write(cacheKey, value);
   await store.flush();
 }
-const envelope = (cacheKey: string, value: ChatSessionSnapshot, projectionVersion = 4) => ({
+const envelope = (cacheKey: string, value: ChatSessionSnapshot, projectionVersion = 5) => ({
   projectionVersion,
   sessionKey: cacheKey,
   savedAt: 1,
@@ -456,17 +456,14 @@ describe("persistent chat session snapshots", () => {
     expect(await new SessionSnapshotStore().read(privateKey)).toBeNull();
   });
 
-  it.each(["direct", "prewarmed"])(
-    "discards a superseded unbounded projection (%s)",
-    async (mode) => {
-      await persist(writer, sessionKey, snapshot("current"));
-      await putRawRecord(envelope(sessionKey, snapshot("old"), 3));
-      if (mode === "prewarmed") {
-        void prewarmChatSnapshot(sessionKey);
-      }
-      expect(await new SessionSnapshotStore().read(sessionKey)).toBeNull();
-    },
-  );
+  it.each(["direct", "prewarmed"])("discards the previous projection (%s)", async (mode) => {
+    await persist(writer, sessionKey, snapshot("current"));
+    await putRawRecord(envelope(sessionKey, snapshot("old"), 4));
+    if (mode === "prewarmed") {
+      void prewarmChatSnapshot(sessionKey);
+    }
+    expect(await new SessionSnapshotStore().read(sessionKey)).toBeNull();
+  });
 
   it("purges all legacy unscoped history rather than adopting an unknown account", async () => {
     const privateKey = "agent:main:dashboard:incognito-old";
