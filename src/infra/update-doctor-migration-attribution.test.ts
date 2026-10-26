@@ -206,7 +206,7 @@ it.each(["unchanged", "changed data", "same-content commit", "replaced file"])(
           expect(database.prepare("SELECT value FROM retained").all()).toEqual([{ value: 7 }]);
         } else {
           expect(() => migrate(database, pathname)).toThrow(
-            "SQLite migration source changed after update capture.",
+            "SQLite migration source changed after update capture:",
           );
         }
       } finally {
