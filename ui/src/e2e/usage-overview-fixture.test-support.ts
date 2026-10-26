@@ -12,12 +12,8 @@ export async function installUsageOverviewGateway(
   scenario: Parameters<typeof installMockGateway>[1],
 ): Promise<MockGatewayControls> {
   let configured = scenario?.methodResponses?.["sessions.usage"];
-  let sequenceIndex = 0;
   function selectResponse(params: SessionsUsageParams) {
-    const { sequence, cases } = isRecord(configured) ? configured : {};
-    if (Array.isArray(sequence)) {
-      return sequence[Math.min(sequenceIndex++, sequence.length - 1)];
-    }
+    const { cases } = isRecord(configured) ? configured : {};
     if (Array.isArray(cases)) {
       return cases.find((candidate: { match?: Record<string, unknown> }) =>
         Object.entries(candidate.match ?? {}).every(
@@ -85,7 +81,6 @@ export async function installUsageOverviewGateway(
     async setMethodResponse(method, payload) {
       if (method === "sessions.usage") {
         configured = payload;
-        sequenceIndex = 0;
       }
       await gateway.setMethodResponse(method, payload);
     },
