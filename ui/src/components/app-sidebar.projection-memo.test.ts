@@ -2,7 +2,7 @@
 
 import { beforeEach, describe, expect, it, onTestFinished, vi, type MockInstance } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.ts";
-import type { GatewaySessionRow } from "../api/types.ts";
+import type { GatewaySessionRow, SessionsListResult } from "../api/types.ts";
 import { makeBootRoster } from "../app/bootstrap.test-support.ts";
 import { createChatSubmissions } from "../app/chat-submissions.ts";
 import type { ApplicationOverlaySnapshot } from "../app/overlays-types.ts";
@@ -132,7 +132,10 @@ describe("sidebar projection memo", () => {
     const { sidebar } = await mount([first]);
     const result = sidebar.sessionData.sessionsResult!;
     const enumerate = vi.fn(Reflect.ownKeys);
-    sidebar.sessionData.sessionResultsByAgent = new Proxy({ main: result }, { ownKeys: enumerate });
+    sidebar.sessionData.sessionResultsByAgent = new Proxy<Record<string, SessionsListResult>>(
+      { main: result },
+      { ownKeys: enumerate },
+    );
     const navigation = sidebar.getSessionNavigationState();
     enumerate.mockClear();
 
@@ -142,7 +145,7 @@ describe("sidebar projection memo", () => {
     expect(enumerate).not.toHaveBeenCalled();
 
     const added = session("added", { key: "agent:work:added", agentId: "work" });
-    sidebar.sessionData.sessionResultsByAgent = new Proxy(
+    sidebar.sessionData.sessionResultsByAgent = new Proxy<Record<string, SessionsListResult>>(
       { main: result, work: { ...result, sessions: [added], count: 1 } },
       { ownKeys: enumerate },
     );
