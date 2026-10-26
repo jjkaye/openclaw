@@ -280,6 +280,176 @@ it("counts built policy preparation only inside the diagnostic measurement windo
   expect(result.installed).toHaveLength(3);
 });
 
+it.each([false, true])(
+  "counts main-isolate receipt restoration only when guarded assignment succeeds (candidate: %s)",
+  async (candidate) => {
+    const root = temporary.make("team-stress-receipt-counts-");
+    const durable = path.join(root, "session-actor-durable-fixture.mjs");
+    fs.writeFileSync(
+      durable,
+      `export function settle(committed, entryReference) {
+        let result;
+        result = committed;
+        return result;
+      }`,
+    );
+    const owner = path.join(root, "session-actor-memory-owner-fixture.mjs");
+    fs.writeFileSync(
+      owner,
+      candidate
+        ? `export function restoreSessionActorCommittedOutcome(outcome, reference) {
+  const {receipt} = outcome;
+  if (receipt.entryReference !== undefined) {
+    if (!reference || receipt.entryReference !== reference.writeToken) throw new Error("token mismatch");
+    receipt.postimage.entry = reference.entry;
+    delete receipt.entryReference;
+  }
+  return outcome;
+}`
+        : "export const baseline = true;",
+    );
+    const entry = path.join(root, "entry.mjs");
+    fs.writeFileSync(
+      entry,
+      `import {Worker} from "node:worker_threads";
+       import {settle} from "./session-actor-durable-fixture.mjs";
+       import * as owner from "./session-actor-memory-owner-fixture.mjs";
+       const key = Symbol.for("openclaw.benchmark.session-actor-receipt-retention");
+       const entry = Object.freeze({sessionId: "synthetic"});
+       const reference = {writeToken: "match", entry};
+       const outcome = (phase, append) => ({receipt: {phase, transcript: {append}}});
+       const restore = (token, supplied = reference) => {
+         const committed = {receipt: {entryReference: token, postimage: {}}};
+         owner.restoreSessionActorCommittedOutcome(committed, supplied);
+         return committed;
+       };
+       settle(outcome("appendTranscriptEvent", {}), reference);
+       if (${candidate}) restore("match");
+       let acknowledgments = 0;
+       process.send = () => { acknowledgments++; return true; };
+       process.emit("message", {channel: "team-shape-stress", action: "start"});
+       const original = outcome("patch");
+       if (settle(original, reference) !== original) throw new Error("changed result");
+       settle(outcome("appendTranscriptEvent", {}), reference);
+       settle(outcome("appendToolResult", {}));
+       settle(outcome("appendToolResult", {initialEntry: {}}), reference);
+       settle(outcome("appendToolResult"), reference);
+       if (${candidate}) {
+         if (restore("match").receipt.postimage.entry !== entry) throw new Error("changed entry");
+         restore("match", {writeToken: "match"});
+         restore(undefined);
+         let refused = false;
+         try { restore("wrong"); } catch { refused = true; }
+         if (!refused) throw new Error("lost token refusal");
+       }
+       const worker = new Worker(
+         'const {parentPort} = require("node:worker_threads"); import(' + JSON.stringify(new URL("./session-actor-durable-fixture.mjs", import.meta.url).href) + ').then(({settle}) => { settle({receipt:{phase:"appendTranscriptEvent",transcript:{append:{}}}}, {}); parentPort.postMessage({hasCounters: Symbol.for("openclaw.benchmark.session-actor-receipt-retention") in globalThis}); });',
+         {eval: true}
+       );
+       const workerResult = await new Promise((resolve, reject) => { worker.once("message", resolve); worker.once("error", reject); });
+       await worker.terminate();
+       process.emit("message", {channel: "team-shape-stress", action: "stop", output: ${JSON.stringify(root)}});
+       settle(outcome("appendTranscriptEvent", {}), reference);
+       if (${candidate}) restore("match");
+       console.log(JSON.stringify({acknowledgments, workerResult, enabled: globalThis[key].enabled,
+         numericStateOnly: Object.values(globalThis[key]).every(value => typeof value === "number")}));`,
+    );
+    const preload = new URL(
+      "../../scripts/perf/session-actor-receipt-retention-preload.mjs",
+      import.meta.url,
+    );
+    const { stdout } = await executeFile(
+      resolveTestNodeExecPath(),
+      ["--import", preload.href, entry],
+      {
+        cwd: root,
+        timeout: 15_000,
+      },
+    );
+    expect(JSON.parse(stdout)).toEqual({
+      acknowledgments: 0,
+      workerResult: { hasCounters: false },
+      enabled: 0,
+      numericStateOnly: true,
+    });
+    const result = JSON.parse(
+      fs.readFileSync(path.join(root, "receipt-reference-counts.json"), "utf8"),
+    );
+    expect(result.counts).toEqual({
+      committed: 5,
+      committedWithHostPreimage: 4,
+      appendShaped: 2,
+      appendShapedWithHostPreimage: 1,
+      appendInitializationOutcomes: 1,
+      successfulRestores: candidate ? 2 : 0,
+      successfulNonemptyRestores: candidate ? 1 : 0,
+    });
+    expect(result.installedHookCount).toBe(candidate ? 2 : 1);
+    expect(result.installedHooks).toHaveLength(candidate ? 2 : 1);
+    expect(result.installedHooks).toEqual(
+      expect.arrayContaining([
+        { hook: "committed-outcome", bundle: path.basename(durable) },
+        ...(candidate ? [{ hook: "frozen-entry-restoration", bundle: path.basename(owner) }] : []),
+      ]),
+    );
+    expect(result.endedAtEpochMs).toBeGreaterThanOrEqual(result.startedAtEpochMs);
+    expect(result.scope).toContain("IPC span");
+  },
+);
+
+it.each([
+  [
+    "session-actor-durable-bad.mjs",
+    "export const unrelated = true;",
+    "requires one result = committed; anchor",
+  ],
+  [
+    "session-actor-durable-duplicate.mjs",
+    "export function settle(committed, entryReference) { let result; result = committed; result = committed; return result; }",
+    "requires one result = committed; anchor",
+  ],
+  [
+    "session-actor-memory-owner-bad.mjs",
+    "export function restoreSessionActorCommittedOutcome(outcome) { return outcome; }",
+    "requires one receipt.postimage.entry = reference.entry; anchor",
+  ],
+])("refuses malformed receipt instrumentation in %s", async (bundle, source, error) => {
+  const root = temporary.make("team-stress-receipt-bad-anchor-");
+  const entry = path.join(root, bundle);
+  fs.writeFileSync(entry, source);
+  const preload = new URL(
+    "../../scripts/perf/session-actor-receipt-retention-preload.mjs",
+    import.meta.url,
+  );
+  await expect(
+    executeFile(resolveTestNodeExecPath(), ["--import", preload.href, entry], {
+      cwd: root,
+      timeout: 15_000,
+    }),
+  ).rejects.toThrow(error);
+});
+
+it("refuses receipt counts when no committed-outcome hook was loaded", async () => {
+  const root = temporary.make("team-stress-receipt-missing-hook-");
+  const entry = path.join(root, "entry.mjs");
+  fs.writeFileSync(
+    entry,
+    `process.emit("message", {channel:"team-shape-stress", action:"start"});
+     process.emit("message", {channel:"team-shape-stress", action:"stop", output:${JSON.stringify(root)}});`,
+  );
+  const preload = new URL(
+    "../../scripts/perf/session-actor-receipt-retention-preload.mjs",
+    import.meta.url,
+  );
+  await expect(
+    executeFile(resolveTestNodeExecPath(), ["--import", preload.href, entry], {
+      cwd: root,
+      timeout: 15_000,
+    }),
+  ).rejects.toThrow("requires one committed hook and at most one restore hook");
+  expect(fs.existsSync(path.join(root, "receipt-reference-counts.json"))).toBe(false);
+});
+
 it("requires ten-minute evidence windows and marks explicit short runs as smoke", () => {
   const options = parseStressOptions(["--output", "/unused"]);
   expect(options).toMatchObject({
