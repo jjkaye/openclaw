@@ -94,7 +94,7 @@ function createRelay(
   signal: AbortSignal,
   admission: Pick<
     Parameters<typeof createCodexNativeHookRelay>[0],
-    "nativeModelAdmission" | "remoteCallback"
+    "nativeModelAdmission" | "remoteCallback" | "approvalContext"
   > = {},
 ) {
   const relay = createCodexNativeHookRelay({
@@ -130,6 +130,53 @@ function inputRejected(callId: string, output: string): CodexServerNotification 
     },
   };
 }
+
+it.each(["spawn_agent", "collaborationspawn_agent"])(
+  "denies heartbeat native %s through the production host before admission",
+  async (toolName) => {
+    const host = await createAdmittedHostCapabilityTestFixture({
+      runId: "heartbeat-native-spawn",
+      trigger: "heartbeat",
+    });
+    const client = createClient();
+    const relay = createRelay(
+      "heartbeat-native-spawn",
+      host.hostCapabilities,
+      new AbortController().signal,
+      {
+        approvalContext: { trigger: "heartbeat" },
+        nativeModelAdmission: {
+          client: () => client.client,
+          threadId: () => "heartbeat-parent",
+          readQualification: () => undefined,
+          tools: resolveCodexNativeModelInputTools({}),
+        },
+      },
+    );
+    try {
+      const result = await invokeRelay(relay.relayId, {
+        session_id: "heartbeat-parent",
+        turn_id: "heartbeat-turn",
+        tool_use_id: "spawn-heartbeat",
+        tool_name: toolName,
+        tool_input: { message: "Synthetic check" },
+      });
+      const output = JSON.parse(result.stdout);
+      expect(output).toMatchObject({
+        hookSpecificOutput: {
+          permissionDecision: "deny",
+          permissionDecisionReason: expect.stringContaining("heartbeat"),
+        },
+      });
+      expect(result.stdout).not.toContain("Use sessions_spawn");
+    } finally {
+      relay.unregister();
+      await relay.drain();
+      host.closeHost();
+      host.closeAdmission();
+    }
+  },
+);
 
 function childStarted(id: string): CodexServerNotification {
   return {

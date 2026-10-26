@@ -17,6 +17,7 @@ import {
   normalizeAcceptedSessionSpawnResult,
 } from "../accepted-session-spawn.js";
 import { captureAgentToolSourceExecutionGuard } from "../agent-tool-source-execution-guard.js";
+import { HEARTBEAT_INLINE_ONLY_MESSAGE } from "../heartbeat-delegation-policy.js";
 import {
   findAcpUnsupportedInheritedToolAllow,
   findAcpUnsupportedInheritedToolDeny,
@@ -304,6 +305,7 @@ function resolveAcpUnavailableMessage(opts?: { sandboxed?: boolean; config?: Ope
 export function createSessionsSpawnTool(
   opts?: SessionsSpawnToolOptions & { workerPlacement?: boolean },
 ): AnyAgentTool {
+  const heartbeatTurn = opts?.trigger === "heartbeat";
   const requestOwners = captureExecRequestOwners({
     runId: opts?.requesterTurnRunId,
     sessionId: opts?.expectedParentSessionId,
@@ -356,6 +358,9 @@ export function createSessionsSpawnTool(
     parameters: opts?.workerPlacement ? PlacedSessionsSpawnSchema : parameters,
     execute: wrapGatewayPersonalToolExecution(async (_toolCallId, args, signal) =>
       withToolEffectBoundary(async (onSpawnEffectsStart) => {
+        if (heartbeatTurn) {
+          return jsonResult({ status: "error", error: HEARTBEAT_INLINE_ONLY_MESSAGE });
+        }
         const operatorSelection = resolveGatewayToolOperatorSelection();
         const executionSignal =
           signal && opts?.signal

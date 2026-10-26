@@ -36,6 +36,7 @@ export type CodexThreadPromptContext = Pick<
   | "extraSystemPrompt"
   | "gitCoauthorPrompt"
   | "runtimePlan"
+  | "trigger"
 >;
 
 export function buildDeveloperInstructions(
@@ -79,6 +80,7 @@ export function buildDeveloperInstructions(
     includeLegacyGlobalGuidance: false,
   }).join("\n");
   const delegationGuidanceAvailable =
+    params.trigger !== "heartbeat" &&
     params.disableTools !== true &&
     params.toolsAllow?.length !== 0 &&
     params.delegationCapability !== "report_only" &&
@@ -98,6 +100,9 @@ export function buildDeveloperInstructions(
       : undefined;
   const sections = [
     "You are a personal agent running inside OpenClaw. OpenClaw has dynamic tools for OpenClaw-owned messaging, cron, sessions, media, gateway, and nodes.",
+    params.trigger === "heartbeat"
+      ? "Finish this heartbeat check inline and record its outcome in this turn. Background delegation and yielding cannot preserve its monitoring outcome; work requiring delegation belongs in an ordinary task."
+      : undefined,
     deferredToolNames.size > 0
       ? `Deferred searchable OpenClaw dynamic tools available: ${[...deferredToolNames]
           .toSorted((left, right) => left.localeCompare(right))

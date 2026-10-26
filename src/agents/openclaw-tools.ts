@@ -344,6 +344,7 @@ export function createOpenClawTools(
         workspaceDir,
       });
   const heartbeatTool = options?.enableHeartbeatTool ? createHeartbeatResponseTool() : null;
+  const heartbeatTurn = options?.trigger === "heartbeat";
   options?.recordToolPrepStage?.("openclaw-tools:message-tool");
   const nodesToolBase = createNodesTool({
     ...options,
@@ -590,7 +591,7 @@ export function createOpenClawTools(
             config: sessionConfig,
           }),
         ]),
-    !embedded || options?.allowGatewaySubagentBinding === true
+    !heartbeatTurn && (!embedded || options?.allowGatewaySubagentBinding === true)
       ? createSessionsSpawnTool({
           ...options,
           // Only a keyed parent has a stored incarnation for spawn to check.
@@ -608,15 +609,17 @@ export function createOpenClawTools(
         })
       : null,
     ...swarmToolGroups.agentsWait,
-    createSessionsYieldTool({
-      ...options,
-      claimYield: createRequesterYieldCallback({
-        ...options,
-        requesterSessionKey,
-        requesterAgentId: sessionAgentId,
-        requesterTurnRunId: options?.runId,
-      }),
-    }),
+    !heartbeatTurn
+      ? createSessionsYieldTool({
+          ...options,
+          claimYield: createRequesterYieldCallback({
+            ...options,
+            requesterSessionKey,
+            requesterAgentId: sessionAgentId,
+            requesterTurnRunId: options?.runId,
+          }),
+        })
+      : null,
     createSubagentsTool({
       // Match the durable controller key the spawn tool registers runs under, so split-key
       // callers (e.g. Telegram DM with a policy key distinct from the durable run key) still
