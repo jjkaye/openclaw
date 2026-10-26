@@ -4,29 +4,20 @@ import {
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { truncateWithMarker } from "openclaw/plugin-sdk/string-normalization-runtime";
 import { formatMatrixMessageText, resolveMatrixReplacementContent } from "../media-text.js";
-import {
-  formatPollAsText,
-  isPollStartType,
-  parsePollStart,
-  type PollStartContent,
-} from "../poll-types.js";
+import { formatPollAsText, isPollStartType, parsePollStart } from "../poll-types.js";
 import type { MatrixClient } from "../sdk.js";
 import { setBoundedMap } from "./bounded-cache.js";
 import type { MatrixRawEvent } from "./types.js";
 
 function summarizeMatrixMessageContextEvent(event: MatrixRawEvent): string | undefined {
   if (isPollStartType(event.type)) {
-    const pollSummary = parsePollStart(event.content as PollStartContent);
+    const pollSummary = parsePollStart(event.content);
     if (pollSummary) {
       return formatPollAsText(pollSummary);
     }
   }
 
-  const content = (resolveMatrixReplacementContent(event) ?? event.content) as {
-    body?: unknown;
-    filename?: unknown;
-    msgtype?: unknown;
-  };
+  const content = resolveMatrixReplacementContent(event) ?? event.content;
   return formatMatrixMessageText({
     body: readStringValue(content.body),
     filename: readStringValue(content.filename),
