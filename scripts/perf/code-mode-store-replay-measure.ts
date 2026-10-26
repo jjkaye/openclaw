@@ -8,7 +8,8 @@
  * 10000/200 entries/keys, plus 500/4 at --value-bytes 262144. To compare just the
  * owner without another checkout, materialize `git show <base>:src/agents/code-mode-session-store.ts`
  * under .local and pass its path with --store-module. The native loader substitutes
- * that source at the original module URL, retaining the same dependency closure.
+ * both default and frozen source at the original URL, retaining the same dependency
+ * closure and avoiding tsx/native-loader differences between comparison arms.
  * Native Node 26 total_allocated_bytes measures allocation without heap tracing.
  * Fixture construction, full-result verification and stringify instrumentation
  * are outside the measured replay loop. Every iteration binds a fresh catalog.
@@ -53,23 +54,21 @@ const ownerUrl = new URL("../../src/agents/code-mode-session-store.ts", import.m
 const storeModule = values["store-module"] ? path.resolve(values["store-module"]) : ownerUrl;
 const source = readFileSync(storeModule, "utf8");
 let replaced = false;
-if (values["store-module"]) {
-  registerHooks({
-    load(url, context, nextLoad) {
-      if (url === ownerUrl.href) {
-        replaced = true;
-        return { format: "module-typescript", source, shortCircuit: true };
-      }
-      return nextLoad(url, context);
-    },
-  });
-}
+registerHooks({
+  load(url, context, nextLoad) {
+    if (url === ownerUrl.href) {
+      replaced = true;
+      return { format: "module-typescript", source, shortCircuit: true };
+    }
+    return nextLoad(url, context);
+  },
+});
 const {
   bindCodeModeSessionStore,
   createCodeModeSessionStoreAccess,
   disposeCodeModeSessionStore,
 }: typeof import("../../src/agents/code-mode-session-store.js") = await import(ownerUrl.href);
-assert(!values["store-module"] || replaced, "Frozen owner was not loaded");
+assert(replaced, "Native owner source was not loaded");
 const { SessionManager } = await import("../../src/agents/sessions/session-manager.js");
 const manager = SessionManager.inMemory();
 const payloadBytes =
