@@ -28,17 +28,9 @@ it("maps only the root and eight ordered causes, including repeated cyclic frame
   for (let index = 8; index >= 0; index -= 1) {
     error = new Error(String(index), { cause: error });
   }
-  expect(mapErrorCauseChain(error, (entry) => entry.message)).toEqual([
-    "0",
-    "1",
-    "2",
-    "3",
-    "4",
-    "5",
-    "6",
-    "7",
-    "8",
-  ]);
+  expect(mapErrorCauseChain(error, (entry) => entry.message)).toEqual(
+    Array.from({ length: 9 }, (_, index) => String(index)),
+  );
   const cycle = new Error("loop");
   cycle.cause = cycle;
   expect(mapErrorCauseChain(cycle, (entry) => entry.message)).toEqual(Array(9).fill("loop"));
@@ -168,19 +160,19 @@ describe("formatErrorMessage", () => {
   });
 });
 
-describe("toErrorObject", () => {
-  it("preserves Error and string inputs", () => {
-    const error = new Error("boom");
-    expect(toErrorObject(error, "fallback")).toBe(error);
-    expect(toErrorObject("boom", "fallback")).toMatchObject({ message: "boom" });
-  });
-
-  it("preserves structured details from non-Error objects", () => {
-    const value = { code: "EPIPE", status: 500 };
-    const error = toErrorObject(value, "request failed");
-    expect(error).toMatchObject({ message: "request failed", code: "EPIPE", status: 500 });
+it.each([
+  [new Error("boom"), "boom"],
+  ["boom", "boom"],
+  [{ code: "EPIPE", status: 500 }, "request failed"],
+])("toErrorObject preserves messages and structured details: %j", (value, message) => {
+  const error = toErrorObject(value, "request failed");
+  expect(error.message).toBe(message);
+  if (value instanceof Error) {
+    expect(error).toBe(value);
+  } else if (typeof value === "object") {
+    expect(error).toMatchObject({ code: "EPIPE", status: 500 });
     expect(error.cause).toBe(value);
-  });
+  }
 });
 
 describe("toStructuredErrorObject", () => {
@@ -305,40 +297,18 @@ it.each([
   expect(stringifyNonErrorCause(value)).toBe(expected);
 });
 
-describe("formatErrorStackWithMessage", () => {
-  it("restores the message on a bare-header stack like Bun materializes", () => {
-    const error = new Error("version resolution failed");
-    error.stack = "Error\n    at resolveCommitHash (git-commit.js:1:1)";
-    expect(formatErrorStackWithMessage(error)).toBe(
-      "Error: version resolution failed\n    at resolveCommitHash (git-commit.js:1:1)",
-    );
-  });
+it.each([
+  ["Error", "version resolution failed", "Error", "Error: version resolution failed"],
+  ["Error", "boom", "Error: boom", "Error: boom"],
+  ["PermissionError", "denied", "PermissionError", "PermissionError: denied"],
+  ["Error", "multi", "", "Error: multi"],
+])("formats stack headers for %s: %s", (name, message, header, expected) => {
+  const frame = "    at f (source.js:1:1)";
+  const stack = header ? `${header}\n${frame}` : frame;
+  const error = Object.assign(new Error(message), { name, stack });
+  expect(formatErrorStackWithMessage(error)).toBe(`${expected}\n${frame}`);
+});
 
-  it("keeps a V8-style stack that already embeds the message unchanged", () => {
-    const error = new Error("boom");
-    error.stack = "Error: boom\n    at <anonymous> (source.js:1:1)";
-    expect(formatErrorStackWithMessage(error)).toBe(
-      "Error: boom\n    at <anonymous> (source.js:1:1)",
-    );
-  });
-
-  it("restores a bare header that carries a custom error name", () => {
-    const error = new Error("denied");
-    error.name = "PermissionError";
-    error.stack = "PermissionError\n    at f (source.js:2)";
-    expect(formatErrorStackWithMessage(error)).toBe(
-      "PermissionError: denied\n    at f (source.js:2)",
-    );
-  });
-
-  it("prepends the header when the stack has no leading name line", () => {
-    const error = new Error("multi");
-    error.stack = "    at q (source.js:3)";
-    expect(formatErrorStackWithMessage(error)).toBe("Error: multi\n    at q (source.js:3)");
-  });
-
-  it("falls back to the message when there is no stack", () => {
-    const error = Object.assign(new Error("solo"), { stack: "" });
-    expect(formatErrorStackWithMessage(error)).toBe("solo");
-  });
+it("formatErrorStackWithMessage falls back to the message without a stack", () => {
+  expect(formatErrorStackWithMessage(Object.assign(new Error("solo"), { stack: "" }))).toBe("solo");
 });
