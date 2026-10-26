@@ -287,6 +287,7 @@ it("requires ten-minute evidence windows and marks explicit short runs as smoke"
     smoke: false,
     clients: 65,
     pairs: 2,
+    aaPairs: 0,
     pollMs: 25_000,
     listWeight: 16,
     roundMs: 60_000,
@@ -300,6 +301,21 @@ it("requires ten-minute evidence windows and marks explicit short runs as smoke"
   expect(parseStressOptions(["--output", "/unused", "--operator-model-policy"])).toMatchObject({
     operatorModelPolicy: true,
   });
+  expect(parseStressOptions(["--output", "/unused", "--mode", "retention"])).toMatchObject({
+    mode: "retention",
+  });
+  expect(
+    parseStressOptions([
+      "--output",
+      "/unused",
+      "--base",
+      "/base",
+      "--pairs",
+      "3",
+      "--aa-pairs",
+      "2",
+    ]),
+  ).toMatchObject({ pairs: 3, aaPairs: 2 });
   for (const args of [
     [],
     ["--output"],
@@ -314,6 +330,8 @@ it("requires ten-minute evidence windows and marks explicit short runs as smoke"
     ["--output", "/unused", "--list-weight", "0"],
     ["--output", "/unused", "--list-weight", "65"],
     ["--output", "/unused", "--pairs", "0"],
+    ["--output", "/unused", "--aa-pairs", "1"],
+    ["--output", "/unused", "--base", "/base", "--pairs", "1", "--aa-pairs", "2"],
     ["--output", "/unused", "--mode", "invalid"],
     ["--output", "/unused", "--port", "18789"],
     ["--output", "/unused", "--port", "65536"],
@@ -322,46 +340,96 @@ it("requires ten-minute evidence windows and marks explicit short runs as smoke"
   }
 });
 
-it("records real main-isolate timing windows and settles telemetry once", async () => {
-  const output = temporary.make("team-stress-telemetry-");
-  const telemetryModule = new URL(
-    "../../scripts/perf/team-shape-stress-telemetry.ts",
-    import.meta.url,
-  );
-  await executeFile(
-    resolveTestNodeExecPath(),
-    [
-      "--input-type=module",
-      "--eval",
-      `import { setTimeout as delay } from 'node:timers/promises';
+it.each(["timing", "allocation", "retention"])(
+  "records real main-isolate %s evidence and settles telemetry once",
+  async (mode) => {
+    const output = temporary.make("team-stress-telemetry-");
+    const telemetryModule = new URL(
+      "../../scripts/perf/team-shape-stress-telemetry.ts",
+      import.meta.url,
+    );
+    await executeFile(
+      resolveTestNodeExecPath(),
+      [
+        "--input-type=module",
+        "--eval",
+        `import { setTimeout as delay } from 'node:timers/promises';
        const { startTeamStressTelemetry } = await import(${JSON.stringify(telemetryModule.href)});
-       const stop = await startTeamStressTelemetry({output: ${JSON.stringify(output)}, allocations: false, intervalMs: 100});
+       const stop = await startTeamStressTelemetry({output: ${JSON.stringify(output)}, allocations: ${mode !== "timing"}, retention: ${mode === "retention"}, intervalMs: 100});
        await delay(250);
        await Promise.all([stop(), stop()]);`,
-    ],
-    { cwd: fileURLToPath(new URL("../../", import.meta.url)), timeout: 15_000 },
-  );
-  const summary = JSON.parse(fs.readFileSync(path.join(output, "stress-telemetry.json"), "utf8"));
-  const windows = fs
-    .readFileSync(path.join(output, "stress-minutes.jsonl"), "utf8")
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
-  expect(summary).toMatchObject({ mode: "untraced-timing", sampledAllocatedBytes: null });
-  expect(summary.pid).not.toBe(process.pid);
-  expect(summary.durationMs).toBeGreaterThanOrEqual(200);
-  expect(summary.eventLoop.count).toBeGreaterThan(0);
-  expect(summary.mainThreadCpuMs).toBeGreaterThanOrEqual(0);
-  expect(summary.lastSample.memory.heapUsed).toBeGreaterThan(0);
-  expect(summary.lastSample.memory.rss).toBeGreaterThan(0);
-  expect(summary.windows).toBe(windows.length);
-  expect(windows.filter((window) => window.partial)).toHaveLength(1);
-  expect(windows.at(-1).partial).toBe(true);
-  expect(windows.every((window) => window.sampledAllocatedBytes === null)).toBe(true);
-  expect(fs.existsSync(path.join(output, "stress-allocation.heapprofile"))).toBe(false);
-});
+      ],
+      { cwd: fileURLToPath(new URL("../../", import.meta.url)), timeout: 15_000 },
+    );
+    const summary = JSON.parse(fs.readFileSync(path.join(output, "stress-telemetry.json"), "utf8"));
+    const windows = fs
+      .readFileSync(path.join(output, "stress-minutes.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(summary.mode).toBe(mode === "timing" ? "untraced-timing" : `${mode}-diagnostic`);
+    expect(summary.pid).not.toBe(process.pid);
+    expect(summary.durationMs).toBeGreaterThanOrEqual(200);
+    expect(summary.eventLoop.count).toBeGreaterThan(0);
+    expect(summary.mainThreadCpuMs).toBeGreaterThanOrEqual(0);
+    expect(summary.lastSample.memory.heapUsed).toBeGreaterThan(0);
+    expect(summary.lastSample.memory.rss).toBeGreaterThan(0);
+    expect(summary.initialMemory.heapUsed).toBeGreaterThan(0);
+    expect(
+      summary.initialHeapSpaces.some(
+        (space: { space_name: string }) => space.space_name === "old_space",
+      ),
+    ).toBe(true);
+    expect(summary.windows).toBe(windows.length);
+    expect(windows.filter((window) => window.partial)).toHaveLength(1);
+    expect(windows.at(-1).partial).toBe(true);
+    expect(windows.every((window) => window.sampledAllocatedBytes === null)).toBe(
+      mode !== "allocation",
+    );
+    expect(fs.existsSync(path.join(output, "stress-allocation.heapprofile"))).toBe(
+      mode === "allocation",
+    );
+    expect(fs.existsSync(path.join(output, "stress-retention.heapprofile"))).toBe(
+      mode === "retention",
+    );
+    expect(fs.existsSync(path.join(output, "stress-retained.heapsnapshot"))).toBe(
+      mode === "retention",
+    );
+    if (mode === "timing") {
+      expect(summary.samplingOptions).toBeNull();
+    } else {
+      expect(summary.samplingOptions).toMatchObject({
+        includeObjectsCollectedByMajorGC: true,
+        includeObjectsCollectedByMinorGC: mode === "allocation",
+      });
+    }
+    if (mode === "retention") {
+      expect(summary.sampledAllocatedBytes).toBeNull();
+      expect(summary.sampledSurvivorBytes).toBeGreaterThanOrEqual(0);
+      // No periodic profile materialization should perturb survivor measurements.
+      expect(windows.every((window) => window.sampledSurvivorBytes === null)).toBe(true);
+      const retained = JSON.parse(
+        fs.readFileSync(path.join(output, "stress-retention.json"), "utf8"),
+      );
+      expect(retained.measuredWindowEndedAtEpochMs).toBe(summary.endedAtEpochMs);
+      expect(retained.beforeCollection.atEpochMs).toBeGreaterThanOrEqual(summary.endedAtEpochMs);
+      expect(retained.afterCollection.atEpochMs).toBeGreaterThanOrEqual(
+        retained.beforeCollection.atEpochMs,
+      );
+      expect(retained.afterSnapshot.atEpochMs).toBeGreaterThanOrEqual(
+        retained.afterCollection.atEpochMs,
+      );
+      const snapshot = JSON.parse(
+        fs.readFileSync(path.join(output, retained.heapSnapshot), "utf8"),
+      );
+      expect(snapshot.snapshot.meta.node_fields).toContain("self_size");
+      expect(snapshot.nodes.length).toBeGreaterThan(0);
+      expect(snapshot.edges.length).toBeGreaterThan(0);
+    }
+  },
+);
 
-it("compares matched pairs in swapped launch order without averaging tiny-base percentages", () => {
+it("compares swapped pairs without mixing A/A controls or averaging tiny-base percentages", () => {
   const run = (side: StressRun["side"], pair: number, cpu: number): StressRun => ({
     resultDir: "/synthetic",
     side,
@@ -383,8 +451,10 @@ it("compares matched pairs in swapped launch order without averaging tiny-base p
     run("candidate", 1, 3),
     run("candidate", 2, 80),
     run("base", 2, 100),
+    { ...run("base", 1, 7), control: true },
+    { ...run("candidate", 1, 9), control: true },
   ]);
-  const cpu = rows.find((row) => row.metric === "mainThreadCpuPercent");
+  const cpu = rows.find((row) => !row.control && row.metric === "mainThreadCpuPercent");
   expect(cpu).toMatchObject({
     base: 50.5,
     candidate: 41.5,
@@ -393,6 +463,14 @@ it("compares matched pairs in swapped launch order without averaging tiny-base p
     pairedDeltas: [2, -20],
   });
   expect(cpu?.percent).toBeCloseTo((-9 / 50.5) * 100);
+  expect(rows.filter((row) => row.metric === "mainThreadCpuPercent")).toHaveLength(2);
+  expect(rows.find((row) => row.control && row.metric === "mainThreadCpuPercent")).toMatchObject({
+    base: 7,
+    candidate: 9,
+    absolute: 2,
+    pairs: 1,
+    pairedDeltas: [2],
+  });
   expect(rows.find((row) => row.metric === "zeroCost")).toMatchObject({
     base: 0,
     absolute: 0,
