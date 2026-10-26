@@ -53,8 +53,8 @@ it.each([
   { workspaceAccess: "rw", sourceKind: "upload" },
 ] as const)(
   "keeps $sourceKind input readable with workspaceAccess=$workspaceAccess",
-  async ({ workspaceAccess, sourceKind }) => {
-    await withSandboxMediaTempHome("openclaw-ssh-media-", async (home) => {
+  ({ workspaceAccess, sourceKind }) =>
+    withSandboxMediaTempHome("openclaw-ssh-media-", async (home) => {
       const localWorkspace = path.join(home, "gateway-workspace");
       const remoteWorkspace = path.join(await fs.realpath(tempDirs.make("ssh-media-")), "remote");
       const readRemote = (file: string) => fs.readFile(path.join(remoteWorkspace, file), "utf8");
@@ -165,6 +165,5 @@ it.each([
       if (downloadedPath) {
         await expect(fs.stat(downloadedPath)).rejects.toMatchObject({ code: "ENOENT" });
       }
-    });
-  },
+    }),
 );

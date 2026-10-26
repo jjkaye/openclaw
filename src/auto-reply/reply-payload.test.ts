@@ -7,7 +7,11 @@ import {
   readPairingQrReplyChannelData,
   readReplyPayloadSourceOccurrence,
   setReplyPayloadMetadata,
+  type ReplyPayloadMetadata,
 } from "./reply-payload.js";
+
+const withMetadata = (metadata: ReplyPayloadMetadata) =>
+  setReplyPayloadMetadata({ text: "same" }, metadata);
 
 function ttsPayload(text?: string, visibleTextAlreadyDelivered?: boolean) {
   return {
@@ -58,17 +62,14 @@ const currentEntry = {
 
 it("authorizes unclaimed payloads and only the session row that owns a claimed payload", () => {
   expect(isReplyPayloadSessionWriterDeliveryAuthorized({ text: "reply" }, undefined)).toBe(true);
-  const payload = setReplyPayloadMetadata(
-    { text: "reply" },
-    {
-      sessionWriterDeliveryAuthority: {
-        expectedLifecycleRevision: "revision-active",
-        expectedSessionId: "session-active",
-        expectedWriterRunId: "run-active",
-        sessionKey: "agent:main:active",
-      },
+  const payload = withMetadata({
+    sessionWriterDeliveryAuthority: {
+      expectedLifecycleRevision: "revision-active",
+      expectedSessionId: "session-active",
+      expectedWriterRunId: "run-active",
+      sessionKey: "agent:main:active",
     },
-  );
+  });
 
   const authorized = (entry: Parameters<typeof isReplyPayloadSessionWriterDeliveryAuthorized>[1]) =>
     isReplyPayloadSessionWriterDeliveryAuthorized(payload, entry);
@@ -86,7 +87,7 @@ const complete = {
 };
 
 it("reads complete UTF-16 source identity without changing the wire payload", () => {
-  const payload = setReplyPayloadMetadata({ text: "same" }, complete);
+  const payload = withMetadata(complete);
   expect(readReplyPayloadSourceOccurrence(payload)).toEqual({
     assistantMessageIndex: 2,
     sourceText: "same",
@@ -105,10 +106,7 @@ it.each([
   ["reversed source range", { ...complete, blockSourceRange: [12, 8] as const }],
   ["mismatched source length", { ...complete, blockSourceRange: [8, 13] as const }],
 ])("rejects %s", (_name, metadata) => {
-  const payload = { text: "same" };
-  if (metadata) {
-    setReplyPayloadMetadata(payload, metadata);
-  }
+  const payload = metadata ? withMetadata(metadata) : { text: "same" };
   expect(readReplyPayloadSourceOccurrence(payload)).toBeUndefined();
 });
 
@@ -120,17 +118,14 @@ it("retains private delivery authority across independently loaded reply module 
       open = false;
     },
   };
-  const payload = setReplyPayloadMetadata(
-    { text: "Synthetic waiting status" },
-    {
-      progressContinuation: capability,
-      sessionWriterDeliveryAuthority: {
-        expectedSessionId: "original-session",
-        expectedWriterRunId: "original-run",
-        sessionKey: "agent:main:original",
-      },
+  const payload = withMetadata({
+    progressContinuation: capability,
+    sessionWriterDeliveryAuthority: {
+      expectedSessionId: "original-session",
+      expectedWriterRunId: "original-run",
+      sessionKey: "agent:main:original",
     },
-  );
+  });
   vi.resetModules();
   const reloaded = await import("./reply-payload.js");
   const adopt = reloaded.getReplyPayloadMetadata(payload)?.progressContinuation?.adopt;
@@ -144,5 +139,5 @@ it("retains private delivery authority across independently loaded reply module 
       activeWriterRunId: "replacement-run",
     }),
   ).toBe(false);
-  expect(JSON.stringify(payload)).toBe(JSON.stringify({ text: "Synthetic waiting status" }));
+  expect(JSON.stringify(payload)).toBe(JSON.stringify({ text: "same" }));
 });
