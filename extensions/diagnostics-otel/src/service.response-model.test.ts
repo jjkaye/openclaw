@@ -82,15 +82,7 @@ test("exports the provider-reported response model on model.call spans only", as
   expect(usage[0]?.attributes).toMatchObject({ "gen_ai.request.model": "gpt-5.4" });
   expect(usage[0]?.attributes).not.toHaveProperty("gen_ai.response.model");
 
-  const names = new Set([
-    "openclaw.model_call.duration_ms",
-    "gen_ai.client.operation.duration",
-    "gen_ai.client.token.usage",
-    "openclaw.tokens",
-  ]);
-  const points = (await collectTestMetrics(reader))
-    .filter((metric) => names.has(metric.descriptor.name))
-    .flatMap((metric) => metric.dataPoints);
+  const points = (await collectTestMetrics(reader)).flatMap((metric) => metric.dataPoints);
   expect(points).not.toHaveLength(0);
   for (const { attributes } of points) {
     expect(attributes).not.toHaveProperty("gen_ai.response.model");

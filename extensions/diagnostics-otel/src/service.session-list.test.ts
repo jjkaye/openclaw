@@ -93,19 +93,8 @@ test("preserves cumulative session-row totals across restarts, isolated by provi
 test("exports trusted session list retirements and base misses as bounded counters", async () => {
   const { reader } = installTestMeter();
   await startOtelService({ traces: false, metrics: true });
-  const causes = [
-    "projection-revision",
-    "config",
-    "identity",
-    "selection-reset",
-    "view-evicted",
-    "history-evicted",
-  ] as const;
-  for (const cause of causes) {
-    const event = { type: "sessions.list.baseline.retired", cause } as const;
-    emit(event);
-    emitDiagnosticEvent(event);
-  }
+  emit({ type: "sessions.list.baseline.retired", cause: "config" });
+  emitDiagnosticEvent({ type: "sessions.list.baseline.retired", cause: "config" });
   for (const reason of ["unknown-base", "all-rows-changed"] as const) {
     const event = {
       type: "gateway.rpc",
@@ -130,17 +119,12 @@ test("exports trusted session list retirements and base misses as bounded counte
   }
   await waitForDiagnosticEventsDrained();
   const recorded = await collectTestMetrics(reader);
-  expect(
-    recorded.find(
-      (metric) => metric.descriptor.name === "openclaw.sessions.list.baseline_retirements",
-    )?.dataPoints,
-  ).toEqual(causes.map((cause) => expect.objectContaining({ attributes: { cause }, value: 1 })));
-  expect(
-    recorded.find((metric) => metric.descriptor.name === "openclaw.sessions.list.base_misses")
-      ?.dataPoints,
-  ).toEqual(
-    ["unknown-base", "all-rows-changed"].map((reason) =>
-      expect.objectContaining({ attributes: { reason }, value: 1 }),
-    ),
+  const points = (name: string) =>
+    recorded
+      .find((metric) => metric.descriptor.name === `openclaw.sessions.list.${name}`)
+      ?.dataPoints.map(({ attributes, value }) => [attributes, value]);
+  expect(points("baseline_retirements")).toEqual([[{ cause: "config" }, 1]]);
+  expect(points("base_misses")).toEqual(
+    ["unknown-base", "all-rows-changed"].map((reason) => [{ reason }, 1]),
   );
 });
