@@ -10,7 +10,7 @@ const { buildPluginControlUi } = vi.hoisted(() => ({
     entry: "dist/control-ui/prepared/index.js",
   })),
 }));
-// Isolate compiler work; asset loading and validation stay real.
+// mock-isolation: Avoid real compiler work while asset loading and validation stay real.
 vi.mock("../../../src/cli/plugins-control-ui-build.js", () => ({ buildPluginControlUi }));
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);

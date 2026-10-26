@@ -2,7 +2,10 @@ import path from "node:path";
 import { controlUiPluginAssetPrefix } from "../../../src/gateway/control-ui-plugin-assets-contract.js";
 import { readPluginControlUiAssets } from "../../../src/plugins/control-ui-assets.js";
 import type { PluginManifestControlUi } from "../../../src/plugins/manifest-types.js";
-import { getSharedControlUiE2ePreview } from "./control-ui-e2e-shared-preview.ts";
+import {
+  getSharedControlUiE2ePreview,
+  type PreparedNativeControlUiPluginBuild,
+} from "./control-ui-e2e-shared-preview.ts";
 
 export type NativeControlUiPluginFixture = {
   pluginId: string;
@@ -10,11 +13,6 @@ export type NativeControlUiPluginFixture = {
   source: string;
   inlineViews?: readonly { id: string; label: string; version: number }[];
 };
-
-export type PreparedNativeControlUiPluginBuild = Pick<
-  NativeControlUiPluginFixture,
-  "rootDir" | "source"
-> & { declaration: PluginManifestControlUi };
 
 const builds = new Map<string, Promise<PluginManifestControlUi>>();
 

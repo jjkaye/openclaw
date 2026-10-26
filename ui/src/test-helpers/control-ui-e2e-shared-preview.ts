@@ -1,6 +1,12 @@
 import type { ProvidedContext } from "vitest";
+import type { PluginManifestControlUi } from "../../../src/plugins/manifest-types.js";
 import type { ControlUiBuildInfo } from "../build-info-types.ts";
-import type { PreparedNativeControlUiPluginBuild } from "./control-ui-plugin-fixture.ts";
+
+export type PreparedNativeControlUiPluginBuild = {
+  rootDir: string;
+  source: string;
+  declaration: PluginManifestControlUi;
+};
 
 export type ControlUiE2ePrebuiltAssets = {
   root: string;
