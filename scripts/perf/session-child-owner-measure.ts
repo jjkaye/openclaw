@@ -262,6 +262,35 @@ let ownerCpuMicros = 0;
 let ownerReads = 0;
 let returnedRows = 0;
 let descendantQueries = 0;
+let sampleOwnerRegions = false;
+const allocationRegions: {
+  owner: HeapProfiler.SamplingHeapProfile[];
+  descendant: HeapProfiler.SamplingHeapProfile[];
+} = { owner: [], descendant: [] };
+async function sampleAllocationRegion(
+  read: () => void,
+  profiles: HeapProfiler.SamplingHeapProfile[],
+): Promise<void> {
+  // Temporal attribution survives V8 inlining; retain profiles only after sampling stops.
+  await inspector.post("HeapProfiler.startSampling", {
+    samplingInterval: 32768,
+    includeObjectsCollectedByMajorGC: true,
+    includeObjectsCollectedByMinorGC: true,
+  });
+  try {
+    read();
+  } finally {
+    const { profile } = await inspector.post("HeapProfiler.stopSampling");
+    profiles.push(profile);
+  }
+}
+function totalAllocatedBytes(node: HeapProfiler.SamplingHeapProfileNode): number {
+  let bytes = node.selfSize;
+  for (const child of node.children) {
+    bytes += totalAllocatedBytes(child);
+  }
+  return bytes;
+}
 function updateRun() {
   const index = sequence % parentCount;
   const previous = active[index]!;
@@ -288,7 +317,6 @@ function updateRun() {
   sequence++;
 }
 
-// Named declarations remain visible in V8 allocation stacks for anonymous query closures.
 function readActiveDescendants(index: SubagentRunReadIndex<SubagentRunReadRecord>): void {
   let rootIndex = 0;
   while (rootIndex < requesterRoots.length) {
@@ -323,6 +351,21 @@ async function resolveList() {
     topologyChanges++;
   }
   previousTopology = topology;
+  if (sampleOwnerRegions) {
+    const readDescendants = () => readActiveDescendants(index);
+    const readOwners = () => {
+      const before = process.threadCpuUsage();
+      for (const row of ownerRows) {
+        checksum += resolveSessionChildOwners({ ...row, now: clock, subagentRuns: index }).length;
+      }
+      const cpu = process.threadCpuUsage(before);
+      ownerCpuMicros += cpu.user + cpu.system;
+    };
+    await sampleAllocationRegion(readDescendants, allocationRegions.descendant);
+    await sampleAllocationRegion(readOwners, allocationRegions.owner);
+    ownerReads += rows.length;
+    return;
+  }
   readActiveDescendants(index);
   const before = process.threadCpuUsage();
   for (const row of ownerRows) {
@@ -386,13 +429,14 @@ try {
   if (values.mode === "census") {
     await inspector.post("Profiler.enable");
     await inspector.post("Profiler.startPreciseCoverage", { callCount: true, detailed: false });
-  } else if (values.mode === "allocation") {
+  } else if (values.mode === "allocation" && values.workload === "list") {
     await inspector.post("HeapProfiler.startSampling", {
       samplingInterval: 32768,
       includeObjectsCollectedByMajorGC: true,
       includeObjectsCollectedByMinorGC: true,
     });
   }
+  sampleOwnerRegions = values.mode === "allocation" && values.workload === "owner";
   const started = performance.now();
   const before = process.threadCpuUsage();
   const work = await run(updates);
@@ -420,55 +464,24 @@ try {
     writeFileSync(path.join(root, "calls.json"), JSON.stringify(calls, null, 2));
   }
   let allocatedBytes: number | undefined;
-  let childOwnerAllocatedBytes: number | undefined;
-  let controllerAllocatedBytes: number | undefined;
-  let descendantAllocatedBytes: number | undefined;
-  let controllerAndDescendantAllocatedBytes: number | undefined;
-  if (values.mode === "allocation") {
+  let ownerRegionAllocatedBytes: number | undefined;
+  let descendantRegionAllocatedBytes: number | undefined;
+  if (sampleOwnerRegions) {
+    writeFileSync(path.join(root, "allocation-regions.json"), JSON.stringify(allocationRegions));
+    ownerRegionAllocatedBytes = allocationRegions.owner.reduce(
+      (bytes, profile) => bytes + totalAllocatedBytes(profile.head),
+      0,
+    );
+    descendantRegionAllocatedBytes = allocationRegions.descendant.reduce(
+      (bytes, profile) => bytes + totalAllocatedBytes(profile.head),
+      0,
+    );
+    assert.equal(allocationRegions.owner.length, work.lists);
+    assert.equal(allocationRegions.descendant.length, work.lists);
+  } else if (values.mode === "allocation") {
     const { profile } = await inspector.post("HeapProfiler.stopSampling");
     writeFileSync(path.join(root, "allocation.heapprofile"), JSON.stringify(profile));
-    const allocation = { total: 0, childOwner: 0, controller: 0, descendant: 0, union: 0 };
-    const visit = (
-      node: HeapProfiler.SamplingHeapProfileNode,
-      childOwner = false,
-      controller = false,
-      descendant = false,
-    ): void => {
-      const name = node.callFrame.functionName;
-      const owner =
-        childOwner ||
-        name === "resolveSessionChildOwners" ||
-        name === "resolveSessionChildController";
-      const inController =
-        controller ||
-        name === "resolveSessionChildController" ||
-        name === "getSubagentChildControllerSessionKey";
-      const inDescendant = descendant || name === "readActiveDescendants";
-      allocation.total += node.selfSize;
-      if (owner) {
-        allocation.childOwner += node.selfSize;
-      }
-      if (inController) {
-        allocation.controller += node.selfSize;
-      }
-      if (inDescendant) {
-        allocation.descendant += node.selfSize;
-      }
-      if (inController || inDescendant) {
-        allocation.union += node.selfSize;
-      }
-      for (const child of node.children) {
-        visit(child, owner, inController, inDescendant);
-      }
-    };
-    visit(profile.head);
-    allocatedBytes = allocation.total;
-    childOwnerAllocatedBytes = allocation.childOwner;
-    controllerAllocatedBytes = allocation.controller;
-    if (values.workload === "owner") {
-      descendantAllocatedBytes = allocation.descendant;
-      controllerAndDescendantAllocatedBytes = allocation.union;
-    }
+    allocatedBytes = totalAllocatedBytes(profile.head);
   }
   const gc: Record<string, { count: number; totalMs: number }> = {};
   for (const entry of gcEntries) {
@@ -513,25 +526,21 @@ try {
       values.workload === "owner" ? "explicit owner-workload calls" : undefined,
     allocatedBytes,
     allocatedBytesPerList: allocatedBytes === undefined ? undefined : allocatedBytes / work.lists,
-    childOwnerAllocatedBytes,
-    childOwnerAllocatedBytesPerList:
-      childOwnerAllocatedBytes === undefined ? undefined : childOwnerAllocatedBytes / work.lists,
-    controllerAllocatedBytes,
-    controllerAllocatedBytesPerList:
-      controllerAllocatedBytes === undefined ? undefined : controllerAllocatedBytes / work.lists,
-    descendantAllocationAvailable: values.mode === "allocation" && values.workload === "owner",
-    descendantAllocationAttribution:
-      values.workload === "owner"
-        ? "inclusive readActiveDescendants workload subtree"
-        : "unavailable: production descendant frames are anonymous",
-    descendantAllocatedBytes,
-    descendantAllocatedBytesPerList:
-      descendantAllocatedBytes === undefined ? undefined : descendantAllocatedBytes / work.lists,
-    controllerAndDescendantAllocatedBytes,
-    controllerAndDescendantAllocatedBytesPerList:
-      controllerAndDescendantAllocatedBytes === undefined
+    ownerRegionAllocatedBytes,
+    ownerRegionAllocatedBytesPerList:
+      ownerRegionAllocatedBytes === undefined ? undefined : ownerRegionAllocatedBytes / work.lists,
+    descendantRegionAllocatedBytes,
+    descendantRegionAllocatedBytesPerList:
+      descendantRegionAllocatedBytes === undefined
         ? undefined
-        : controllerAndDescendantAllocatedBytes / work.lists,
+        : descendantRegionAllocatedBytes / work.lists,
+    ownerRegionEpochCount: sampleOwnerRegions ? allocationRegions.owner.length : undefined,
+    descendantRegionEpochCount: sampleOwnerRegions
+      ? allocationRegions.descendant.length
+      : undefined,
+    allocationRegionAttribution: sampleOwnerRegions
+      ? "entire temporal regions including sampler boundary and caller overhead; owner includes argument spreads"
+      : undefined,
     allocatedBytesPerUpdate:
       allocatedBytes === undefined ? undefined : allocatedBytes / work.updates,
     gc,
