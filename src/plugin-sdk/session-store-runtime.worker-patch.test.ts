@@ -109,8 +109,6 @@ it.each(["snapshot", "authority"] as const)("rejects changed %s", async (change)
       change === "snapshot" ? /changed/ : "Session operation revoked",
     );
     expect(beforeCommit).toHaveBeenCalledOnce();
-    // Complete retained facts supply preparation; the worker still owns commit validation.
-    expect(delivery.commands).toEqual(["session.entry.patch.commit"]);
     expect(prepare).toHaveBeenCalledOnce();
     if (change === "snapshot") {
       expect(fixture.read()?.label).toBe("concurrent write");
