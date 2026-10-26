@@ -495,7 +495,7 @@ export async function readUpdateStateSchemaVersions({
 
 /** Keep snapshot dependencies out of schema inspection; rebind registry paths to private copies. */
 export async function snapshotUpdateCandidateState(
-  input: StateInput & {
+  sourceInput: StateInput & {
     targetStateDir: string;
     candidateRoot: string;
     pluginPlanPath: string;
@@ -509,15 +509,17 @@ export async function snapshotUpdateCandidateState(
   const { copyUpdateCandidatePlugins, UpdateCandidatePluginPlanSchema } =
     await import("./update-candidate-plugins.js");
   const plugins = UpdateCandidatePluginPlanSchema.parse(
-    JSON.parse(await fs.readFile(input.pluginPlanPath, "utf8")),
+    JSON.parse(await fs.readFile(sourceInput.pluginPlanPath, "utf8")),
   );
-  const admittedDatabases = new Set(input.databaseInventory);
-  const sourceRoot = path.resolve(input.stateDir);
+  const admittedDatabases = new Set(sourceInput.databaseInventory);
+  const sourceRoot = path.resolve(sourceInput.stateDir);
   // Released parents omit source selectors and launch us in the rehearsal namespace.
   const sourceEnv =
-    input.env?.OPENCLAW_STATE_DIR?.trim() || input.env?.OPENCLAW_CONFIG_PATH?.trim()
-      ? input.env
-      : { ...input.env, OPENCLAW_STATE_DIR: sourceRoot };
+    sourceInput.env?.OPENCLAW_STATE_DIR?.trim() || sourceInput.env?.OPENCLAW_CONFIG_PATH?.trim()
+      ? sourceInput.env
+      : { ...sourceInput.env, OPENCLAW_STATE_DIR: sourceRoot };
+  // Discovery uses the selected installation; cron identity retains the source selectors above.
+  const input = { ...sourceInput, env: { ...sourceInput.env, OPENCLAW_STATE_DIR: sourceRoot } };
   const shared = path.join(sourceRoot, "state", "openclaw.sqlite");
   const localCredentials = resolveClientCredentialStorePath({ OPENCLAW_STATE_DIR: sourceRoot });
   const { readClientCredentialFileIdentity } = await import("./client-credential-receipt.js");

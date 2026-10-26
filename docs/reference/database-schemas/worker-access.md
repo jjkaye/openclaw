@@ -74,11 +74,18 @@ A new worker or database generation receives a complete snapshot.
 Worker exit republishes only databases that held that worker's reference; an
 unrelated exit does not rescan retained session scopes. Interrupted-write
 settlement and shared reference revocation still precede publication.
+
 Reference and fact publications reuse the last complete scope sweep while its
 shared revision remains current. Importing scope cells publishes only the imported
 keys and carries a completed sweep through the host's own revision increment.
 Peer retirement and capacity pruning still invalidate that sweep; an imported key
 never certifies that unrelated remote retirements were swept.
+
+Ordinary SQLite worker dispatch verifies the current Gateway root and projection
+in the existing ownership heartbeat worker. Each request receives a fresh physical
+check, then verifies the same live owner before dispatch and native admission.
+Successful checks are never reused across requests. Retained schema settlement,
+synchronous bootstrap, and native cleanup keep their existing lease checks.
 
 Use the existing read-only worker scope for descriptive reads and the store's
 writer broker for mutations. Keep multi-statement snapshot reads together; use
@@ -184,6 +191,8 @@ the canonical entry postimage, without a second copy.
 Session-entry patch preparation sends only logical entries and their keys. SQL row,
 window, and side-table facts stay with the worker; callback commits retain the same
 entry comparison, admission ordering, and persisted bytes.
+Entry comparison ignores top-level property order introduced by replica deltas,
+while preserving JSON field values and rejecting intervening owner or content changes.
 
 Session file reads retain workspace authority independently of evictable display
 rows. Committed writers carry their existing full postimages to predicates that

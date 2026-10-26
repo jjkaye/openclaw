@@ -49,6 +49,11 @@ async function snapshotCandidateState(): Promise<unknown> {
     const { prepareRetainedRuntimeFiles } = await import("./update-retained-runtime-files.js");
     return prepareRetainedRuntimeFiles(input);
   }
+  if ("stateDir" in input && input.mode !== "database-generations" && input.mode !== "snapshot") {
+    // Older installed drivers omit this from their restricted environment payload.
+    // Metadata discovery must use the same installation as the inspected databases.
+    input.env = { ...input.env, OPENCLAW_STATE_DIR: input.stateDir };
+  }
   // Runtime retention needs no database/config inspection graph.
   const { createUpdateStateInspectionReporter } =
     await import("./update-candidate-state.diagnostics.js");
