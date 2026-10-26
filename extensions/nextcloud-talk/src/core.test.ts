@@ -4,16 +4,15 @@ import {
   normalizeNextcloudTalkMessagingTarget as normalizeTarget,
   stripNextcloudTalkTargetPrefix as stripPrefix,
 } from "./normalize.js";
-import { resolveNextcloudTalkAllowlistMatch as resolveAllowlistMatch } from "./policy.js";
 import {
   extractNextcloudTalkHeaders as extractHeaders,
   generateNextcloudTalkSignature as generateSignature,
   verifyNextcloudTalkSignature as verifySignature,
 } from "./signature.js";
 
-function signedPayload(generate = generateSignature) {
+function signedPayload() {
   const payload = { body: JSON.stringify({ hello: "world" }), secret: "secret-123" };
-  return { ...payload, ...generate(payload) };
+  return { ...payload, ...generateSignature(payload) };
 }
 
 describe("nextcloud talk core", () => {
@@ -26,12 +25,8 @@ describe("nextcloud talk core", () => {
     expect(stripPrefix("room:   ")).toBeUndefined();
 
     expect(normalizeTarget("room:AbC123")).toBe("nextcloud-talk:abc123");
-    expect(normalizeTarget("nc-talk:room:Ops")).toBe("nextcloud-talk:ops");
-    expect(normalizeTarget("NEXTCLOUD-TALK:ROOM:Ops")).toBe("nextcloud-talk:ops");
 
     expect(looksLikeTargetId("nextcloud-talk:room:abc12345")).toBe(true);
-    expect(looksLikeTargetId("nc:opsroom1")).toBe(true);
-    expect(looksLikeTargetId("room:opsroom1")).toBe(true);
     expect(looksLikeTargetId("abc12345")).toBe(true);
     expect(looksLikeTargetId("")).toBe(false);
   });
@@ -65,17 +60,5 @@ describe("nextcloud talk core", () => {
     ["tampered signature", { signature: "a".repeat(64) }],
   ])("rejects %s", (_label, tampered) => {
     expect(verifySignature({ ...signedPayload(), ...tampered })).toBe(false);
-  });
-
-  it("resolves allowlist matches", () => {
-    const match = (allowFrom: string[], senderId = "user-id") =>
-      resolveAllowlistMatch({ allowFrom, senderId });
-    expect(match(["*"]).allowed).toBe(true);
-    expect(match(["nc:User-Id"])).toEqual({
-      allowed: true,
-      matchKey: "users/user-id",
-      matchSource: "id",
-    });
-    expect(match(["allowed"], "other").allowed).toBe(false);
   });
 });

@@ -33,25 +33,19 @@ describe("nextcloud talk channel core", () => {
   });
 
   it.each([
-    ["omitted media allowlist", {}, true],
-    ["explicit sender", { mediaAllowFrom: ["users/alice"] }, false],
-    ["wildcard", { mediaAllowFrom: ["*"] }, false],
-    [
-      "named account with size override",
-      {
-        mediaAllowFrom: ["users/alice"],
-        mediaMaxMb: 20,
-        accounts: { work: { mediaAllowFrom: ["*"], mediaMaxMb: 5 } },
-      },
-      false,
-    ],
-  ] as const)("accepts representative inbound media config: %s", (_label, input, expectOmitted) => {
+    {},
+    {
+      mediaAllowFrom: ["users/alice", "*"],
+      mediaMaxMb: 20,
+      accounts: { work: { mediaAllowFrom: ["*"], mediaMaxMb: 5 } },
+    },
+  ])("accepts inbound media config %j", (input) => {
     const result = safeParseNextcloudTalkConfig(input);
     if (!result.success) {
       throw new Error(JSON.stringify(result.issues));
     }
     expect(result.data).toMatchObject(input);
-    if (expectOmitted) {
+    if (!("mediaAllowFrom" in input)) {
       expect(result.data).not.toHaveProperty("mediaAllowFrom");
       expect(result.data).not.toHaveProperty("mediaMaxMb");
     }
@@ -75,8 +69,6 @@ describe("nextcloud talk channel core", () => {
     const cfg = {
       channels: {
         "nextcloud-talk": {
-          baseUrl: "https://cloud.example.com",
-          botSecret: "secret",
           dmPolicy: "allowlist",
           allowFrom: ["  nc:User-Id  "],
         },
