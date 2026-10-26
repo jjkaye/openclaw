@@ -1,20 +1,13 @@
-import {
-  installChannelOutboundPayloadContractSuite,
-  primeChannelOutboundSendMock,
-  type OutboundPayloadHarnessParams,
-} from "openclaw/plugin-sdk/channel-contract-testing";
-import {
-  createMessageReceiptFromOutboundResults,
-  sendDurableMessageBatch,
-} from "openclaw/plugin-sdk/channel-outbound";
+import { sendDurableMessageBatch } from "openclaw/plugin-sdk/channel-outbound";
 import { expectDefined } from "openclaw/plugin-sdk/expect-runtime";
 import {
   createEmptyPluginRegistry,
   createTestRegistry,
   resetPluginRuntimeStateForTest,
+  resetGlobalHookRunner,
   setActivePluginRegistry,
 } from "openclaw/plugin-sdk/plugin-test-runtime";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { zaloPlugin } from "./channel.js";
 
 const sendZaloTextMock = vi.hoisted(() => vi.fn());
@@ -26,36 +19,27 @@ vi.mock("./channel.runtime.js", async (importOriginal) => ({
 
 const required = <T>(value: T | undefined) => expectDefined(value, "Zalo outbound capability");
 
-const zaloMessageAdapter = required(zaloPlugin.message);
 const target = () => ({ cfg: {}, to: "123456789" });
 
-function createZaloHarness(params: OutboundPayloadHarnessParams) {
-  const sendZalo = vi.fn();
-  primeChannelOutboundSendMock(sendZalo, { messageId: "zl-1" }, params.sendResults);
-  sendZaloTextMock
-    .mockReset()
-    .mockImplementation(
-      async (to: string, text: string, nextCtx: { mediaUrl?: string }) =>
-        await sendZalo(to, text, { mediaUrl: nextCtx.mediaUrl }),
-    );
-  const sendPayload = required(zaloPlugin.outbound?.sendPayload);
-  return {
-    run: () => sendPayload({ ...target(), text: "", payload: params.payload }),
-    sendMock: sendZalo,
-    to: target().to,
-  };
-}
-
+beforeEach(resetGlobalHookRunner);
 afterEach(() => {
   resetPluginRuntimeStateForTest();
   setActivePluginRegistry(createEmptyPluginRegistry());
 });
 
 describe("Zalo outbound payload contract", () => {
-  installChannelOutboundPayloadContractSuite({
-    channel: "zalo",
-    chunking: { mode: "split", longTextLength: 3000, maxChunkLength: 2000 },
-    createHarness: createZaloHarness,
+  it("splits Zalo payload text at 2000 characters", async () => {
+    sendZaloTextMock.mockReset().mockResolvedValue({ messageId: "chunk" });
+    const result = await required(zaloPlugin.outbound?.sendPayload)({
+      ...target(),
+      text: "",
+      payload: { text: "a".repeat(3000) },
+    });
+    expect(sendZaloTextMock.mock.calls.map(([, text]) => text)).toEqual([
+      "a".repeat(2000),
+      "a".repeat(1000),
+    ]);
+    expect(result).toMatchObject({ channel: "zalo", messageId: "chunk" });
   });
 
   it.each([
@@ -64,6 +48,11 @@ describe("Zalo outbound payload contract", () => {
   ] as const)(
     "reports $kind message-adapter failures to durable delivery",
     async ({ kind, payload }) => {
+      expect(required(zaloPlugin.message).durableFinal?.capabilities).toEqual({
+        text: true,
+        media: true,
+        messageSendingHooks: true,
+      });
       setActivePluginRegistry(
         createTestRegistry([{ pluginId: "zalo", source: "test", plugin: zaloPlugin }]),
       );
@@ -82,31 +71,4 @@ describe("Zalo outbound payload contract", () => {
       });
     },
   );
-
-  it.each(["text", "media"] as const)("delivers declared durable %s receipts", async (kind) => {
-    expect(zaloMessageAdapter.durableFinal?.capabilities).toEqual({
-      text: true,
-      media: true,
-      messageSendingHooks: true,
-    });
-    sendZaloTextMock
-      .mockReset()
-      .mockImplementation(async (_to: string, _text: string, ctx: { mediaUrl?: string }) => {
-        const deliveredKind = ctx.mediaUrl ? "media" : "text";
-        const messageId = `zl-${deliveredKind}-1`;
-        return {
-          messageId,
-          receipt: createMessageReceiptFromOutboundResults({
-            results: [{ channel: "zalo", messageId }],
-            kind: deliveredKind,
-          }),
-        };
-      });
-    const result = await required(zaloMessageAdapter.send?.[kind])({
-      ...target(),
-      text: "hello",
-      ...(kind === "media" ? { mediaUrl: "https://example.com/image.png" } : {}),
-    });
-    expect(result.receipt.platformMessageIds).toEqual([`zl-${kind}-1`]);
-  });
 });

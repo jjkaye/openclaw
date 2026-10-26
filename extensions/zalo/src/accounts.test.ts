@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import os from "node:os";
-import path from "node:path";
+import nodePath from "node:path";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -73,41 +73,32 @@ describe("resolveZaloAccount", () => {
 
 function expectUnavailableFile(
   result: ReturnType<typeof resolveZaloToken> | ReturnType<typeof resolveZaloAccount>,
-  configPath: string,
-  reason?: string,
+  path: string,
+  reason: string,
 ) {
   expect(result).toMatchObject({
     token: "",
     ...("source" in result
       ? { source: "configFile", status: "configured_unavailable" }
       : { tokenSource: "configFile", tokenStatus: "configured_unavailable" }),
-    credentialDiagnostics: [
-      {
-        code: "CREDENTIAL_FILE_UNAVAILABLE",
-        path: configPath,
-        ...(reason ? { reason } : {}),
-      },
-    ],
+    credentialDiagnostics: [{ code: "CREDENTIAL_FILE_UNAVAILABLE", path, reason }],
   });
 }
 
 describe("resolveZaloToken", () => {
-  it("uses configured defaultAccount token when accountId is omitted", () => {
-    const res = resolveZaloToken({
-      defaultAccount: "work",
-      botToken: "top-level-token",
-      accounts: { work: { botToken: "work-token" } },
-    });
-    expect(res).toMatchObject({ token: "work-token", source: "config" });
-  });
-
-  it("does not inherit top-level token when account token is explicitly blank", () => {
-    expect(
-      resolveZaloToken(
-        { botToken: "top-level-token", accounts: { work: { botToken: "" } } },
-        "work",
-      ),
-    ).toMatchObject({ token: "", source: "none" });
+  it.each([
+    [undefined, "work-token", "config"],
+    ["work", "", "none"],
+  ] as const)("resolves named token with accountId=%s and token=%j", (accountId, token, source) => {
+    const res = resolveZaloToken(
+      {
+        defaultAccount: "work",
+        botToken: "top-level-token",
+        accounts: { work: { botToken: token } },
+      },
+      accountId,
+    );
+    expect(res).toMatchObject({ token, source });
   });
 
   it.each([
@@ -142,10 +133,10 @@ describe("resolveZaloToken", () => {
   );
 
   it("rejects symlinked token files", ({ skip }) => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-zalo-token-"));
+    const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "openclaw-zalo-token-"));
     try {
-      const tokenFile = path.join(dir, "token.txt");
-      const tokenLink = path.join(dir, "token-link.txt");
+      const tokenFile = nodePath.join(dir, "token.txt");
+      const tokenLink = nodePath.join(dir, "token-link.txt");
       try {
         fs.writeFileSync(tokenFile, "file-token\n", "utf8");
         fs.symlinkSync(tokenFile, tokenLink, "file");

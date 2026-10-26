@@ -25,10 +25,7 @@ describe("Zalo reply-once lifecycle", () => {
     chatId: "dm-chat-1",
     text: "check https://example.com",
   });
-  const finalizeContext = vi.fn((ctx: Record<string, unknown>) => ctx);
-  const recordSession = vi.fn(
-    async (_input: { sessionKey?: string; ctx?: Record<string, unknown> }) => undefined,
-  );
+  const recordSession = vi.fn<Session["recordInboundSession"]>(async () => {});
   const dispatchReply = vi.fn();
 
   beforeAll(async () => {
@@ -39,12 +36,12 @@ describe("Zalo reply-once lifecycle", () => {
     await resetLifecycleTestState();
     setLifecycleRuntimeCore({
       reply: {
-        finalizeInboundContext: finalizeContext as unknown as Reply["finalizeInboundContext"],
+        finalizeInboundContext: (ctx) => ctx,
         dispatchReplyWithBufferedBlockDispatcher:
           dispatchReply as unknown as Reply["dispatchReplyWithBufferedBlockDispatcher"],
       },
       session: {
-        recordInboundSession: recordSession as unknown as Session["recordInboundSession"],
+        recordInboundSession: recordSession,
       },
     });
   });
@@ -66,24 +63,29 @@ describe("Zalo reply-once lifecycle", () => {
     });
   }
 
-  it.each(["message.text.received", "message.unsupported.received"])(
-    "routes %s text to one visible reply across duplicate replay",
-    async (eventName) => {
+  it.each([
+    ["message.text.received", false],
+    ["message.unsupported.received", false],
+    ["message.text.received", true],
+  ] as const)(
+    "replies once to %s across replay (post-send failure=%s)",
+    async (eventName, failed) => {
       dispatchReply.mockImplementation(async ({ dispatcherOptions, replyOptions }) => {
+        expect(replyOptions.turnAdoptionLifecycle).toBeDefined();
         await replyOptions.turnAdoptionLifecycle?.onAdopted();
         await dispatcherOptions.deliver({ text: "zalo reply once" });
+        if (failed && dispatchReply.mock.calls.length === 1) {
+          throw new Error("post-send failure");
+        }
       });
 
-      const monitor = await startMonitor();
-
-      await withStoppedMonitor(monitor, async () => {
-        await replayLifecycleWebhook(monitor, { ...textUpdate, event_name: eventName });
+      await withStoppedMonitor(await startMonitor(), async (monitor) => {
+        await replayLifecycleWebhook(monitor, { ...textUpdate, event_name: eventName }, failed);
 
         expect(dispatchReply).toHaveBeenCalledTimes(1);
         expect(dispatchReply.mock.calls[0]?.[0].ctx.BodyForAgent).toBe("check https://example.com");
         expect(recordSession).toHaveBeenCalledTimes(1);
-        const recordArgs = recordSession.mock.calls[0]?.[0];
-        expect(recordArgs).toMatchObject({
+        expect(recordSession.mock.calls[0]?.[0]).toMatchObject({
           sessionKey: "agent:main:zalo:direct:dm-chat-1",
           ctx: {
             MessageSid: "zalo-replay",
@@ -98,6 +100,9 @@ describe("Zalo reply-once lifecycle", () => {
           expect.objectContaining({ chat_id: "dm-chat-1", text: "zalo reply once" }),
           undefined,
         );
+        if (failed) {
+          expect(monitor.runtime.error).not.toHaveBeenCalled();
+        }
       });
     },
   );
@@ -105,8 +110,7 @@ describe("Zalo reply-once lifecycle", () => {
   it.each([undefined, " \t "])(
     "logs unsupported events with no usable text (%j) without sending a reply",
     async (text) => {
-      const monitor = await startMonitor();
-      await withStoppedMonitor(monitor, async () => {
+      await withStoppedMonitor(await startMonitor(), async (monitor) => {
         await replayLifecycleWebhook(
           monitor,
           {
@@ -126,27 +130,4 @@ describe("Zalo reply-once lifecycle", () => {
       });
     },
   );
-
-  it("does not emit a second visible reply when replay arrives after a post-send failure", async () => {
-    let dispatchAttempts = 0;
-    dispatchReply.mockImplementation(async ({ dispatcherOptions, replyOptions }) => {
-      dispatchAttempts += 1;
-      expect(replyOptions.turnAdoptionLifecycle).toBeDefined();
-      await replyOptions.turnAdoptionLifecycle?.onAdopted();
-      await dispatcherOptions.deliver({ text: "zalo reply after failure" });
-      if (dispatchAttempts === 1) {
-        throw new Error("post-send failure");
-      }
-    });
-
-    const monitor = await startMonitor();
-
-    await withStoppedMonitor(monitor, async () => {
-      await replayLifecycleWebhook(monitor, textUpdate, true);
-
-      expect(dispatchReply).toHaveBeenCalledTimes(1);
-      expect(sendMessageMock).toHaveBeenCalledTimes(1);
-      expect(monitor.runtime.error).not.toHaveBeenCalled();
-    });
-  });
 });
