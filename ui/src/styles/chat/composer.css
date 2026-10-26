@@ -2089,32 +2089,58 @@ html[dir="rtl"] .chat-attachment-loading > span {
 }
 
 .chat-controls__permission-menu {
+  --chat-permission-panel-padding: 6px;
+
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  column-gap: 16px;
+  column-gap: 8px;
   align-items: start;
-  width: min(340px, calc(100vw - 24px));
-  padding: 8px;
+  width: min(440px, calc(100vw - 24px));
+  padding: var(--chat-permission-panel-padding);
   overflow: hidden;
 }
 
 .chat-controls__permission-heading {
-  padding: 0 0 9px 16px;
+  align-self: center;
+  padding: 6px 0 8px 9px;
 }
 
 .chat-controls__permission-learn-more {
-  padding: 0 0 9px;
+  align-self: center;
+  width: auto;
+  min-height: 0;
+  padding: 6px 9px 8px 0;
   background: transparent;
   color: var(--muted);
   font-size: 10px;
   line-height: 1.32;
-  font-weight: 500;
+  font-weight: 400;
   letter-spacing: normal;
   text-transform: none;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.chat-controls__permission-learn-more:hover {
+  background: transparent;
+  text-decoration: none;
 }
 
 .chat-controls__permission-option {
   grid-column: 1 / -1;
+  gap: 8px;
+  padding: 9px;
+  border-radius: max(
+    0px,
+    calc(
+      var(--chat-composer-popover-radius, var(--radius-lg)) - var(--chat-permission-panel-padding)
+    )
+  );
+}
+
+.chat-controls__permission-option > .oc-menu-item__icon,
+.chat-controls__permission-option > .oc-menu-item__details {
+  align-self: flex-start;
 }
 
 .chat-controls__permission-option > .oc-menu-item__check {
@@ -2189,14 +2215,30 @@ html[dir="rtl"] .chat-attachment-loading > span {
 .chat-controls__permission-option-copy {
   display: grid;
   min-width: 0;
-  gap: 3px;
+  gap: 4px;
 }
 
 .chat-controls__permission-option-icon {
   display: inline-flex;
+  width: 20px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  color: var(--icon-decorative);
+}
+
+.chat-controls__permission-option-icon svg {
   width: 16px;
   height: 16px;
-  color: var(--muted);
+  stroke-width: 1.6;
+}
+
+.chat-controls__permission-option--selected .chat-controls__permission-option-icon {
+  color: var(--text-strong);
+}
+
+.chat-controls__permission-option--pending:disabled {
+  opacity: 1;
 }
 
 /* Selected-state check shares the mic picker's box: a 16px slot centering a
@@ -2204,9 +2246,7 @@ html[dir="rtl"] .chat-attachment-loading > span {
 .chat-talk-input-picker__check,
 .chat-controls__inline-select-check,
 .chat-controls__permission-trigger--full .chat-controls__permission-icon,
-.chat-controls__permission-option:disabled .chat-controls__permission-option-icon,
-.chat-controls__permission-option[data-chat-permission-option="full"]
-  .chat-controls__permission-option-icon {
+.chat-controls__permission-option--full .chat-controls__permission-option-icon {
   color: var(--accent);
 }
 
@@ -2215,28 +2255,43 @@ html[dir="rtl"] .chat-attachment-loading > span {
   align-items: center;
   gap: 6px;
   line-height: 1.2;
+  font-size: 12px;
+  font-weight: 500;
 }
 
-.chat-controls__permission-shortcut {
-  display: inline-flex;
-  width: 16px;
-  height: 16px;
-  align-items: center;
-  justify-content: center;
+.chat-controls__permission-default-badge {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--bg-hover);
   color: var(--muted);
-  font-family: var(--mono);
   font-size: 9px;
-  font-weight: 400;
+  font-weight: 500;
   line-height: 1;
 }
 
 .chat-controls__permission-option-description {
   font-size: 11px;
-  line-height: 1.25;
+  line-height: 1.4;
+  text-wrap: pretty;
 }
 
-.chat-controls__permission-option--selected .chat-controls__permission-option-description {
-  color: var(--text);
+.chat-controls__permission-option--selected.chat-controls__permission-option--full {
+  background: var(--accent-subtle);
+}
+
+.chat-controls__permission-option--selected.chat-controls__permission-option--full
+  .chat-controls__permission-option-title {
+  color: var(--accent);
+}
+
+@media (max-width: 640px) {
+  .chat-controls__permission-option-title {
+    font-size: 13px;
+  }
+
+  .chat-controls__permission-option-description {
+    font-size: 12px;
+  }
 }
 
 .chat-controls__model-search-wrap {
@@ -3360,6 +3415,10 @@ html[dir="rtl"] .chat-attachment-loading > span {
     & .chat-controls__permission-trigger {
       color: var(--muted);
       padding-inline: var(--chat-mobile-row-icon-padding);
+    }
+
+    & .chat-controls__permission-trigger--full {
+      color: var(--accent);
     }
 
     & .context-ring {
