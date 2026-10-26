@@ -13,6 +13,26 @@ type SessionsYieldDetails = {
 };
 
 describe("sessions_yield tool", () => {
+  it("keeps a heartbeat in its outcome-owning turn without claiming a continuation", async () => {
+    const claimYield = vi.fn(() => true);
+    const onYield = vi.fn();
+    const tool = createSessionsYieldTool({
+      sessionId: "heartbeat-session",
+      trigger: "heartbeat",
+      claimYield,
+      onYield,
+    });
+
+    const result = await tool.execute("heartbeat-yield", { waitFor: "message" });
+
+    expect(result.details).toMatchObject({
+      status: "error",
+      error: expect.stringContaining("heartbeat"),
+    });
+    expect(claimYield).not.toHaveBeenCalled();
+    expect(onYield).not.toHaveBeenCalled();
+  });
+
   it("defers without error or yielding when earlier async results are unobserved", async () => {
     const claimYield = vi.fn(() => true);
     const onYield = vi.fn();

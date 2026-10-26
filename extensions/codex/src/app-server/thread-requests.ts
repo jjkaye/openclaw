@@ -343,6 +343,7 @@ export function isCodexNativeDelegationDisabledForRun(
 ): boolean {
   // Disabling only multi_agent still permits Codex's model-selected or explicit V2 tools.
   return (
+    params.trigger === "heartbeat" ||
     isCodexResponsesOAuthRun(params) ||
     params.delegationCapability === "report_only" ||
     params.requireWorkspaceOnly === true ||

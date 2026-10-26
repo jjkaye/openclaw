@@ -37,6 +37,7 @@ import { log } from "../embedded-agent-runner/logger.js";
 import type { EmbeddedRunAttemptParams } from "../embedded-agent-runner/run/types.js";
 import { runBestEffortCallback } from "../embedded-agent-subscribe.callback.js";
 import { createCronScheduledToolProjection } from "../exec-tool-target-pinning.js";
+import { HEARTBEAT_INLINE_ONLY_MESSAGE } from "../heartbeat-delegation-policy.js";
 import { throwAgentRunRestartAbortReason } from "../run-termination.js";
 import { resolveToolLoopDetectionConfig } from "../tool-loop-detection-config.js";
 import { isToolExecutionAllowed } from "../tool-policy-shared.js";
@@ -99,6 +100,7 @@ export function createAgentHarnessHostCapabilities(params: {
   runWithScope: <T>(run: () => Promise<T>) => Promise<T>;
 } {
   const attempt = params.attempt;
+  const heartbeatTurn = attempt.trigger === "heartbeat";
   // Capture authority by value before any plugin handoff can mutate the attempt.
   const runtimePluginToolGrant = attempt.runtimePluginToolGrant
     ? Object.freeze({
@@ -416,6 +418,7 @@ export function createAgentHarnessHostCapabilities(params: {
         ...effectiveOptions,
         // Availability belongs to this prepared host, not mutable plugin inputs.
         githubPublicationAvailable,
+        ...(heartbeatTurn ? { trigger: "heartbeat" } : {}),
         runtimePluginToolGrant,
         skillsSnapshot: options?.skillsSnapshot ?? skillsSnapshot,
         installedSkills: getInstalledSkills(
@@ -457,6 +460,12 @@ export function createAgentHarnessHostCapabilities(params: {
     version: 1 as const,
     assertActive,
     get assertNativeSubagentSpawnAllowed() {
+      if (heartbeatTurn) {
+        return () => {
+          assertActive();
+          throw new Error(HEARTBEAT_INLINE_ONLY_MESSAGE);
+        };
+      }
       return bindHarnessNativeSpawnAuthority(personalToolParticipants, assertActive);
     },
     ...(bindModelExecution ? { bindModelExecution } : {}),

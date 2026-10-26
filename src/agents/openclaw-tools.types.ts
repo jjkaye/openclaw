@@ -98,6 +98,8 @@ export type OpenClawSharedToolsOptions = {
   swarmOutputSchema?: Record<string, unknown>;
   /** If true, include the heartbeat response tool for structured heartbeat outcomes. */
   enableHeartbeatTool?: boolean;
+  /** Trusted run trigger used to restrict unsupported monitoring continuations. */
+  trigger?: string;
   /** Host-only observation after a canonical progress-card replacement commits. */
   onProgressCardPlanSaved?: (unfinished: boolean) => void;
   onYield?: SessionsYieldCallback;

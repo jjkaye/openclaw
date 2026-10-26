@@ -282,7 +282,13 @@ export function createCodexNativeHookRelay(params: {
                       try {
                         params.hostCapabilities.assertNativeSubagentSpawnAllowed?.();
                       } catch (error) {
-                        return `${toErrorObject(error, "Native spawn participant selection failed").message} Use sessions_spawn with the requester's requester_profile.id as user.`;
+                        const message = toErrorObject(
+                          error,
+                          "Native spawn participant selection failed",
+                        ).message;
+                        return params.approvalContext?.trigger === "heartbeat"
+                          ? message
+                          : `${message} Use sessions_spawn with the requester's requester_profile.id as user.`;
                       }
                     }
                     return undefined;

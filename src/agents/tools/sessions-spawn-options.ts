@@ -7,6 +7,8 @@ import type {
 import type { InProcessGatewayCaller } from "./in-process-gateway.js";
 
 export type SessionsSpawnToolOptions = {
+  /** Trusted monitoring-turn context; never sourced from spawn arguments. */
+  trigger?: string;
   callGateway?: InProcessGatewayCaller;
   registerRun?: typeof registerSubagentRun;
   countActiveRuns?: typeof countActiveRunsForSession;

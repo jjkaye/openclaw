@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import { getAgentToolExecutionContext } from "../../../packages/agent-core/src/tool-execution-context.js";
+import { HEARTBEAT_INLINE_ONLY_MESSAGE } from "../heartbeat-delegation-policy.js";
 import type { UnsettledRequesterChild } from "../subagents/registry/subagent-registry-requester-yield.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readToolStringParam } from "./common.js";
@@ -73,11 +74,13 @@ const SessionsYieldToolSchema = Type.Object({
 
 export function createSessionsYieldTool(opts?: {
   sessionId?: string;
+  trigger?: string;
   claimYield?: (
     intent?: SessionsYieldIntent,
   ) => SessionsYieldClaimResult | Promise<SessionsYieldClaimResult>;
   onYield?: SessionsYieldCallback;
 }): AnyAgentTool {
+  const heartbeatTurn = opts?.trigger === "heartbeat";
   return {
     label: "Yield",
     name: "sessions_yield",
@@ -91,6 +94,9 @@ export function createSessionsYieldTool(opts?: {
       'End this turn for pending child completion events; this is not a final-result submission. For background tools, follow their result\'s continuation instructions. Return completed work normally. An unfinished subagent waiting for an incoming continuation must set waitFor:"message". Collector runs require explicit collection instead. acknowledgment can send a waiting reply for an otherwise-silent interactive parent.',
     parameters: SessionsYieldToolSchema,
     execute: async (_toolCallId, args) => {
+      if (heartbeatTurn) {
+        return jsonResult({ status: "error", error: HEARTBEAT_INLINE_ONLY_MESSAGE });
+      }
       const params = args as Record<string, unknown>;
       const message = readToolStringParam(params, "message") || "Turn yielded.";
       const acknowledgment = readToolStringParam(params, "acknowledgment") || undefined;

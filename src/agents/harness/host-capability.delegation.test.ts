@@ -16,6 +16,7 @@ import { closeOpenClawAgentDatabases } from "../../state/openclaw-agent-db-lifec
 import type { ToolOutcomeObserver } from "../agent-tools.before-tool-call.types.js";
 import { wrapToolWithBeforeToolCallHook } from "../agent-tools.before-tool-call.wrapper.js";
 import { createCodingToolsGatewayCaller } from "../agent-tools.caller.js";
+import * as agentTools from "../agent-tools.js";
 import { resolveConversationCapabilityProfile } from "../conversation-capability-profile.js";
 import {
   clearToolSearchCatalog,
@@ -27,6 +28,32 @@ import { ToolSearchRuntime } from "../tool-search-runtime.js";
 import { jsonResult, type AnyAgentTool } from "../tools/common.js";
 import { wrapToolWithGatewayCallerIdentity } from "../tools/gateway-caller-context.js";
 import { createAdmittedHostCapabilityTestFixture } from "./host-capability.test-support.js";
+
+it("refuses native heartbeat spawn through its admitted host authority", async () => {
+  const host = await createAdmittedHostCapabilityTestFixture({
+    runId: "heartbeat-spawn",
+    trigger: "heartbeat",
+  });
+  try {
+    expect(host.hostCapabilities.assertNativeSubagentSpawnAllowed).toBeTypeOf("function");
+    expect(() => host.hostCapabilities.assertNativeSubagentSpawnAllowed?.()).toThrow("heartbeat");
+    using construct = vi
+      .spyOn(agentTools, "createOpenClawCodingToolsInternal")
+      .mockReturnValueOnce([]);
+    host.hostCapabilities.createToolSurface!({ trigger: "user" });
+    expect(construct).toHaveBeenCalledWith(
+      expect.objectContaining({ trigger: "heartbeat" }),
+      undefined,
+    );
+    host.closeHost();
+    expect(() => host.hostCapabilities.assertNativeSubagentSpawnAllowed?.()).toThrow(
+      "no longer active",
+    );
+  } finally {
+    host.closeHost();
+    host.closeAdmission();
+  }
+});
 
 async function callCatalog(
   host: Awaited<ReturnType<typeof createAdmittedHostCapabilityTestFixture>>,

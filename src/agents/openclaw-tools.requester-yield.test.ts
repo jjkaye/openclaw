@@ -116,6 +116,30 @@ function createTestOpenClawTools(
 }
 
 describe("requester yield ownership", () => {
+  it.each([false, true])(
+    "keeps heartbeat notify=%s decisions in the original turn",
+    async (notify) => {
+      const tools = createTestOpenClawTools({ trigger: "heartbeat", enableHeartbeatTool: true });
+      expect(tools.some((tool) => tool.name === "sessions_spawn")).toBe(false);
+      expect(tools.some((tool) => tool.name === "sessions_yield")).toBe(false);
+      const tool = requireTool(tools, "heartbeat_respond");
+      const result = await tool.execute("heartbeat-outcome", {
+        outcome: "no_change",
+        notify,
+        summary: "Synthetic monitor check complete",
+        ...(notify ? { notificationText: "Synthetic attention item" } : {}),
+      });
+      expect(result.details).toMatchObject({ status: "accepted", notify });
+      await expect(
+        tool.execute("heartbeat-replay", {
+          outcome: "no_change",
+          notify: false,
+          summary: "Duplicate",
+        }),
+      ).rejects.toThrow("already accepted");
+    },
+  );
+
   beforeEach(async () => {
     await resetSubagentRegistryForTests();
     resetProcessRegistryForTests();
