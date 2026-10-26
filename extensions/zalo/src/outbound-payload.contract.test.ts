@@ -6,7 +6,6 @@ import {
 import {
   createMessageReceiptFromOutboundResults,
   sendDurableMessageBatch,
-  verifyChannelMessageAdapterCapabilityProofs,
 } from "openclaw/plugin-sdk/channel-outbound";
 import { expectDefined } from "openclaw/plugin-sdk/expect-runtime";
 import {
@@ -39,12 +38,11 @@ function createZaloHarness(params: OutboundPayloadHarnessParams) {
       async (to: string, text: string, nextCtx: { mediaUrl?: string }) =>
         await sendZalo(to, text, { mediaUrl: nextCtx.mediaUrl }),
     );
-  const ctx = { ...target(), text: "", payload: params.payload };
   const sendPayload = required(zaloPlugin.outbound?.sendPayload);
   return {
-    run: async () => await sendPayload(ctx),
+    run: () => sendPayload({ ...target(), text: "", payload: params.payload }),
     sendMock: sendZalo,
-    to: ctx.to,
+    to: target().to,
   };
 }
 
@@ -62,10 +60,7 @@ describe("Zalo outbound payload contract", () => {
 
   it.each([
     { kind: "text", payload: { text: "hello" } },
-    {
-      kind: "media",
-      payload: { text: "image", mediaUrl: "https://example.com/image.png" },
-    },
+    { kind: "media", payload: { text: "image", mediaUrl: "https://example.com/image.png" } },
   ] as const)(
     "reports $kind message-adapter failures to durable delivery",
     async ({ kind, payload }) => {
@@ -81,66 +76,37 @@ describe("Zalo outbound payload contract", () => {
         skipQueue: true,
       });
 
-      expect(result.status).toBe("failed");
-      if (result.status !== "failed") {
-        throw new Error(`Expected failed Zalo ${kind} delivery`);
-      }
-      expect(result.error).toMatchObject({ message: `Zalo rejected the ${kind}` });
+      expect(result).toMatchObject({
+        status: "failed",
+        error: { message: `Zalo rejected the ${kind}` },
+      });
     },
   );
 
-  it("declares message adapter durable text and media with receipt proofs", async () => {
+  it.each(["text", "media"] as const)("delivers declared durable %s receipts", async (kind) => {
+    expect(zaloMessageAdapter.durableFinal?.capabilities).toEqual({
+      text: true,
+      media: true,
+      messageSendingHooks: true,
+    });
     sendZaloTextMock
       .mockReset()
       .mockImplementation(async (_to: string, _text: string, ctx: { mediaUrl?: string }) => {
-        const kind = ctx.mediaUrl ? "media" : "text";
-        const messageId = `zl-${kind}-1`;
+        const deliveredKind = ctx.mediaUrl ? "media" : "text";
+        const messageId = `zl-${deliveredKind}-1`;
         return {
           messageId,
           receipt: createMessageReceiptFromOutboundResults({
             results: [{ channel: "zalo", messageId }],
-            kind,
+            kind: deliveredKind,
           }),
         };
       });
-    const sendText = required(zaloMessageAdapter.send?.text);
-    const sendMedia = required(zaloMessageAdapter.send?.media);
-
-    const proofs = await verifyChannelMessageAdapterCapabilityProofs({
-      adapterName: "zalo",
-      adapter: zaloMessageAdapter,
-      proofs: {
-        text: async () => {
-          const result = await sendText({ ...target(), text: "hello" });
-          expect(result.receipt.platformMessageIds).toEqual(["zl-text-1"]);
-        },
-        media: async () => {
-          const result = await sendMedia({
-            ...target(),
-            text: "image",
-            mediaUrl: "https://example.com/image.png",
-          });
-          expect(result.receipt.platformMessageIds).toEqual(["zl-media-1"]);
-        },
-        messageSendingHooks: () => {
-          expect(sendText).toBeTypeOf("function");
-        },
-      },
+    const result = await required(zaloMessageAdapter.send?.[kind])({
+      ...target(),
+      text: "hello",
+      ...(kind === "media" ? { mediaUrl: "https://example.com/image.png" } : {}),
     });
-    expect(proofs).toStrictEqual([
-      { capability: "text", status: "verified" },
-      { capability: "media", status: "verified" },
-      { capability: "poll", status: "not_declared" },
-      { capability: "payload", status: "not_declared" },
-      { capability: "silent", status: "not_declared" },
-      { capability: "replyTo", status: "not_declared" },
-      { capability: "thread", status: "not_declared" },
-      { capability: "nativeQuote", status: "not_declared" },
-      { capability: "messageSendingHooks", status: "verified" },
-      { capability: "batch", status: "not_declared" },
-      { capability: "reconcileUnknownSend", status: "not_declared" },
-      { capability: "afterSendSuccess", status: "not_declared" },
-      { capability: "afterCommit", status: "not_declared" },
-    ]);
+    expect(result.receipt.platformMessageIds).toEqual([`zl-${kind}-1`]);
   });
 });

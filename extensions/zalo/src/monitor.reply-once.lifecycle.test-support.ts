@@ -93,13 +93,11 @@ describe("Zalo reply-once lifecycle", () => {
             To: "zalo:dm-chat-1",
           },
         });
-        expect(sendMessageMock.mock.calls).toEqual([
-          [
-            "zalo-token",
-            expect.objectContaining({ chat_id: "dm-chat-1", text: "zalo reply once" }),
-            undefined,
-          ],
-        ]);
+        expect(sendMessageMock).toHaveBeenCalledExactlyOnceWith(
+          "zalo-token",
+          expect.objectContaining({ chat_id: "dm-chat-1", text: "zalo reply once" }),
+          undefined,
+        );
       });
     },
   );

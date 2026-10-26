@@ -15,10 +15,7 @@ import type { ZaloConfig } from "./types.js";
 
 const config = (zalo: ZaloConfig): OpenClawConfig => ({ channels: { zalo } });
 const zaloConfigure = createPluginSetupWizardConfigure({
-  id: zaloPlugin.id,
-  meta: zaloPlugin.meta,
-  capabilities: zaloPlugin.capabilities,
-  config: zaloPlugin.config,
+  ...zaloPlugin,
   setup: zaloSetupAdapter,
   setupWizard: zaloSetupWizard,
 });

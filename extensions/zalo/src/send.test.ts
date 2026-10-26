@@ -1,4 +1,3 @@
-// Zalo tests cover send plugin behavior.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ZaloFetch } from "./api.js";
 
@@ -17,7 +16,11 @@ vi.mock("./proxy.js", () => ({
 
 import { sendMessageZalo } from "./send.js";
 
-const cfg = { channels: { zalo: { botToken: "zalo-token" } } };
+const cfg = {
+  channels: { zalo: { botToken: "zalo-token", webhookUrl: "https://gateway.example.com/zalo" } },
+};
+const sent = (message_id: string) => ({ ok: true, result: { message_id } });
+const mediaUrl = "https://example.com/photo.jpg";
 
 describe("zalo send", () => {
   beforeEach(() => {
@@ -41,10 +44,7 @@ describe("zalo send", () => {
   });
 
   it("keeps outbound text and photo captions UTF-16 safe at the 2000-char limit", async () => {
-    sendMessageMock.mockResolvedValueOnce({
-      ok: true,
-      result: { message_id: "z-msg-surrogate" },
-    });
+    sendMessageMock.mockResolvedValueOnce(sent("z-msg-surrogate"));
     const api = await vi.importActual<typeof import("./api.js")>("./api.js");
     const ssrf = await import("openclaw/plugin-sdk/ssrf-runtime");
     const pinnedHost = await ssrf.resolvePinnedHostnameWithPolicy("example.com", {
@@ -53,20 +53,16 @@ describe("zalo send", () => {
     const resolvePhotoHost = vi
       .spyOn(ssrf, "resolvePinnedHostnameWithPolicy")
       .mockResolvedValue(pinnedHost);
-    const fetcher = vi.fn<ZaloFetch>(async () =>
-      Response.json({ ok: true, result: { message_id: "z-photo-surrogate" } }),
-    );
+    const fetcher = vi.fn<ZaloFetch>(async () => Response.json(sent("z-photo-surrogate")));
     sendPhotoMock.mockImplementationOnce(api.sendPhoto);
     resolveZaloProxyFetchMock.mockReturnValue(fetcher);
     const boundaryText = `${"a".repeat(1999)}🐱`;
 
     try {
-      await sendMessageZalo("dm-chat-surrogate-text", boundaryText, {
-        cfg,
-      });
+      await sendMessageZalo("dm-chat-surrogate-text", boundaryText, { cfg });
       const result = await sendMessageZalo("dm-chat-surrogate-caption", boundaryText, {
         cfg,
-        mediaUrl: "https://example.com/photo.jpg",
+        mediaUrl,
       });
 
       expect(sendMessageMock.mock.calls[0]?.[1]?.text).toBe("a".repeat(1999));
@@ -74,7 +70,7 @@ describe("zalo send", () => {
       expect(fetcher.mock.calls[0]?.[1]?.body).toBe(
         JSON.stringify({
           chat_id: "dm-chat-surrogate-caption",
-          photo: "https://example.com/photo.jpg",
+          photo: mediaUrl,
           caption: "a".repeat(1999),
         }),
       );
@@ -86,30 +82,12 @@ describe("zalo send", () => {
   });
 
   it("sends cfg-backed media directly without hosted-media rewrites", async () => {
-    sendPhotoMock.mockResolvedValueOnce({
-      ok: true,
-      result: { message_id: "z-photo-2" },
-    });
-
-    const result = await sendMessageZalo("dm-chat-5", "", {
-      cfg: {
-        channels: {
-          zalo: {
-            botToken: "zalo-token",
-            webhookUrl: "https://gateway.example.com/zalo-webhook",
-          },
-        },
-      } as never,
-      mediaUrl: "https://example.com/photo.jpg",
-    });
+    sendPhotoMock.mockResolvedValueOnce(sent("z-photo-2"));
+    const result = await sendMessageZalo("dm-chat-5", "", { cfg, mediaUrl });
 
     expect(sendPhotoMock).toHaveBeenCalledWith(
       "zalo-token",
-      {
-        chat_id: "dm-chat-5",
-        photo: "https://example.com/photo.jpg",
-        caption: undefined,
-      },
+      { chat_id: "dm-chat-5", photo: mediaUrl, caption: undefined },
       undefined,
       undefined,
     );
@@ -133,7 +111,7 @@ describe("zalo send", () => {
     sendMessageMock.mockImplementationOnce(
       async (_token, _params, _fetcher, assertCurrent: (() => void) | undefined) => {
         assertCurrent?.();
-        return { ok: true, result: { message_id: "unexpected" } };
+        return sent("unexpected");
       },
     );
 
