@@ -87,6 +87,11 @@ mailbox reservations after its settlement commits. Already delivered waves must
 not hold later yielded cohorts behind an unprepared input. Claimed turns keep
 their existing execution owner.
 
+For retired cancellation records, recovery reconciles a late kill marker against
+the terminal run's current generation before resuming its pending completion.
+A kill request recorded after execution ended does not reopen execution or prevent
+completion from settling. A newer child run keeps its own completion ownership.
+
 Restored delivery preparation uses the bounded background budget only until the
 Gateway accepts the input. Waiting for mailbox dispatch or requester completion
 does not hold a preparation slot: earlier FIFO inputs may need that same budget
@@ -272,6 +277,8 @@ owner, so callbacks from the closed Gateway cannot settle the recovered wake.
   their captured successful result settles the original input, including a
   silent result, without starting another requester turn. Failed or missing
   recovery evidence does not establish successful consumption.
+  Before that result exists, the original private completion owner resumes its
+  interrupted input; its own pending recovery claim does not block the replay.
   The outbound durable delivery queue keeps its own transport retry policy.
   Delivery bookkeeping for executions that ended before the current batch's
   earliest child was created cannot block its continuation.
