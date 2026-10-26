@@ -2,9 +2,8 @@ import type { SessionsStorageStatusResult } from "@openclaw/gateway-protocol";
 import { createRouter, definePage, type Router } from "@openclaw/uirouter";
 import type { JSX } from "@solidjs/web";
 import { expect, it, vi } from "vitest";
-import { createDeferred } from "../../../../test/helpers/promise.js";
-import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { ApplicationContext } from "../../app/context.ts";
+import { client } from "../../app/overlays-access.test-support.ts";
 import { mountRouterOutlet } from "../../app/router-outlet.test-support.tsx";
 import { createGatewayHarness } from "../../lib/config/config-test-harness.ts";
 import { createRuntimeConfigCapability } from "../../lib/config/runtime-config-capability.ts";
@@ -14,7 +13,7 @@ import { sessionStorageStatus as inventory } from "./session-storage.test-suppor
 import { SessionStorageSettings } from "./session-storage.tsx";
 
 it("leaves Storage while a submitted run is held and ignores its late completion", async () => {
-  const heldRun = createDeferred<SessionsStorageStatusResult>();
+  const heldRun = Promise.withResolvers<SessionsStorageStatusResult>();
   let runSignal: AbortSignal | undefined;
   const config = { session: { maintenance: { coldStorage: { enabled: true, afterDays: 30 } } } };
   const request = vi.fn(
@@ -39,9 +38,7 @@ it("leaves Storage while a submitted run is held and ignores its late completion
       );
     },
   );
-  // SAFETY: This fixture implements the only client operation used by Storage.
-  const client = { request } as unknown as GatewayBrowserClient;
-  const { gateway } = createGatewayHarness(client);
+  const { gateway } = createGatewayHarness(client(request));
   const runtimeConfig = createRuntimeConfigCapability(gateway);
   await runtimeConfig.ensureLoaded();
   type RouteModule = { renderSolid: () => JSX.Element };
@@ -64,13 +61,11 @@ it("leaves Storage while a submitted run is held and ignores its late completion
   // SAFETY: Storage reads only these owners; the provider supplies shared fixture defaults.
   const context = { gateway, runtimeConfig, router } as unknown as ApplicationContext;
   const Provider = createSolidApplicationContextProvider(context).wrapper;
-  function StoragePage() {
-    return (
-      <Provider>
-        <SessionStorageSettings />
-      </Provider>
-    );
-  }
+  const StoragePage = () => (
+    <Provider>
+      <SessionStorageSettings />
+    </Provider>
+  );
   const outlet = mountRouterOutlet({ router, retryContext: context });
   try {
     await router.navigate("storage", context);
