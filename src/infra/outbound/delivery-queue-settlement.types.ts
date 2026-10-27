@@ -3,8 +3,6 @@ export type AckDeliveryOptions = {
   retainSpoolArtifacts?: boolean;
   /** An intentionally suppressed pre-send batch must not become a success receipt. */
   suppressCompletionReceipt?: boolean;
-  /** A proven policy omission retains no provider acknowledgement or reminder count. */
-  notificationSuppressed?: true;
   /** Prevent an older provider attempt from settling a replacement owner. */
   expectedPlatformSendAttemptId?: string | null;
 };

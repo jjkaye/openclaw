@@ -54,7 +54,6 @@ export async function ackDelivery(
     ? {
         retainSpoolArtifacts: options.retainSpoolArtifacts,
         suppressCompletionReceipt: options.suppressCompletionReceipt,
-        notificationSuppressed: options.notificationSuppressed,
         ...("expectedPlatformSendAttemptId" in options
           ? { expectedPlatformSendAttemptId: options.expectedPlatformSendAttemptId }
           : {}),

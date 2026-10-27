@@ -851,7 +851,7 @@ async function drainQueuedEntry(
               results.length === 0 &&
                 entry.notificationReceipts &&
                 areOutboundPayloadsIntentionallySuppressed(payloadOutcomes)
-                ? { notificationSuppressed: true }
+                ? { suppressCompletionReceipt: true }
                 : undefined,
             ));
         postSendState = "acked";

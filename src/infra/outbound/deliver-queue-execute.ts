@@ -478,7 +478,7 @@ export async function deliverOutboundPayloadsWithQueueCleanup(
             (await queueOwner
               .ack(
                 results.length === 0 && allPayloadsSuppressed && params.notificationReceipts?.length
-                  ? { notificationSuppressed: true }
+                  ? { suppressCompletionReceipt: true }
                   : results.length === 0 && typeof params.completionRetention === "object"
                     ? { suppressCompletionReceipt: true }
                     : undefined,

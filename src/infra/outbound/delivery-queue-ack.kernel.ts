@@ -124,7 +124,16 @@ export function ackDeliveryInDatabase(
         preparedOutboundPayloads(current.preparedBatch),
         stateDir,
       );
-      if (current.completionRetention && options?.suppressCompletionReceipt !== true) {
+      // Intentional omission still fences this source revision; ordinary callers
+      // keep the existing behavior of deleting their suppressed completion.
+      const notificationSuppressed: true | undefined =
+        current.notificationReceipts?.length && options?.suppressCompletionReceipt === true
+          ? true
+          : undefined;
+      if (
+        current.completionRetention &&
+        (notificationSuppressed || options?.suppressCompletionReceipt !== true)
+      ) {
         if (hasExpectedClaim) {
           completeLoadedDeliveryQueueEntryInDatabase(
             database,
@@ -132,15 +141,10 @@ export function ackDeliveryInDatabase(
             id,
             current,
             Date.now(),
-            options?.notificationSuppressed,
+            notificationSuppressed,
           );
         } else {
-          completeDeliveryQueueEntryInDatabase(
-            database,
-            queueName,
-            id,
-            options?.notificationSuppressed,
-          );
+          completeDeliveryQueueEntryInDatabase(database, queueName, id, notificationSuppressed);
         }
       } else {
         deleteDeliveryQueueEntryInDatabase(database, queueName, id);
