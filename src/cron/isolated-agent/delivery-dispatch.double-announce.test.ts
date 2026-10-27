@@ -5,6 +5,7 @@ import type { SubagentRunRecord } from "../../agents/subagents/registry/subagent
 import { SILENT_REPLY_TOKEN } from "../../auto-reply/tokens.js";
 import type { ChannelMessagingAdapter } from "../../channels/plugins/types.public.js";
 import * as deliveryQueueSqlite from "../../infra/delivery-queue-sqlite.js";
+import { resolveAdmittedCronCompletionStatus } from "../completion-status.js";
 
 const directCronCompletionRetention = {
   idPrefix: "cron-direct-delivery:v1:",
@@ -397,28 +398,62 @@ describe("dispatchCronDelivery", () => {
     expect(enqueueSystemEvent).not.toHaveBeenCalled();
   });
 
-  it("records identityless transport after an earlier suppression as unknown", async () => {
-    vi.mocked(deliverOutboundPayloads).mockImplementationOnce(async (params) => {
-      params.onPayloadDeliveryOutcome?.({
+  it("completes an intentionally suppressed notification without claiming delivery or requesting repair", async () => {
+    vi.mocked(deliverOutboundPayloads).mockImplementationOnce(async (delivery) => {
+      delivery.onPayloadDeliveryOutcome?.({
         index: 0,
         status: "suppressed",
-        reason: "cancelled_by_message_sending_hook",
-      });
-      params.onPayloadDeliveryOutcome?.({
-        index: 1,
-        status: "suppressed",
-        reason: "adapter_returned_no_identity",
+        reason: "notification_policy",
       });
       return [];
     });
-    const state = await dispatchCronDelivery(makeBaseParams({ synthesizedText: "Report ready" }));
+    const params = makeBaseParams({ synthesizedText: "An unchanged task decision." });
+    const state = await dispatchCronDelivery(params);
     expect(state.deliveryState).toMatchObject({
-      status: "unknown",
-      error: "cron delivery outcome is unknown: adapter_returned_no_identity",
+      status: "not-delivered",
+      delivered: false,
+      deliverySuppressionReason: "notification_policy",
     });
-    expect(state.delivered).not.toBe(true);
-    expect(deliverOutboundPayloads).toHaveBeenCalledTimes(1);
+    expect(state.deliveryError).toBeUndefined();
+    expect(
+      resolveAdmittedCronCompletionStatus(
+        params.job,
+        "ok",
+        state.deliveryState.status,
+        state.deliverySuppressionReason,
+      ),
+    ).toBe("succeeded");
+    expect(appendAssistantMessageToSessionTranscript).not.toHaveBeenCalled();
+    expect(enqueueSystemEvent).not.toHaveBeenCalled();
+    expect(deliverOutboundPayloads).toHaveBeenCalledOnce();
   });
+
+  it.each(["cancelled_by_message_sending_hook", "notification_policy"] as const)(
+    "records identityless transport after earlier %s suppression as unknown",
+    async (reason) => {
+      vi.mocked(deliverOutboundPayloads).mockImplementationOnce(async (params) => {
+        params.onPayloadDeliveryOutcome?.({
+          index: 0,
+          status: "suppressed",
+          reason,
+        });
+        params.onPayloadDeliveryOutcome?.({
+          index: 1,
+          status: "suppressed",
+          reason: "adapter_returned_no_identity",
+        });
+        return [];
+      });
+      const state = await dispatchCronDelivery(makeBaseParams({ synthesizedText: "Report ready" }));
+      expect(state.deliveryState).toMatchObject({
+        status: "unknown",
+        error: "cron delivery outcome is unknown: adapter_returned_no_identity",
+      });
+      expect(state.delivered).not.toBe(true);
+      expect(state.deliverySuppressionReason).toBeUndefined();
+      expect(deliverOutboundPayloads).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("records text emptied by TTS as a delivery failure", async () => {
     const params = makeBaseParams({ synthesizedText: "Report ready" });

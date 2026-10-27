@@ -174,6 +174,7 @@ function createCronPromptExecutor(
       resolvedDelivery: params.resolvedDelivery,
       sourceDelivery,
       messageToolFormatPrompt: params.messageToolFormatPrompt,
+      requireNotificationReference: params.job.delivery?.requireNotificationReference,
     });
   let pendingUserTurn:
     | {
@@ -431,6 +432,7 @@ function createCronPromptExecutor(
             agentAccountId: params.resolvedDelivery.accountId,
             extraSystemPrompt: params.deliverySystemPrompt,
             sourceReplyDeliveryMode,
+            disableMessageTool: !sourceDelivery.messageTool.enabled,
             requireExplicitMessageTarget: sourceDelivery.messageTool.requireExplicitTarget,
             scheduledToolPolicy,
             onExecutionStarted: notifyExecutionStarted,
@@ -622,7 +624,6 @@ function createCronPromptExecutor(
             : undefined,
           deferTerminalLifecycle: true,
           onAgentEvent: params.lifecycle.note,
-          disableMessageTool: !sourceDelivery.messageTool.enabled,
           forceMessageTool: sourceDelivery.messageTool.force,
           allowTransientCooldownProbe: runOptions.allowTransientCooldownProbe,
           assistantErrorTranscript: runOptions.assistantErrorTranscript,

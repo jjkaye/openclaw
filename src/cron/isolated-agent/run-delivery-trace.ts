@@ -274,7 +274,11 @@ export async function resolveCronDeliveryContext(params: {
           sessionKey: resolveCronDeliverySessionKey(params.job),
         });
   const deliveryRequested = deliveryPlan.mode !== "none" && deliveryPlan.requested;
-  const sourceDelivery = resolveCronSourceDeliveryPlan({ deliveryPlan, resolvedDelivery });
+  const sourceDelivery = resolveCronSourceDeliveryPlan({
+    deliveryPlan,
+    resolvedDelivery,
+    requireNotificationReference: params.job.delivery?.requireNotificationReference,
+  });
   const replyRouted = deliveryRequested && resolvedDelivery.ok;
   const payload = params.job.payload.kind === "agentTurn" ? params.job.payload : undefined;
   // Account-scoped scheduled sends go through the owner's account, as the message tool does.
@@ -321,6 +325,7 @@ export function finalizeCronPromptForResolvedTools(params: {
   resolvedDelivery: SourceDeliveryPlan["target"] & { ok: boolean };
   sourceDelivery: SourceDeliveryPlan;
   messageToolFormatPrompt?: string;
+  requireNotificationReference?: boolean;
 }): string {
   const { sourceDelivery, resolvedDelivery } = params;
   const messageToolAvailable = sourceDelivery.messageTool.enabled && params.messageToolAvailable;
@@ -330,7 +335,10 @@ export function finalizeCronPromptForResolvedTools(params: {
     );
   }
   let promptWithDeliveryGuidance = params.prompt;
-  if (params.deliveryRequested) {
+  if (params.deliveryRequested && params.requireNotificationReference) {
+    promptWithDeliveryGuidance =
+      `${params.prompt}\n\nThe host delivers source-backed notifications after checking current task state. Obtain the current authorized source reference and return only JSON with $schema "openclaw.notification.v1", notification {sourceId, ownerId, topicId, purpose, expectedRevision}, and text containing the exact user-facing message. Use notifications:[{notification,text},...] for independently timely topics (maximum 16). Do not invent source identities or revisions. If no eligible notification is ready, return NO_REPLY. The message tool is unavailable for this run.`.trim();
+  } else if (params.deliveryRequested) {
     if (messageToolAvailable) {
       const targetHint =
         sourceDelivery.messageTool.requireExplicitTarget || !resolvedDelivery.ok

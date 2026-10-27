@@ -48,6 +48,7 @@ import {
   normalizeSilentReplyText,
   resolveDescendantSubagentFollowup,
   resolveDirectCronDeliveryGeneration,
+  resolveDirectCronSuppression,
   resolveStaleCronDeliveryError,
   retryTransientDirectCronDelivery,
   waitForCompletedDirectCronDelivery,
@@ -245,7 +246,6 @@ export async function dispatchCronDelivery(
       deliveryAttempted = true;
       return null;
     }
-    const identity = resolveAgentOutboundIdentity(params.cfgWithAgentDefaults, params.agentId);
     try {
       if (params.isAborted()) {
         return { kind: "error", error: params.abortReason() };
@@ -355,8 +355,9 @@ export async function dispatchCronDelivery(
             accountId: delivery.accountId,
             threadId: delivery.threadId,
             payloads: linkedPayloadsForDelivery,
+            requireNotificationReference: params.job.delivery?.requireNotificationReference,
             session: deliverySession,
-            identity,
+            identity: resolveAgentOutboundIdentity(params.cfgWithAgentDefaults, params.agentId),
             bestEffort: params.deliveryBestEffort,
             durability: params.deliveryBestEffort ? "best_effort" : "required",
             deliveryIntentId: deliveryIdempotencyKey,
@@ -402,13 +403,8 @@ export async function dispatchCronDelivery(
           deliveryState.error ??= formatErrorMessage(send.error);
         }
         if (send.status === "suppressed") {
-          // The first suppressed payload can precede an identityless platform send.
           const uncertain = durableMessageBatchMayHaveReachedRecipient(send);
-          const reason = uncertain ? "adapter_returned_no_identity" : send.reason;
-          recordDelivery(
-            uncertain ? "unknown" : "not-delivered",
-            `cron delivery ${uncertain ? "outcome is unknown" : "was suppressed"}: ${reason}`,
-          );
+          recordDelivery(...resolveDirectCronSuppression(send.reason, uncertain));
         }
         return send.status === "sent" || send.status === "partial_failed" ? send.results : [];
       };

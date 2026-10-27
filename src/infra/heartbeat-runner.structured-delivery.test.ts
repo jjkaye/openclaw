@@ -18,6 +18,7 @@ import {
 } from "../plugins/hook-runner-global.js";
 import { addTestHook } from "../plugins/hooks.test-helpers.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
+import { createPluginRecord } from "../plugins/status.test-fixtures.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { closeOpenClawAgentDatabasesAsync } from "../state/openclaw-agent-db.js";
 import { createOutboundTestPlugin, createTestRegistry } from "../test-utils/channel-plugins.js";
@@ -101,6 +102,82 @@ describe("runHeartbeatOnce structured heartbeat delivery", () => {
     resetHeartbeatEventsForTest();
     resetSystemEventsForTest();
   });
+
+  it(
+    "preserves source admission across identical text and reports intentional topic suppression",
+    heartbeatCase(async ({ seed, replySpy, sendTelegram, run }) => {
+      const registry = createTestRegistry([
+        { pluginId: "telegram", plugin: heartbeatRunnerTelegramPlugin, source: "test" },
+      ]);
+      registry.plugins.push(createPluginRecord({ id: "task-source" }));
+      registry.notificationSources.push({
+        pluginId: "task-source",
+        source: "test",
+        provider: {
+          contractVersion: 1,
+          id: "fixture-tasks",
+          resolve: (reference) => ({
+            topicId: reference.topicId,
+            revision: "material-1",
+            status: "open",
+            timeZone: "UTC",
+          }),
+        },
+      });
+      setActivePluginRegistry(registry);
+      const text = "Your decision is ready.";
+      await seed({ lastHeartbeatText: text, lastHeartbeatSentAt: 0 });
+      const response = (ownerId: string) =>
+        createHeartbeatToolResponsePayload({
+          outcome: "needs_attention",
+          notify: true,
+          summary: text,
+          notification: {
+            sourceId: "fixture-tasks",
+            ownerId,
+            topicId: "next-action",
+            purpose: "decision",
+            expectedRevision: "material-1",
+          },
+        });
+      replySpy.mockResolvedValue(response("task-1"));
+      await run();
+      expect(sendTelegram).toHaveBeenCalledOnce();
+      await run();
+      expect(sendTelegram).toHaveBeenCalledOnce();
+      expect(getLastHeartbeatEvent()).toMatchObject({
+        status: "skipped",
+        reason: "notification_policy",
+      });
+      replySpy.mockResolvedValue(response("task-2"));
+      await run();
+      expect(sendTelegram).toHaveBeenCalledTimes(2);
+      expect(getLastHeartbeatEvent()?.status).toBe("sent");
+    }),
+  );
+
+  it(
+    "requires source metadata for configured monitoring and removes direct messaging from the turn",
+    heartbeatCase(async ({ cfg, seed, replySpy, sendTelegram, run }) => {
+      cfg.agents!.defaults!.heartbeat!.requireNotificationReference = true;
+      await seed();
+      replySpy.mockResolvedValue(
+        createHeartbeatToolResponsePayload({
+          outcome: "done",
+          notify: true,
+          summary: "An unreferenced proactive result.",
+        }),
+      );
+      await run();
+      expect(replySpy.mock.calls[0]?.[1]).toMatchObject({
+        disableMessageTool: true,
+        enableHeartbeatTool: true,
+      });
+      expect(sendTelegram).not.toHaveBeenCalled();
+      expect(getLastHeartbeatEvent()).toMatchObject({ status: "failed" });
+      expect(getLastHeartbeatEvent()?.reason).toContain("requires a current source reference");
+    }),
+  );
 
   it.each([false, true])("awaits outcome persistence failures (notify=%s)", async (notify) =>
     heartbeatCase(async ({ cfg, storePath, seed, replySpy, sendTelegram, run }) => {

@@ -12,10 +12,12 @@ import type { ReplyToMode } from "../../config/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { MessagePresentation, ReplyPayloadDeliveryPin } from "../../interactive/payload.js";
 import type { OutboundMediaAccess } from "../../media/load-options.js";
+import type { NotificationProposal } from "../../notifications/proposal.js";
 import type {
   DeliveryQueueCompletionRetention,
   DeliveryQueueStateContext,
 } from "../delivery-queue-sqlite.js";
+import type { DeliveryQueueNotificationReceipt } from "../delivery-queue-sqlite.types.js";
 import type { QueuedDeliveryOwner } from "./deliver-queue-state.js";
 import type {
   OutboundDeliveryQueuePolicy,
@@ -185,6 +187,12 @@ export type ChannelHandlerParams = OutboundChannelContext & {
 
 export type DeliverOutboundPayloadsCoreParams = OutboundChannelContext & {
   payloads: ReplyPayload[];
+  /** Current-source reference retained only while delivery is pending. */
+  notification?: NotificationProposal;
+  /** Opaque policy custody retained after terminal payload projection. */
+  notificationReceipt?: DeliveryQueueNotificationReceipt;
+  /** Selected proactive producers fail closed when the source reference is absent. */
+  requireNotificationReference?: boolean;
   /** Admitted run correlation copied into the prepared durable batch. */
   runId?: string;
   /** @internal Exact admitted execution provenance copied into durable custody. */

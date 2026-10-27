@@ -32,6 +32,7 @@ import { patchSessionEntryCore } from "../config/sessions/session-accessor.js";
 import { mergeSessionEntry } from "../config/sessions/types.js";
 import { writeCronJobScratch } from "../cron/scratch-store.js";
 import { resolveCronJobsStorePathFromConfig } from "../cron/store.js";
+import { NOTIFICATION_CHANNEL_DATA_KEY } from "../notifications/proposal.js";
 import {
   isDeliveryRecoveryOwnedRetry,
   resolveDeliveryNotSentRetryability,
@@ -428,6 +429,8 @@ async function prepareHeartbeatDispatchReply(
     const previousAt = stateEntry?.lastHeartbeatSentAt;
     if (
       !prepared.internalProjection &&
+      !response?.notification &&
+      !outcome.replyPayload?.channelData?.[NOTIFICATION_CHANNEL_DATA_KEY] &&
       !prepared.hasExecCompletion &&
       !outcome.mediaUrls.length &&
       !outcome.hasStructuredReplyContent &&
@@ -497,6 +500,9 @@ async function prepareHeartbeatDispatchReply(
       : text;
   const payload = copyReplyPayloadMetadata(selected ?? {}, {
     ...outcome.replyPayload,
+    ...(response?.notification
+      ? { channelData: { [NOTIFICATION_CHANNEL_DATA_KEY]: response.notification } }
+      : {}),
     text: deliveryText || undefined,
     ...(!failed ? { mediaUrls: outcome.mediaUrls } : {}),
   });
@@ -506,7 +512,8 @@ async function prepareHeartbeatDispatchReply(
     }),
     settle: async (result) => {
       const sent = result === "delivered";
-      if (!sent) {
+      const topicSuppressed = policy.deliveryReason === "notification_policy";
+      if (!sent && !topicSuppressed) {
         await unconfirmed(policy.deliveryError ?? policy.deliveryReason ?? result);
       }
       if (sent && !failed && deliveryText.trim()) {
@@ -542,7 +549,7 @@ async function prepareHeartbeatDispatchReply(
               hasMedia: outcome.mediaUrls.length > 0,
               ...(normalized.silent === true ? { silent: true } : {}),
             },
-        sent && !failed,
+        (sent || topicSuppressed) && !failed,
       );
       if (!failed && policy.retryUnqueuedDelivery) {
         policy.result = deliveryRetry();
@@ -617,6 +624,10 @@ export async function deliverHeartbeatDispatch(
       accountId: delivery.accountId,
       threadId: delivery.threadId,
       payloads: [payload],
+      requireNotificationReference:
+        policy.wake.heartbeat?.requireNotificationReference === true &&
+        !policy.prepared.hasRelayableExecCompletion &&
+        policy.projectTarget !== false,
       session: buildOutboundSessionContext({
         cfg,
         agentId,
@@ -643,6 +654,8 @@ export async function deliverHeartbeatDispatch(
         policy.execDeliveryOutcome = "delivered";
       } else if (send.status === "suppressed" && send.reason === "adapter_returned_no_identity") {
         policy.execDeliveryOutcome = "unknown-after-send";
+      } else if (send.status === "suppressed" && send.reason === "notification_policy") {
+        policy.execDeliveryOutcome = "rejected";
       }
     }
     if (send.status === "suppressed") {

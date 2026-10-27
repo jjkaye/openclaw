@@ -239,6 +239,21 @@ describe("agent defaults schema", () => {
     ).toBe(45);
   });
 
+  it("accepts opt-in source-backed notification policy on defaults and agent entries", () => {
+    expect(
+      AgentDefaultsSchema.parse({ heartbeat: { requireNotificationReference: true } })?.heartbeat
+        ?.requireNotificationReference,
+    ).toBe(true);
+    expect(
+      AgentEntrySchema.parse({ id: "ops", heartbeat: { requireNotificationReference: false } })
+        .heartbeat?.requireNotificationReference,
+    ).toBe(false);
+    expect(
+      AgentDefaultsSchema.safeParse({ heartbeat: { requireNotificationReference: "true" } })
+        .success,
+    ).toBe(false);
+  });
+
   it("rejects invalid heartbeat activeHours without an explicit cadence", () => {
     expectSchemaFailurePath(
       AgentDefaultsSchema.safeParse({

@@ -22,12 +22,14 @@ import {
   countFailedDeliveryQueueEntriesInDatabase,
   countPendingDeliveryQueueEntriesInDatabase,
   inspectDeliveryQueueReceiptInDatabase,
+  listNotificationDeliveryReceiptsInDatabase,
   deleteDeliveryQueueEntryInDatabase,
   pruneExpiredDeliveryQueueTombstonesInDatabase,
   prepareDeliveryQueueTerminalEntry,
   reserveDeliveryQueueEntryAttemptInDatabase,
   terminalizePendingDeliveryQueueEntryInDatabase,
   updateDeliveryQueueEntryInDatabase,
+  updateNotificationDeliveryReceiptResolutionInDatabase,
   upsertDeliveryQueueEntryInDatabase,
 } from "./delivery-queue-sqlite.kernel.js";
 import {
@@ -462,6 +464,13 @@ export const deliveryQueueOperations = {
   ) => executePendingDeliveryFailure(input, { database: open(), ...stateOptions() }),
   "deliveryQueue.findIntentOwners": readOperation(findDeliveryIntentOwnersInDatabase),
   "deliveryQueue.inspectReceipt": readOperation(inspectDeliveryQueueReceiptInDatabase),
+  "deliveryQueue.listNotificationReceipts": readOperation(
+    listNotificationDeliveryReceiptsInDatabase,
+  ),
+  "deliveryQueue.resolveNotificationReceipts": writeOperation(
+    "deliveryQueue.resolveNotificationReceipts",
+    updateNotificationDeliveryReceiptResolutionInDatabase,
+  ),
   "deliveryQueue.countFailed": (_input: undefined, { open }) =>
     countFailedDeliveryQueueEntriesInDatabase(open()),
   "deliveryQueue.countPending": (input: { queueNames: string[] }, { open }) =>

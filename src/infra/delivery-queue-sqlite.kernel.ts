@@ -7,6 +7,7 @@ import {
   deliveryQueueEntriesQuery,
   inflateDeliveryQueueRows,
   loadDeliveryQueueEntryInDatabase,
+  pruneNotificationDeliveryReceipts,
   pruneDeliveryQueueTombstoneAges,
   pruneDeliveryQueueTombstones,
   terminalizeBoundDeliveryQueueEntry,
@@ -19,9 +20,14 @@ import {
   hasLiveDeliveryQueueClaim,
   inferDeliveryQueueFailureRetention,
   parseDeliveryQueueCompletionRetention,
+  parseDeliveryQueueNotificationReceipt,
   projectDeliveryQueueTerminalEntry,
   resolveDeliveryQueueAttemptCount,
   type DeliveryQueueEntryState,
+  type DeliveryQueueNotificationReceipt,
+  type DeliveryQueueNotificationReceiptSnapshot,
+  type DeliveryQueueNotificationReceiptQuery,
+  type DeliveryQueueNotificationResolution,
 } from "./delivery-queue-sqlite.types.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "./kysely-sync.js";
 import { runSqliteImmediateTransactionSync } from "./sqlite-transaction.js";
@@ -93,7 +99,118 @@ export function expireStagingAndLoadDeliveryQueueEntriesInDatabase(
   };
 }
 
-type DeliveryQueueOwner = { status: DeliveryQueueStoredStatus; settlementPending?: true };
+type DeliveryQueueOwner = {
+  status: DeliveryQueueStoredStatus;
+  settlementPending?: true;
+  notificationReceipt?: DeliveryQueueNotificationReceipt;
+  acknowledgedAt?: number;
+};
+
+/** Minimal opaque custody for source-owned resolution; malformed rows stay retained. */
+export function listNotificationDeliveryReceiptsInDatabase(
+  database: OpenClawStateDatabase,
+  input: DeliveryQueueNotificationReceiptQuery = {},
+): DeliveryQueueNotificationReceiptSnapshot[] {
+  if (input.topicKey !== undefined && !/^[a-f0-9]{64}$/.test(input.topicKey)) {
+    throw new Error("Invalid notification receipt topic");
+  }
+  const rows = executeSqliteQuerySync(
+    database.db,
+    getNodeSqliteKysely<DeliveryQueueDatabase>(database.db)
+      .selectFrom("delivery_queue_entries")
+      .select(["queue_name", "id", "status", "entry_json", "recovery_state"])
+      .where((eb) =>
+        eb.or([
+          eb.and([
+            eb("status", "in", ["completed", "failed"]),
+            eb("recovery_state", "=", "completed_notification"),
+          ]),
+          ...(input.includePending ? [eb("status", "in", ["pending", "failed"])] : []),
+        ]),
+      )
+      .orderBy("queue_name")
+      .orderBy("id"),
+  ).rows;
+  return rows.flatMap((row) => {
+    const entry = safeParseJsonRecord(row.entry_json);
+    const notificationReceipt = parseDeliveryQueueNotificationReceipt(entry?.notificationReceipt);
+    if (
+      !notificationReceipt ||
+      (input.topicKey && notificationReceipt.topicKey !== input.topicKey) ||
+      (row.status !== "pending" && row.status !== "completed" && row.status !== "failed")
+    ) {
+      return [];
+    }
+    const acknowledgedAt = entry?.acknowledgedAt;
+    return [
+      {
+        queueName: row.queue_name,
+        id: row.id,
+        status: row.status,
+        notificationReceipt,
+        ...(typeof acknowledgedAt === "number" &&
+        Number.isSafeInteger(acknowledgedAt) &&
+        acknowledgedAt >= 0
+          ? { acknowledgedAt }
+          : {}),
+        ...(row.recovery_state ? { recoveryState: row.recovery_state } : {}),
+      },
+    ];
+  });
+}
+
+/** Source closure starts expiry once; repeated closed snapshots cannot move the clock. */
+export function updateNotificationDeliveryReceiptResolutionInDatabase(
+  database: OpenClawStateDatabase,
+  input: DeliveryQueueNotificationResolution,
+): number {
+  if (
+    !/^[a-f0-9]{64}$/.test(input.ownerKey) ||
+    (input.resolvedAt !== null && (!Number.isSafeInteger(input.resolvedAt) || input.resolvedAt < 0))
+  ) {
+    throw new Error("Invalid notification receipt resolution");
+  }
+  const queueDb = getNodeSqliteKysely<DeliveryQueueDatabase>(database.db);
+  const rows = executeSqliteQuerySync(
+    database.db,
+    queueDb
+      .selectFrom("delivery_queue_entries")
+      .select(["queue_name", "id", "entry_json"])
+      .where("status", "in", ["completed", "failed"])
+      .where("recovery_state", "=", "completed_notification"),
+  ).rows;
+  let changed = 0;
+  for (const row of rows) {
+    const entry = safeParseJsonRecord(row.entry_json);
+    const receipt = parseDeliveryQueueNotificationReceipt(entry?.notificationReceipt);
+    if (!entry || !receipt || receipt.ownerKey !== input.ownerKey) {
+      continue;
+    }
+    const resolvedAt =
+      input.resolvedAt === null ? undefined : (receipt.resolvedAt ?? input.resolvedAt);
+    if (resolvedAt === receipt.resolvedAt) {
+      continue;
+    }
+    const { resolvedAt: _previousResolvedAt, ...identity } = receipt;
+    const notificationReceipt = {
+      ...identity,
+      ...(resolvedAt === undefined ? {} : { resolvedAt }),
+    };
+    const result = executeSqliteQuerySync(
+      database.db,
+      queueDb
+        .updateTable("delivery_queue_entries")
+        .set({ entry_json: JSON.stringify({ ...entry, notificationReceipt }) })
+        .where("queue_name", "=", row.queue_name)
+        .where("id", "=", row.id)
+        .where("entry_json", "=", row.entry_json)
+        .where("status", "in", ["completed", "failed"])
+        .where("recovery_state", "=", "completed_notification"),
+    );
+    changed += Number(result.numAffectedRows ?? 0n);
+  }
+  return changed;
+}
 
 /** Keeps namespace reads and receipt pruning on the caller's exact transaction handle. */
 export function getDeliveryQueueEntryOwnersInDatabase(
@@ -158,6 +275,8 @@ function selectDeliveryQueueEntryOwners(
           .case("recovery_state")
           .when("completed_bounded")
           .then(eb.ref("entry_json"))
+          .when("completed_notification")
+          .then(eb.ref("entry_json"))
           .else(null)
           .end()
           .as("entry_json"),
@@ -178,6 +297,14 @@ function selectDeliveryQueueEntryOwners(
   const prunedPrefixes = new Map<string, Set<string>>();
   for (const row of rows) {
     if (row.entry_json === null) {
+      continue;
+    }
+    if (row.recovery_state === "completed_notification") {
+      pruned =
+        pruneNotificationDeliveryReceipts(database.db, Date.now(), {
+          queueName: row.queue_name,
+          id: row.id,
+        }) || pruned;
       continue;
     }
     const entry = safeParseJsonRecord(row.entry_json);
@@ -202,9 +329,21 @@ function selectDeliveryQueueEntryOwners(
   const owners = new Map<string, Map<string, DeliveryQueueOwner>>();
   for (const row of rows) {
     if (row.status) {
+      const entry =
+        row.recovery_state === "completed_notification" && row.entry_json !== null
+          ? safeParseJsonRecord(row.entry_json)
+          : null;
+      const notificationReceipt = parseDeliveryQueueNotificationReceipt(entry?.notificationReceipt);
+      const acknowledgedAt = entry?.acknowledgedAt;
       const namespaces = owners.get(row.id) ?? new Map<string, DeliveryQueueOwner>();
       namespaces.set(row.queue_name, {
         status: row.status,
+        ...(notificationReceipt ? { notificationReceipt } : {}),
+        ...(typeof acknowledgedAt === "number" &&
+        Number.isSafeInteger(acknowledgedAt) &&
+        acknowledgedAt >= 0
+          ? { acknowledgedAt }
+          : {}),
         ...(row.status === "failed" && row.recovery_state === "settlement_pending"
           ? { settlementPending: true as const }
           : {}),
@@ -269,7 +408,7 @@ export function completeLoadedDeliveryQueueEntryInDatabase(
     throw new Error(`Invalid bounded delivery completion retention: ${queueName}/${id}`);
   }
   const tombstone = projectDeliveryQueueTerminalEntry(
-    { id, retryCount: 0 },
+    { id, retryCount: 0, notificationReceipt: current?.notificationReceipt },
     now,
     "completed",
     retention,

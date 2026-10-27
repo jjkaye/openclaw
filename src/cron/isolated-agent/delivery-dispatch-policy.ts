@@ -1,11 +1,13 @@
 /** Formatting, retry, and idempotency policy for direct cron delivery. */
 import type { ReplyPayload } from "../../auto-reply/reply-payload.js";
+import type { NormalizeReplySkipReason } from "../../auto-reply/reply/normalize-reply-skip-reason.js";
 import {
   SILENT_REPLY_TOKEN,
   startsWithSilentToken,
   stripLeadingSilentToken,
   stripSilentToken,
 } from "../../auto-reply/tokens.js";
+import type { DurableMessageBatchSendResult } from "../../channels/message/send.js";
 import { resolveSessionStorePathCore } from "../../config/sessions/paths.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { TtsAutoMode } from "../../config/types.tts.js";
@@ -39,6 +41,24 @@ export const DIRECT_CRON_DELIVERY_COMPLETION_RETENTION = {
   maxAgeMs: 24 * 60 * 60_000,
   maxEntries: 2_000,
 } as const satisfies DeliveryQueueCompletionRetention;
+
+/** Policy silence completes the review; uncertain platform evidence still owns recovery. */
+export function resolveDirectCronSuppression(
+  reason: Extract<DurableMessageBatchSendResult, { status: "suppressed" }>["reason"],
+  uncertain: boolean,
+): [
+  status: "unknown" | "not-delivered",
+  error?: string,
+  suppressionReason?: NormalizeReplySkipReason,
+] {
+  if (!uncertain && reason === "notification_policy") {
+    return ["not-delivered", undefined, "notification_policy"];
+  }
+  return [
+    uncertain ? "unknown" : "not-delivered",
+    `cron delivery ${uncertain ? "outcome is unknown" : "was suppressed"}: ${uncertain ? "adapter_returned_no_identity" : reason}`,
+  ];
+}
 
 /** Carry the implicit source's generation through outbound custody and recovery. */
 export function resolveDirectCronDeliveryGeneration(

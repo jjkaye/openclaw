@@ -635,74 +635,92 @@ describe("cron payload conversion", () => {
 });
 
 describe("CronService persists delivery suppression", () => {
-  it("persists scheduled suppression in state, history, and events and clears it after delivery", async () => {
-    const { storePath } = await makeStorePath();
-    const schedulerClock = createGatewaySchedulerClock(Date.now());
-    const events: CronEvent[] = [];
-    const finished = createFinishedBarrier();
-    const runIsolatedAgentJob = vi.fn<CronServiceDeps["runIsolatedAgentJob"]>();
-    runIsolatedAgentJob.mockResolvedValue({
-      status: "ok",
-      delivered: false,
-      deliveryAttempted: true,
-      deliverySuppressionReason: "channel_transform",
-    });
-    const cron = createService(storePath, {
-      scheduler: createTestGatewayScheduler(schedulerClock.clock),
-      runIsolatedAgentJob,
-      onEvent: (event) => {
-        if (event.action === "finished") {
-          events.push(event);
-        }
-        finished.onEvent(event);
-      },
-    });
-    await cron.start();
-    try {
-      const job = await cron.add({
-        name: "suppression-readback",
-        enabled: true,
-        schedule: { kind: "every", everyMs: 60_000 },
-        sessionTarget: "isolated",
-        wakeMode: "next-heartbeat",
-        payload: { kind: "agentTurn", message: "test" },
-        delivery: { mode: "announce", channel: "forum", to: "123" },
+  it.each(["channel_transform", "notification_policy"] as const)(
+    "persists scheduled %s suppression in state, history, and events and clears it after delivery",
+    async (reason) => {
+      const { storePath } = await makeStorePath();
+      const schedulerClock = createGatewaySchedulerClock(Date.now());
+      const events: CronEvent[] = [];
+      const finished = createFinishedBarrier();
+      const runIsolatedAgentJob = vi.fn<CronServiceDeps["runIsolatedAgentJob"]>();
+      const sendCronFailureAlert = vi.fn(async () => {});
+      const runCronFailureRepair = vi.fn(async () => {});
+      runIsolatedAgentJob.mockResolvedValue({
+        status: "ok",
+        delivered: false,
+        deliveryAttempted: true,
+        deliverySuppressionReason: reason,
       });
-      const done = finished.waitForOk(job.id);
-      await schedulerClock.advanceTo(job.state.nextRunAtMs!);
-      await done;
-      const persisted = (await loadCronStore(storePath)).jobs.find((entry) => entry.id === job.id);
-      expect.soft(persisted?.state).toMatchObject({
-        lastRunStatus: "ok",
-        lastDelivered: false,
-        lastDeliveryStatus: "not-delivered",
-        deliverySuppressionReason: "channel_transform",
+      const cron = createService(storePath, {
+        scheduler: createTestGatewayScheduler(schedulerClock.clock),
+        runIsolatedAgentJob,
+        sendCronFailureAlert,
+        runCronFailureRepair,
+        onEvent: (event) => {
+          if (event.action === "finished") {
+            events.push(event);
+          }
+          finished.onEvent(event);
+        },
       });
-      expect.soft(persisted?.state.lastDeliveryError).toBeUndefined();
-      expect
-        .soft(events)
-        .toEqual([expect.objectContaining({ deliverySuppressionReason: "channel_transform" })]);
-      const history = readCronRunHistoryPageForTests({
-        storeKey: cronStoreKey(storePath),
-        jobId: job.id,
-      });
-      expect
-        .soft(history.entries)
-        .toEqual([expect.objectContaining({ deliverySuppressionReason: "channel_transform" })]);
+      await cron.start();
+      try {
+        const job = await cron.add({
+          name: "suppression-readback",
+          enabled: true,
+          schedule: { kind: "every", everyMs: 60_000 },
+          sessionTarget: "isolated",
+          wakeMode: "next-heartbeat",
+          payload: { kind: "agentTurn", message: "test" },
+          delivery: { mode: "announce", channel: "forum", to: "123" },
+          failureAlert: { after: 1, cooldownMs: 0, channel: "forum", to: "456" },
+        });
+        const done = finished.waitForOk(job.id);
+        await schedulerClock.advanceTo(job.state.nextRunAtMs!);
+        await done;
+        const persisted = (await loadCronStore(storePath)).jobs.find(
+          (entry) => entry.id === job.id,
+        );
+        expect.soft(persisted?.state).toMatchObject({
+          lastRunStatus: "ok",
+          lastDelivered: false,
+          lastDeliveryStatus: "not-delivered",
+          deliverySuppressionReason: reason,
+        });
+        expect.soft(persisted?.state.lastDeliveryError).toBeUndefined();
+        expect.soft(events).toEqual([
+          expect.objectContaining({
+            completionStatus: "succeeded",
+            deliverySuppressionReason: reason,
+          }),
+        ]);
+        const history = readCronRunHistoryPageForTests({
+          storeKey: cronStoreKey(storePath),
+          jobId: job.id,
+        });
+        expect.soft(history.entries).toEqual([
+          expect.objectContaining({
+            completionStatus: "succeeded",
+            deliverySuppressionReason: reason,
+          }),
+        ]);
+        expect(sendCronFailureAlert).not.toHaveBeenCalled();
+        expect(runCronFailureRepair).not.toHaveBeenCalled();
 
-      runIsolatedAgentJob.mockResolvedValue({ status: "ok", delivered: true });
-      schedulerClock.setTime(schedulerClock.clock.now() + 1);
-      await cron.run(job.id, "force");
-      expect(
-        (await loadCronStore(storePath)).jobs[0]?.state.deliverySuppressionReason,
-      ).toBeUndefined();
-      expect(events.at(-1)?.deliverySuppressionReason).toBeUndefined();
-      expect(
-        readCronRunHistoryPageForTests({ storeKey: cronStoreKey(storePath), jobId: job.id })
-          .entries[0]?.deliverySuppressionReason,
-      ).toBeUndefined();
-    } finally {
-      cron.stop();
-    }
-  });
+        runIsolatedAgentJob.mockResolvedValue({ status: "ok", delivered: true });
+        schedulerClock.setTime(schedulerClock.clock.now() + 1);
+        await cron.run(job.id, "force");
+        expect(
+          (await loadCronStore(storePath)).jobs[0]?.state.deliverySuppressionReason,
+        ).toBeUndefined();
+        expect(events.at(-1)?.deliverySuppressionReason).toBeUndefined();
+        expect(
+          readCronRunHistoryPageForTests({ storeKey: cronStoreKey(storePath), jobId: job.id })
+            .entries[0]?.deliverySuppressionReason,
+        ).toBeUndefined();
+      } finally {
+        cron.stop();
+      }
+    },
+  );
 });
