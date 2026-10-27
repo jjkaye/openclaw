@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   inferDeliveryQueueFailureRetention,
   parseDeliveryQueueNotificationReceipt,
+  parseDeliveryQueueNotificationReceipts,
   projectDeliveryQueueTerminalEntry,
 } from "./delivery-queue-sqlite.types.js";
 
@@ -25,7 +26,7 @@ describe("notification receipt metadata", () => {
     const entry = {
       id: "notification",
       retryCount: 1,
-      notificationReceipt: receipt,
+      notificationReceipts: [receipt],
       payloads: [{ text: "private notification copy" }],
     };
     const retention = inferDeliveryQueueFailureRetention(entry, entry.id);
@@ -36,7 +37,7 @@ describe("notification receipt metadata", () => {
       retryCount: 1,
       failedAt: 1_000,
       completionRetention: "permanent",
-      notificationReceipt: receipt,
+      notificationReceipts: [receipt],
       recoveryState: "completed_notification",
     });
   });
@@ -64,10 +65,40 @@ describe("notification receipt metadata", () => {
     const contentBearingReceipt = { ...receipt, text: "private notification copy" };
     expect(() =>
       projectDeliveryQueueTerminalEntry(
-        { id: "notification", retryCount: 0, notificationReceipt: contentBearingReceipt },
+        { id: "notification", retryCount: 0, notificationReceipts: [contentBearingReceipt] },
         1_000,
         "completed",
       ),
-    ).toThrow("Invalid notification delivery receipt");
+    ).toThrow("Invalid notification delivery receipts");
+  });
+
+  it("requires one to sixteen unique opaque topics per physical delivery", () => {
+    expect(parseDeliveryQueueNotificationReceipts([receipt])).toEqual([receipt]);
+    expect(parseDeliveryQueueNotificationReceipts([])).toBeUndefined();
+    expect(parseDeliveryQueueNotificationReceipts([receipt, receipt])).toBeUndefined();
+    expect(
+      parseDeliveryQueueNotificationReceipts(Array.from({ length: 17 }, () => receipt)),
+    ).toBeUndefined();
+    expect(
+      parseDeliveryQueueNotificationReceipts([{ ...receipt, text: "private" }]),
+    ).toBeUndefined();
+  });
+
+  it("retains typed cancellation and policy suppression without a provider acknowledgement", () => {
+    const entry = { id: "physical", retryCount: 0, notificationReceipts: [receipt] };
+    const canceled = projectDeliveryQueueTerminalEntry(
+      { ...entry, settlement: { notificationCanceled: true } },
+      1_000,
+      "failed",
+    );
+    expect(canceled.recoveryState).toBe("completed_notification_canceled");
+    expect(canceled.acknowledgedAt).toBeUndefined();
+    const suppressed = projectDeliveryQueueTerminalEntry(
+      { ...entry, notificationSuppressed: true },
+      1_000,
+      "completed",
+    );
+    expect(suppressed.recoveryState).toBe("completed_notification_suppressed");
+    expect(suppressed.acknowledgedAt).toBeUndefined();
   });
 });

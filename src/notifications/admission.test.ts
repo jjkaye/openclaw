@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  admitNotification,
-  notificationLocalDate,
+  createNotificationCandidate,
+  notificationStateEligible,
   notificationTopicKey,
-  type NotificationTopicDelivery,
 } from "./admission.js";
 import {
   parseNotificationProposal,
@@ -30,89 +29,43 @@ const state: NotificationSourceState = {
   timeZone: "America/New_York",
 };
 const start = Date.parse("2026-10-30T15:00:00Z");
-function admit(
-  now: number,
-  deliveries: NotificationTopicDelivery[] = [],
-  overrides: Partial<NotificationSourceState> = {},
-) {
-  return admitNotification({
-    proposal,
-    context,
-    state: { ...state, ...overrides },
-    deliveries,
-    now,
-  });
-}
 
-describe("shared notification admission", () => {
-  it("allows an initial ask and exactly two later local dates, not repeated wakes", () => {
-    const deliveries: NotificationTopicDelivery[] = [];
-    for (const [day, slot] of [
-      [0, 0],
-      [1, 1],
-      [2, 2],
-    ] as const) {
-      const admitted = admit(start + day * 86_400_000, deliveries)!;
-      expect(admitted.receipt.slot).toBe(slot);
-      expect(admitted.id).toMatch(/^notification-[a-f0-9]{64}$/);
-      deliveries.push({
-        id: admitted.id,
-        status: "completed",
-        notificationReceipt: admitted.receipt,
-      });
-      expect(admit(start + day * 86_400_000 + 3_600_000, deliveries)).toBeUndefined();
-    }
-    expect(admit(start + 10 * 86_400_000, deliveries)).toBeUndefined();
-  });
-
-  it("uses actual acknowledgement date across midnight and the25hour DST day", () => {
-    expect(notificationLocalDate(Date.parse("2026-11-01T05:30:00Z"), state.timeZone)).toBe(
-      "2026-11-01",
+describe("notification source eligibility", () => {
+  it("rejects unsupported revisions, topics and stale decision states", () => {
+    expect(notificationStateEligible(proposal, state, start)).toBe(true);
+    expect(notificationStateEligible(proposal, null, start)).toBe(false);
+    expect(notificationStateEligible(proposal, { ...state, revision: "v2" }, start)).toBe(false);
+    expect(notificationStateEligible(proposal, { ...state, topicId: "decision-b" }, start)).toBe(
+      false,
     );
-    expect(notificationLocalDate(Date.parse("2026-11-01T06:30:00Z"), state.timeZone)).toBe(
-      "2026-11-01",
-    );
-    const first = admit(start)!;
-    const deliveries: NotificationTopicDelivery[] = [
-      {
-        id: first.id,
-        status: "completed",
-        notificationReceipt: first.receipt,
-        acknowledgedAt: Date.parse("2026-11-01T04:10:00Z"),
-      },
-    ];
-    expect(admit(Date.parse("2026-11-01T23:00:00Z"), deliveries)).toBeUndefined();
-    expect(admit(Date.parse("2026-11-02T05:01:00Z"), deliveries)?.receipt.slot).toBe(1);
-  });
-
-  it("keeps unknown older revisions in custody and rejects unsupported model revisions", () => {
-    const first = admit(start)!;
-    expect(
-      admit(start, [
-        {
-          id: first.id,
-          status: "pending",
-          notificationReceipt: { ...first.receipt, revisionKey: "b".repeat(64) },
-        },
-      ]),
-    ).toBeUndefined();
-    expect(
-      admit(start, [
-        {
-          id: first.id,
-          status: "failed",
-          recoveryState: "settlement_pending",
-          notificationReceipt: { ...first.receipt, revisionKey: "b".repeat(64) },
-        },
-      ]),
-    ).toBeUndefined();
-    expect(admit(start, [], { revision: "v2" })).toBeUndefined();
-    for (const status of ["answered", "paused", "resolved", "superseded"] as const) {
-      expect(admit(start, [], { status })).toBeUndefined();
+    for (const status of ["paused", "answered", "resolved", "superseded"] as const) {
+      expect(notificationStateEligible(proposal, { ...state, status }, start)).toBe(false);
     }
   });
-
-  it("separates same-task decisions and recipients; source consequence can reopen attention", () => {
+  it("does not resurrect expired completed results when transport history is absent", () => {
+    const result = { ...proposal, purpose: "result" as const };
+    for (const anchor of [{ resolvedAt: start }, { resolvedOn: "2026-10-30" }]) {
+      const completed = { ...state, status: "resolved" as const, ...anchor };
+      expect(notificationStateEligible(result, completed, start)).toBe(true);
+      expect(notificationStateEligible(result, completed, start + 31 * 86400000)).toBe(false);
+    }
+    expect(notificationStateEligible(result, { ...state, status: "resolved" }, start)).toBe(false);
+    expect(
+      notificationStateEligible(
+        result,
+        { ...state, status: "resolved", resolvedOn: "2026-02-30" },
+        start,
+      ),
+    ).toBe(false);
+    expect(
+      notificationStateEligible(
+        result,
+        { ...state, status: "resolved", resolvedAt: start + 1 },
+        start,
+      ),
+    ).toBe(false);
+  });
+  it("distinguishes source-owned subjects and routes while retaining opaque candidate identity", () => {
     expect(notificationTopicKey(proposal, context)).not.toBe(
       notificationTopicKey({ ...proposal, topicId: "decision-b" }, context),
     );
@@ -122,86 +75,16 @@ describe("shared notification admission", () => {
         recipient: { ...context.recipient, to: "another-owner" },
       }),
     );
-    const first = admit(start)!;
-    const deliveries: NotificationTopicDelivery[] = [
-      { id: first.id, status: "completed", notificationReceipt: first.receipt },
-    ];
-    const changed = admit(start + 1_000, deliveries, { consequenceKey: "source-deadline-today" });
-    expect(changed?.receipt.slot).toBe(0);
-    expect(changed?.id).not.toBe(first.id);
-  });
-
-  it("reports a new completed result once while keeping resolved decisions quiet", () => {
-    const resultProposal = { ...proposal, purpose: "result" as const };
-    const completed = { ...state, status: "resolved" as const, resolvedAt: start };
-    const first = admitNotification({
-      proposal: resultProposal,
+    const first = createNotificationCandidate(proposal, context, state, 0);
+    const changed = createNotificationCandidate(
+      proposal,
       context,
-      state: completed,
-      deliveries: [],
-      now: start,
-    })!;
-    expect(first.receipt.resolvedAt).toBe(start);
-    expect(
-      admitNotification({
-        proposal: resultProposal,
-        context,
-        state: completed,
-        deliveries: [{ id: first.id, status: "completed", notificationReceipt: first.receipt }],
-        now: start + 86_400_000,
-      }),
-    ).toBeUndefined();
-  });
-
-  it("never resurrects an expired resolved result after its receipt is pruned", () => {
-    const resultProposal = { ...proposal, purpose: "result" as const };
-    for (const closure of [{ resolvedAt: start }, { resolvedOn: "2026-10-30" }]) {
-      const completed = { ...state, status: "resolved" as const, ...closure };
-      const initial = admitNotification({
-        proposal: resultProposal,
-        context,
-        state: completed,
-        deliveries: [],
-        now: start,
-      });
-      expect(initial).toBeDefined();
-      expect(
-        admitNotification({
-          proposal: resultProposal,
-          context,
-          state: completed,
-          deliveries: [],
-          now: start + 31 * 86_400_000,
-        }),
-      ).toBeUndefined();
-    }
-    expect(
-      admitNotification({
-        proposal: resultProposal,
-        context,
-        state: { ...state, status: "resolved" },
-        deliveries: [],
-        now: start,
-      }),
-    ).toBeUndefined();
-    expect(
-      admitNotification({
-        proposal: resultProposal,
-        context,
-        state: { ...state, revision: "v2", status: "open" },
-        deliveries: [],
-        now: start + 31 * 86_400_000,
-      }),
-    ).toBeUndefined();
-    expect(
-      admitNotification({
-        proposal: { ...resultProposal, expectedRevision: "v2" },
-        context,
-        state: { ...state, revision: "v2", status: "open" },
-        deliveries: [],
-        now: start + 31 * 86_400_000,
-      }),
-    ).toBeDefined();
+      { ...state, consequenceKey: "deadline-today" },
+      0,
+    );
+    expect(first.receiptBase.ownerKey).toMatch(/^[a-f0-9]{64}$/);
+    expect(changed.receiptBase.revisionKey).not.toBe(first.receiptBase.revisionKey);
+    expect(JSON.stringify(first.receiptBase)).not.toContain("task-1");
   });
 });
 

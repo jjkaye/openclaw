@@ -21,7 +21,7 @@ import type {
 export async function retireUnsentDelivery(
   params: Parameters<typeof retireUnsentDeliveryInDatabase>[1],
   context?: DeliveryQueueStateContext,
-  terminalOutcome?: "failed",
+  terminalOutcome?: "failed" | "notification-canceled",
 ): Promise<(() => Promise<void>) | undefined> {
   const stateDir = context?.stateDir ?? params.stateDir;
   const retired = await executeDeliveryQueueOperation(context, stateDir, {
@@ -54,6 +54,7 @@ export async function ackDelivery(
     ? {
         retainSpoolArtifacts: options.retainSpoolArtifacts,
         suppressCompletionReceipt: options.suppressCompletionReceipt,
+        notificationSuppressed: options.notificationSuppressed,
         ...("expectedPlatformSendAttemptId" in options
           ? { expectedPlatformSendAttemptId: options.expectedPlatformSendAttemptId }
           : {}),

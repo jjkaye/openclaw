@@ -52,6 +52,10 @@ import {
   outboundDeliveryQueueName,
 } from "./outbound/delivery-queue-namespaces.js";
 import {
+  claimNotificationPreparationInDatabase,
+  retireExpiredNotificationPreparationsInDatabase,
+} from "./outbound/delivery-queue-notification-preparation.kernel.js";
+import {
   findDeliveryIntentOwnersInDatabase,
   resolveOutboundDeliveryQueueNameInDatabase,
 } from "./outbound/delivery-queue-ownership.kernel.js";
@@ -258,6 +262,9 @@ function stageFailure(
     database,
     { queueName, id: entry.id, platformSendAttemptId: attemptId ?? null },
     (current) => {
+      if (settlement.notificationCanceled && current.recoveryState === "unknown_after_send") {
+        return;
+      }
       if (
         !reclaim &&
         claimedAttemptId === undefined &&
@@ -298,6 +305,10 @@ function readOperation<Input, Output>(
 }
 
 export const deliveryQueueOperations = {
+  "deliveryQueue.claimNotificationPreparation": writeOperation(
+    "deliveryQueue.claimNotificationPreparation",
+    claimNotificationPreparationInDatabase,
+  ),
   "deliveryQueue.claimPreparation": writeOperation(
     "deliveryQueue.claimPreparation",
     (database, input: { id: string }) => claimPreparation(database, input.id),
@@ -318,21 +329,43 @@ export const deliveryQueueOperations = {
   ),
   "deliveryQueue.completePreparation": writeOperation(
     "deliveryQueue.completePreparation",
-    (database, input: { expectedEntry: StableDeliveryPreparation }) =>
-      completePendingDeliveryQueueEntryInDatabase(database, {
+    (database, input: { expectedEntry: StableDeliveryPreparation }) => {
+      if (input.expectedEntry.notificationReceipts) {
+        if (input.expectedEntry.preparationState !== "claimed") {
+          return completePendingDeliveryQueueEntryInDatabase(database, {
+            queueName: OUTBOUND_DELIVERY_PREPARATION_QUEUE_NAME,
+            ...input,
+            notificationSuppressed: true,
+          });
+        }
+        return (
+          terminalizePendingDeliveryQueueEntryInDatabase(
+            database,
+            prepareDeliveryQueueTerminalEntry({
+              queueName: OUTBOUND_DELIVERY_PREPARATION_QUEUE_NAME,
+              id: input.expectedEntry.id,
+              entry: input.expectedEntry,
+              notificationCanceled: true,
+            }),
+          ).status === "terminalized"
+        );
+      }
+      return completePendingDeliveryQueueEntryInDatabase(database, {
         queueName: OUTBOUND_DELIVERY_PREPARATION_QUEUE_NAME,
         ...input,
-      }),
+      });
+    },
   ),
   "deliveryQueue.failPreparation": writeOperation(
     "deliveryQueue.failPreparation",
-    (database, input: { entry: StableDeliveryPreparation }) => {
+    (database, input: { entry: StableDeliveryPreparation; notificationCanceled?: true }) => {
       terminalizePendingDeliveryQueueEntryInDatabase(
         database,
         prepareDeliveryQueueTerminalEntry({
           queueName: OUTBOUND_DELIVERY_PREPARATION_QUEUE_NAME,
           id: input.entry.id,
           entry: input.entry,
+          notificationCanceled: input.notificationCanceled,
         }),
       );
     },
@@ -414,7 +447,12 @@ export const deliveryQueueOperations = {
     "deliveryQueue.retireUnsent",
     (
       database,
-      input: { id: string; producerClaimId: string; stateDir?: string; terminalOutcome?: "failed" },
+      input: {
+        id: string;
+        producerClaimId: string;
+        stateDir?: string;
+        terminalOutcome?: "failed" | "notification-canceled";
+      },
     ) => retireUnsentDeliveryInDatabase(database, input, input.terminalOutcome),
   ),
   "deliveryQueue.claimPlatformSend": writeOperation(
@@ -475,8 +513,13 @@ export const deliveryQueueOperations = {
     countFailedDeliveryQueueEntriesInDatabase(open()),
   "deliveryQueue.countPending": (input: { queueNames: string[] }, { open }) =>
     countPendingDeliveryQueueEntriesInDatabase(open(), input.queueNames),
-  "deliveryQueue.pruneTombstones": (_input: undefined, { open }) =>
-    pruneExpiredDeliveryQueueTombstonesInDatabase(open()),
+  "deliveryQueue.pruneTombstones": writeOperation(
+    "deliveryQueue.pruneTombstones",
+    (database, _input: undefined) => {
+      retireExpiredNotificationPreparationsInDatabase(database);
+      pruneExpiredDeliveryQueueTombstonesInDatabase(database);
+    },
+  ),
   "deliveryQueue.createMediaRetention": writeOperation(
     "deliveryQueue.createMediaRetention",
     (

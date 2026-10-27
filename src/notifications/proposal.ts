@@ -3,6 +3,12 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type { NotificationSourceReference } from "./source-types.js";
 
 export type NotificationProposal = NotificationSourceReference & { expectedRevision: string };
+export type NotificationBlock = {
+  notification: NotificationProposal;
+  text: string;
+  spokenText?: string;
+};
+export const NOTIFICATION_BATCH_CHANNEL_DATA_KEY = "openclawNotificationBatch";
 export const NOTIFICATION_CHANNEL_DATA_KEY = "openclawNotification";
 export const NOTIFICATION_ENVELOPE_SCHEMA = "openclaw.notification.v1";
 

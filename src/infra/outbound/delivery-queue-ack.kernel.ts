@@ -28,7 +28,7 @@ export function retireUnsentDeliveryInDatabase(
     producerClaimId: string;
     stateDir?: string;
   },
-  terminalOutcome?: "failed",
+  terminalOutcome?: "failed" | "notification-canceled",
 ): { spoolPaths: string[]; retention?: string } | undefined {
   const stateDir = params.stateDir;
   const queueName = resolveOutboundDeliveryQueueNameInDatabase(database, params.id);
@@ -54,7 +54,7 @@ export function retireUnsentDeliveryInDatabase(
       // SAFETY: This namespace's pending rows contain the prepared outbound batch.
       const entry = current as QueuedDelivery;
       // Completion-bearing rows need resumable projection through failure staging.
-      if (terminalOutcome === "failed" && entry.deliveryCompletion) {
+      if (terminalOutcome !== undefined && entry.deliveryCompletion) {
         return;
       }
       const artifacts = collectEntrySpoolPaths(
@@ -62,7 +62,7 @@ export function retireUnsentDeliveryInDatabase(
         stateDir,
       );
       if (
-        terminalOutcome === "failed" &&
+        terminalOutcome !== undefined &&
         terminalizePendingDeliveryQueueEntryInDatabase(
           database,
           prepareDeliveryQueueTerminalEntry({
@@ -70,6 +70,7 @@ export function retireUnsentDeliveryInDatabase(
             id: entry.id,
             entry,
             expectedStatus: "pending",
+            ...(terminalOutcome === "notification-canceled" ? { notificationCanceled: true } : {}),
           }),
         ).status !== "terminalized"
       ) {
@@ -82,7 +83,7 @@ export function retireUnsentDeliveryInDatabase(
             "outbound-media-recovery-lease",
           )
         : undefined;
-      if (terminalOutcome !== "failed") {
+      if (terminalOutcome === undefined) {
         // Cancellation removes custody without recording a successful receipt,
         // including for stable intents with completion retention.
         deleteDeliveryQueueEntryInDatabase(database, queueName, entry.id);
@@ -125,9 +126,21 @@ export function ackDeliveryInDatabase(
       );
       if (current.completionRetention && options?.suppressCompletionReceipt !== true) {
         if (hasExpectedClaim) {
-          completeLoadedDeliveryQueueEntryInDatabase(database, queueName, id, current);
+          completeLoadedDeliveryQueueEntryInDatabase(
+            database,
+            queueName,
+            id,
+            current,
+            Date.now(),
+            options?.notificationSuppressed,
+          );
         } else {
-          completeDeliveryQueueEntryInDatabase(database, queueName, id);
+          completeDeliveryQueueEntryInDatabase(
+            database,
+            queueName,
+            id,
+            options?.notificationSuppressed,
+          );
         }
       } else {
         deleteDeliveryQueueEntryInDatabase(database, queueName, id);

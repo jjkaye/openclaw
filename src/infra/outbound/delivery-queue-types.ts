@@ -10,7 +10,7 @@ import type {
 } from "../../channels/message/types.js";
 import type { SessionDeliveryGeneration } from "../../config/sessions/session-delivery-generation.types.js";
 import type { ReplyToMode } from "../../config/types.js";
-import type { NotificationProposal } from "../../notifications/proposal.js";
+import type { NotificationBlock } from "../../notifications/proposal.js";
 import type { PluginHookReplyPayloadSendingContext } from "../../plugins/hook-types.js";
 import type {
   DeliveryQueueCompletionRetention,
@@ -70,8 +70,8 @@ export type QueuedReplyPayloadSendingHook = {
 };
 
 export type QueuedDeliveryPayload = {
-  notification?: NotificationProposal;
-  notificationReceipt?: DeliveryQueueNotificationReceipt;
+  notificationBlocks?: readonly NotificationBlock[];
+  notificationReceipts?: readonly DeliveryQueueNotificationReceipt[];
   requireNotificationReference?: boolean;
   sessionGeneration?: SessionDeliveryGeneration;
   channel: string;
@@ -124,6 +124,7 @@ export type LegacyQueuedDeliveryPreparation = LegacyQueuedDelivery & {
 };
 
 export type DeliveryFailureSettlement = {
+  notificationCanceled?: true;
   error: string;
   unknownSendCleanup?: true;
   terminals?: readonly IndexedOutboundAuditTerminal[];

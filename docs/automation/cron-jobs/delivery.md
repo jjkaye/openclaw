@@ -118,8 +118,12 @@ A source-backed final is explicitly tagged:
 Obtain the reference from the authorized source; a model-invented ID or revision
 cannot establish eligibility. A briefing may instead contain `notifications`,
 an array of 1–16 `{ notification, text }` objects. Each topic is admitted
-independently. Multi-topic envelopes must be text-only; attach media to a single
-explicit topic. Malformed tagged envelopes fail closed rather than becoming
+independently, then the eligible blocks are combined in their original order into
+one briefing. Multi-topic envelopes must be text-only; attach media to a single
+explicit topic. Jobs requiring notification references synthesize speech after
+source admission selects and combines the eligible blocks. Suppressed topics are
+excluded from both text and speech. Recovery reuses the prepared briefing and
+audio rather than running speech generation again. Malformed tagged envelopes fail closed rather than becoming
 visible control JSON. Untagged jobs retain their normal output behavior when the
 requirement is off. See [notification sources](/plugins/sdk-overview/capabilities#notification-sources-contract-version-1).
 

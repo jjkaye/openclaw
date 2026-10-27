@@ -2,6 +2,11 @@ import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { hasDescendantRunAwaitingSettleFromRuns } from "../../agents/subagents/registry/subagent-registry-queries.js";
 import type { SubagentRunRecord } from "../../agents/subagents/registry/subagent-registry.types.js";
+import {
+  getReplyPayloadMetadata,
+  setReplyPayloadMetadata,
+  type ReplyPayload,
+} from "../../auto-reply/reply-payload.js";
 import { SILENT_REPLY_TOKEN } from "../../auto-reply/tokens.js";
 import type { ChannelMessagingAdapter } from "../../channels/plugins/types.public.js";
 import * as deliveryQueueSqlite from "../../infra/delivery-queue-sqlite.js";
@@ -203,6 +208,7 @@ import { createOutboundTestPlugin, createTestRegistry } from "../../test-utils/c
 import { resolveCronDeliveryPlan } from "../delivery-plan.js";
 import { withTempCronHome } from "../isolated-agent.test-harness.js";
 import type { CronDelivery } from "../types.js";
+import { prepareCronDeliveryPayloads } from "./delivery-dispatch-policy.js";
 import type { DispatchCronDeliveryParams } from "./delivery-dispatch-types.js";
 import {
   dispatchCronDelivery,
@@ -1027,6 +1033,149 @@ describe("dispatchCronDelivery", () => {
     expect(appendAssistantMessageToSessionTranscript).toHaveBeenCalledWith(
       expect.objectContaining({ text: "Briefing\nchart.png", mediaUrls: undefined }),
     );
+  });
+
+  it.each([
+    { required: true, batch: false },
+    { required: false, batch: false },
+    { required: false, batch: true },
+  ])("defers notification TTS to the composed payload for %j", async ({ required, batch }) => {
+    const notifications = ["closed", "first", "second"].map((ownerId) => ({
+      sourceId: "fixture-tasks",
+      ownerId,
+      topicId: "next-action",
+      purpose: "decision" as const,
+      expectedRevision: "v1",
+    }));
+    const blocks = notifications.map((notification) => ({
+      notification,
+      text: `Briefing for ${notification.ownerId}`,
+    }));
+    const params = makeBaseParams({
+      synthesizedText: JSON.stringify({
+        $schema: "openclaw.notification.v1",
+        notifications: blocks,
+      }),
+    });
+    params.job.delivery = { mode: "announce", requireNotificationReference: required };
+    params.cfgWithAgentDefaults = { tts: { auto: "always", provider: "microsoft" } };
+    const batchCarrier = {
+      text: blocks.map(({ text }) => text).join("\n\n"),
+      channelData: { openclawNotificationBatch: blocks },
+    };
+    if (batch) {
+      params.deliveryPayloads = [batchCarrier];
+    }
+    const selected: ReplyPayload = {
+      text: "Briefing for first\n\nBriefing for second",
+      spokenText: "Briefing for first. Briefing for second.",
+      channelData: { openclawNotificationBatch: blocks.slice(1) },
+    };
+    const speech: ReplyPayload = {
+      ...selected,
+      mediaUrl: "file:///tmp/selected-briefing.ogg",
+      audioAsVoice: true,
+    };
+    // Selection belongs to outbound admission; this consumer verifies the callback handoff.
+    vi.mocked(deliverOutboundPayloads).mockImplementationOnce(async (delivery) => {
+      expect(maybeApplyTtsToPayloadMock).not.toHaveBeenCalled();
+      expect(delivery.payloads).toEqual(
+        batch
+          ? [batchCarrier]
+          : blocks.map(({ text, notification }) => ({
+              text,
+              channelData: { openclawNotification: notification },
+            })),
+      );
+      expect(delivery.requireNotificationReference).toBe(required);
+      expect(delivery.prepareNotificationPayload).toBeTypeOf("function");
+      const prepared = await delivery.prepareNotificationPayload?.(selected);
+      expect(prepared).toEqual(speech);
+      delivery.onPayload?.({
+        ...speech,
+        hookContent: speech.spokenText,
+        mediaUrls: [speech.mediaUrl!],
+      });
+      return [{ channel: "telegram", messageId: "selected-briefing" }];
+    });
+    maybeApplyTtsToPayloadMock.mockResolvedValue(speech);
+
+    expectDelivered(await dispatchCronDelivery(params));
+    expect(maybeApplyTtsToPayloadMock).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ payload: selected, kind: "final", channel: "telegram" }),
+    );
+    expect(appendAssistantMessageToSessionTranscript).toHaveBeenCalledWith(
+      expect.objectContaining({ text: selected.spokenText }),
+    );
+  });
+
+  it("does not restore the pre-selection notification when TTS produces an empty payload or fails", async () => {
+    const raw = { text: "Suppressed topic must never be restored" };
+    const { prepareNotificationPayload } = await prepareCronDeliveryPayloads({
+      cfg: { tts: { auto: "always", provider: "microsoft" } },
+      payloads: [raw],
+      delivery: makeResolvedDelivery(),
+      agentId: "main",
+      requireNotificationReference: true,
+    });
+    const selected = { text: "Only the current topic" };
+    maybeApplyTtsToPayloadMock.mockResolvedValueOnce({});
+    await expect(prepareNotificationPayload?.(selected)).rejects.toThrow(
+      "cron notification payload was empty or incoherent after TTS",
+    );
+    maybeApplyTtsToPayloadMock.mockRejectedValueOnce(new Error("speech failed"));
+    await expect(prepareNotificationPayload?.(selected)).rejects.toThrow("speech failed");
+    expect(maybeApplyTtsToPayloadMock.mock.calls.map(([call]) => call.payload)).toEqual([
+      selected,
+      selected,
+    ]);
+  });
+
+  it("preserves selected source metadata when TTS returns a replacement payload", async () => {
+    const selected: ReplyPayload = {
+      text: "Selected decision",
+      channelData: { openclawNotification: { ownerId: "selected" } },
+    };
+    setReplyPayloadMetadata(selected, { ttsExplicit: true, tts: { text: "Selected narration" } });
+    const { prepareNotificationPayload } = await prepareCronDeliveryPayloads({
+      cfg: { tts: { auto: "always", provider: "microsoft" } },
+      payloads: [{ text: "Unfiltered original" }],
+      delivery: makeResolvedDelivery(),
+      agentId: "main",
+      requireNotificationReference: true,
+    });
+    maybeApplyTtsToPayloadMock.mockResolvedValue({
+      text: "Selected decision",
+      spokenText: "Spoken selected decision",
+      mediaUrl: "file:///tmp/decision.ogg",
+      channelData: { speechHint: "voice", openclawNotification: { ownerId: "wrong" } },
+    });
+    const prepared = await prepareNotificationPayload?.(selected);
+    expect(getReplyPayloadMetadata(prepared!)).toEqual({
+      ttsExplicit: true,
+      tts: { text: "Selected narration" },
+    });
+    expect(prepared).toEqual({
+      text: "Selected decision",
+      spokenText: "Spoken selected decision",
+      mediaUrl: "file:///tmp/decision.ogg",
+      channelData: { ...selected.channelData, speechHint: "voice" },
+    });
+    const transformed = setReplyPayloadMetadata(
+      { text: "Prepared decision" },
+      { ttsExplicit: true, tts: { text: "Prepared narration" } },
+    );
+    maybeApplyTtsToPayloadMock.mockResolvedValueOnce(transformed);
+    const preparedWithOwnMetadata = await prepareNotificationPayload?.(
+      setReplyPayloadMetadata(
+        { text: "Selected decision" },
+        { tts: { text: "Selected narration" } },
+      ),
+    );
+    expect(getReplyPayloadMetadata(preparedWithOwnMetadata!)).toEqual({
+      ttsExplicit: true,
+      tts: { text: "Prepared narration" },
+    });
   });
 
   it("mirrors the effective outbound payload after send hooks rewrite delivery text", async () => {

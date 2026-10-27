@@ -12,7 +12,6 @@ import {
   createOutboundPayloadPlan,
   projectOutboundPayloadPlanForMirror,
 } from "../../infra/outbound/payloads.js";
-import { hasReplyPayloadContent } from "../../interactive/payload.js";
 import { stringifyRouteThreadId } from "../../plugin-sdk/channel-route.js";
 import { isCronSessionKey } from "../../routing/session-key.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
@@ -44,7 +43,7 @@ import {
   logCronDeliveryError,
   logCronDeliveryErrorDeferred,
   logCronDeliveryWarn,
-  maybeApplyTtsToCronPayloads,
+  prepareCronDeliveryPayloads,
   normalizeSilentReplyText,
   resolveDescendantSubagentFollowup,
   resolveDirectCronDeliveryGeneration,
@@ -259,15 +258,15 @@ export async function dispatchCronDelivery(
         await logCronDeliveryWarn(`[cron:${params.job.id}] ${deliveryError}`);
         return { kind: "suppressed" };
       }
-      const payloadsForDelivery = (
-        await maybeApplyTtsToCronPayloads({
+      const { payloads: payloadsForDelivery, prepareNotificationPayload } =
+        await prepareCronDeliveryPayloads({
           cfg: params.cfgWithAgentDefaults,
           payloads: normalizedPayloads,
           delivery,
           agentId: params.agentId,
           ttsAuto: params.ttsAuto,
-        })
-      ).filter((p) => hasReplyPayloadContent(p, { trimText: true }));
+          requireNotificationReference: params.job.delivery?.requireNotificationReference,
+        });
       if (payloadsForDelivery.length === 0) {
         recordDelivery("not-delivered", "cron delivery payload was empty after TTS");
         return null;
@@ -355,6 +354,7 @@ export async function dispatchCronDelivery(
             accountId: delivery.accountId,
             threadId: delivery.threadId,
             payloads: linkedPayloadsForDelivery,
+            prepareNotificationPayload,
             requireNotificationReference: params.job.delivery?.requireNotificationReference,
             session: deliverySession,
             identity: resolveAgentOutboundIdentity(params.cfgWithAgentDefaults, params.agentId),

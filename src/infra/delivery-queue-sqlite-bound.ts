@@ -6,7 +6,8 @@ import type { OpenClawStateDatabase } from "../state/openclaw-state-db-contract.
 import type { DB as OpenClawStateKyselyDatabase } from "../state/openclaw-state-db.generated.js";
 import {
   NOTIFICATION_RECEIPT_RESOLVED_RETENTION_MS,
-  parseDeliveryQueueNotificationReceipt,
+  NOTIFICATION_TERMINAL_STATES,
+  parseDeliveryQueueNotificationReceipts,
   type DeliveryQueueEntryState,
 } from "./delivery-queue-sqlite.types.js";
 import {
@@ -120,7 +121,7 @@ export function pruneNotificationDeliveryReceipts(
     .selectFrom("delivery_queue_entries")
     .select(["queue_name", "id", "entry_json"])
     .where("status", "in", ["completed", "failed"])
-    .where("recovery_state", "=", "completed_notification");
+    .where("recovery_state", "in", NOTIFICATION_TERMINAL_STATES);
   if (exact) {
     query = query.where("queue_name", "=", exact.queueName).where("id", "=", exact.id);
   }
@@ -132,25 +133,33 @@ export function pruneNotificationDeliveryReceipts(
     } catch {
       continue;
     }
-    const receipt = parseDeliveryQueueNotificationReceipt(
-      asNullableRecord(entry)?.notificationReceipt,
-    );
-    if (
-      receipt?.resolvedAt === undefined ||
-      receipt.resolvedAt > now - NOTIFICATION_RECEIPT_RESOLVED_RETENTION_MS
-    ) {
+    const record = asNullableRecord(entry);
+    const receipts = parseDeliveryQueueNotificationReceipts(record?.notificationReceipts);
+    if (!record || !receipts) {
       continue;
     }
-    const result = executeSqliteQuerySync(
-      db,
-      queueDb
-        .deleteFrom("delivery_queue_entries")
-        .where("queue_name", "=", row.queue_name)
-        .where("id", "=", row.id)
-        .where("entry_json", "=", row.entry_json)
-        .where("status", "in", ["completed", "failed"])
-        .where("recovery_state", "=", "completed_notification"),
+    const retained = receipts.filter(
+      (receipt) =>
+        receipt.resolvedAt === undefined ||
+        receipt.resolvedAt > now - NOTIFICATION_RECEIPT_RESOLVED_RETENTION_MS,
     );
+    if (retained.length === receipts.length) {
+      continue;
+    }
+    const expected = { queue_name: row.queue_name, id: row.id, entry_json: row.entry_json };
+    const mutation = retained.length
+      ? queueDb
+          .updateTable("delivery_queue_entries")
+          .set({ entry_json: JSON.stringify({ ...record, notificationReceipts: retained }) })
+          .where((eb) => eb.and(expected))
+          .where("status", "in", ["completed", "failed"])
+          .where("recovery_state", "in", NOTIFICATION_TERMINAL_STATES)
+      : queueDb
+          .deleteFrom("delivery_queue_entries")
+          .where((eb) => eb.and(expected))
+          .where("status", "in", ["completed", "failed"])
+          .where("recovery_state", "in", NOTIFICATION_TERMINAL_STATES);
+    const result = executeSqliteQuerySync(db, mutation);
     changed = (result.numAffectedRows ?? 0n) > 0n || changed;
   }
   return changed;
@@ -205,7 +214,7 @@ function pruneOrdinaryDeliveryReceipts(db: DatabaseSync, now: number): boolean {
           eb("recovery_state", "not in", [
             "completed_permanent",
             "completed_bounded",
-            "completed_notification",
+            ...NOTIFICATION_TERMINAL_STATES,
           ]),
         ]),
       ),

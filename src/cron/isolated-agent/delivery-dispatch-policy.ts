@@ -1,5 +1,5 @@
 /** Formatting, retry, and idempotency policy for direct cron delivery. */
-import type { ReplyPayload } from "../../auto-reply/reply-payload.js";
+import { copyReplyPayloadMetadata, type ReplyPayload } from "../../auto-reply/reply-payload.js";
 import type { NormalizeReplySkipReason } from "../../auto-reply/reply/normalize-reply-skip-reason.js";
 import {
   SILENT_REPLY_TOKEN,
@@ -22,6 +22,11 @@ import * as deliveryRecovery from "../../infra/delivery-recovery.shared.js";
 import { isFastTestRuntimeEnv } from "../../infra/env.js";
 import { normalizeTargetForProvider } from "../../infra/outbound/target-normalization.js";
 import { retryAsync } from "../../infra/retry.js";
+import { hasReplyPayloadContent } from "../../interactive/payload.js";
+import {
+  NOTIFICATION_BATCH_CHANNEL_DATA_KEY,
+  NOTIFICATION_CHANNEL_DATA_KEY,
+} from "../../notifications/proposal.js";
 import { stringifyRouteThreadId } from "../../plugin-sdk/channel-route.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import { shouldAttemptTtsPayload } from "../../tts/tts-config.js";
@@ -286,6 +291,54 @@ export async function maybeApplyTtsToCronPayloads(params: {
       }),
     ),
   );
+}
+
+/** Source-controlled cron speech consumes only the topics selected by outbound admission. */
+export async function prepareCronDeliveryPayloads(
+  params: Parameters<typeof maybeApplyTtsToCronPayloads>[0] & {
+    requireNotificationReference?: boolean;
+  },
+): Promise<{
+  payloads: ReplyPayload[];
+  prepareNotificationPayload?: (payload: ReplyPayload) => Promise<ReplyPayload>;
+}> {
+  const deferNotificationTts =
+    params.requireNotificationReference ||
+    params.payloads.some(
+      ({ channelData }) =>
+        channelData &&
+        (NOTIFICATION_CHANNEL_DATA_KEY in channelData ||
+          NOTIFICATION_BATCH_CHANNEL_DATA_KEY in channelData),
+    );
+  if (!deferNotificationTts) {
+    return {
+      payloads: (await maybeApplyTtsToCronPayloads(params)).filter((payload) =>
+        hasReplyPayloadContent(payload, { trimText: true }),
+      ),
+    };
+  }
+  return {
+    payloads: params.payloads,
+    // Ephemeral preparation runs after source selection; custody stores its result for recovery.
+    prepareNotificationPayload: async (payload) => {
+      const transformed = await maybeApplyTtsToCronPayloads({ ...params, payloads: [payload] });
+      const prepared = transformed[0];
+      if (
+        transformed.length !== 1 ||
+        !prepared ||
+        !hasReplyPayloadContent(prepared, { trimText: true })
+      ) {
+        throw new Error("cron notification payload was empty or incoherent after TTS");
+      }
+      const merged = {
+        ...prepared,
+        ...(payload.channelData
+          ? { channelData: { ...prepared.channelData, ...payload.channelData } }
+          : {}),
+      };
+      return copyReplyPayloadMetadata(prepared, copyReplyPayloadMetadata(payload, merged));
+    },
+  };
 }
 
 export function buildDirectCronDeliveryIdempotencyKey(params: {

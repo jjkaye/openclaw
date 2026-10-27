@@ -20,7 +20,8 @@ import {
   hasLiveDeliveryQueueClaim,
   inferDeliveryQueueFailureRetention,
   parseDeliveryQueueCompletionRetention,
-  parseDeliveryQueueNotificationReceipt,
+  NOTIFICATION_TERMINAL_STATES,
+  parseDeliveryQueueNotificationReceipts,
   projectDeliveryQueueTerminalEntry,
   resolveDeliveryQueueAttemptCount,
   type DeliveryQueueEntryState,
@@ -102,7 +103,7 @@ export function expireStagingAndLoadDeliveryQueueEntriesInDatabase(
 type DeliveryQueueOwner = {
   status: DeliveryQueueStoredStatus;
   settlementPending?: true;
-  notificationReceipt?: DeliveryQueueNotificationReceipt;
+  notificationReceipts?: readonly DeliveryQueueNotificationReceipt[];
   acknowledgedAt?: number;
 };
 
@@ -123,7 +124,7 @@ export function listNotificationDeliveryReceiptsInDatabase(
         eb.or([
           eb.and([
             eb("status", "in", ["completed", "failed"]),
-            eb("recovery_state", "=", "completed_notification"),
+            eb("recovery_state", "in", NOTIFICATION_TERMINAL_STATES),
           ]),
           ...(input.includePending ? [eb("status", "in", ["pending", "failed"])] : []),
         ]),
@@ -133,29 +134,36 @@ export function listNotificationDeliveryReceiptsInDatabase(
   ).rows;
   return rows.flatMap((row) => {
     const entry = safeParseJsonRecord(row.entry_json);
-    const notificationReceipt = parseDeliveryQueueNotificationReceipt(entry?.notificationReceipt);
+    const receipts = parseDeliveryQueueNotificationReceipts(entry?.notificationReceipts);
+    if (entry?.notificationReceipts !== undefined && !receipts) {
+      throw new Error("Invalid notification delivery receipts");
+    }
     if (
-      !notificationReceipt ||
-      (input.topicKey && notificationReceipt.topicKey !== input.topicKey) ||
+      !receipts ||
       (row.status !== "pending" && row.status !== "completed" && row.status !== "failed")
     ) {
       return [];
     }
+    const status = row.status;
     const acknowledgedAt = entry?.acknowledgedAt;
-    return [
-      {
-        queueName: row.queue_name,
-        id: row.id,
-        status: row.status,
-        notificationReceipt,
-        ...(typeof acknowledgedAt === "number" &&
-        Number.isSafeInteger(acknowledgedAt) &&
-        acknowledgedAt >= 0
-          ? { acknowledgedAt }
-          : {}),
-        ...(row.recovery_state ? { recoveryState: row.recovery_state } : {}),
-      },
-    ];
+    return receipts.flatMap((notificationReceipt) =>
+      input.topicKey && notificationReceipt.topicKey !== input.topicKey
+        ? []
+        : [
+            {
+              queueName: row.queue_name,
+              id: row.id,
+              status,
+              notificationReceipt,
+              ...(typeof acknowledgedAt === "number" &&
+              Number.isSafeInteger(acknowledgedAt) &&
+              acknowledgedAt >= 0
+                ? { acknowledgedAt }
+                : {}),
+              ...(row.recovery_state ? { recoveryState: row.recovery_state } : {}),
+            },
+          ],
+    );
   });
 }
 
@@ -177,35 +185,42 @@ export function updateNotificationDeliveryReceiptResolutionInDatabase(
       .selectFrom("delivery_queue_entries")
       .select(["queue_name", "id", "entry_json"])
       .where("status", "in", ["completed", "failed"])
-      .where("recovery_state", "=", "completed_notification"),
+      .where("recovery_state", "in", NOTIFICATION_TERMINAL_STATES),
   ).rows;
   let changed = 0;
   for (const row of rows) {
     const entry = safeParseJsonRecord(row.entry_json);
-    const receipt = parseDeliveryQueueNotificationReceipt(entry?.notificationReceipt);
-    if (!entry || !receipt || receipt.ownerKey !== input.ownerKey) {
+    const receipts = parseDeliveryQueueNotificationReceipts(entry?.notificationReceipts);
+    if (!entry || !receipts) {
       continue;
     }
-    const resolvedAt =
-      input.resolvedAt === null ? undefined : (receipt.resolvedAt ?? input.resolvedAt);
-    if (resolvedAt === receipt.resolvedAt) {
+    let updated = false;
+    const notificationReceipts = receipts.map((receipt) => {
+      if (receipt.ownerKey !== input.ownerKey) {
+        return receipt;
+      }
+      const resolvedAt =
+        input.resolvedAt === null ? undefined : (receipt.resolvedAt ?? input.resolvedAt);
+      if (resolvedAt === receipt.resolvedAt) {
+        return receipt;
+      }
+      updated = true;
+      const { resolvedAt: _previousResolvedAt, ...identity } = receipt;
+      return Object.assign(identity, resolvedAt === undefined ? {} : { resolvedAt });
+    });
+    if (!updated) {
       continue;
     }
-    const { resolvedAt: _previousResolvedAt, ...identity } = receipt;
-    const notificationReceipt = {
-      ...identity,
-      ...(resolvedAt === undefined ? {} : { resolvedAt }),
-    };
     const result = executeSqliteQuerySync(
       database.db,
       queueDb
         .updateTable("delivery_queue_entries")
-        .set({ entry_json: JSON.stringify({ ...entry, notificationReceipt }) })
+        .set({ entry_json: JSON.stringify({ ...entry, notificationReceipts }) })
         .where("queue_name", "=", row.queue_name)
         .where("id", "=", row.id)
         .where("entry_json", "=", row.entry_json)
         .where("status", "in", ["completed", "failed"])
-        .where("recovery_state", "=", "completed_notification"),
+        .where("recovery_state", "in", NOTIFICATION_TERMINAL_STATES),
     );
     changed += Number(result.numAffectedRows ?? 0n);
   }
@@ -277,6 +292,10 @@ function selectDeliveryQueueEntryOwners(
           .then(eb.ref("entry_json"))
           .when("completed_notification")
           .then(eb.ref("entry_json"))
+          .when("completed_notification_canceled")
+          .then(eb.ref("entry_json"))
+          .when("completed_notification_suppressed")
+          .then(eb.ref("entry_json"))
           .else(null)
           .end()
           .as("entry_json"),
@@ -299,7 +318,7 @@ function selectDeliveryQueueEntryOwners(
     if (row.entry_json === null) {
       continue;
     }
-    if (row.recovery_state === "completed_notification") {
+    if (NOTIFICATION_TERMINAL_STATES.some((state) => state === row.recovery_state)) {
       pruned =
         pruneNotificationDeliveryReceipts(database.db, Date.now(), {
           queueName: row.queue_name,
@@ -330,15 +349,18 @@ function selectDeliveryQueueEntryOwners(
   for (const row of rows) {
     if (row.status) {
       const entry =
-        row.recovery_state === "completed_notification" && row.entry_json !== null
+        NOTIFICATION_TERMINAL_STATES.some((state) => state === row.recovery_state) &&
+        row.entry_json !== null
           ? safeParseJsonRecord(row.entry_json)
           : null;
-      const notificationReceipt = parseDeliveryQueueNotificationReceipt(entry?.notificationReceipt);
+      const notificationReceipts = parseDeliveryQueueNotificationReceipts(
+        entry?.notificationReceipts,
+      );
       const acknowledgedAt = entry?.acknowledgedAt;
       const namespaces = owners.get(row.id) ?? new Map<string, DeliveryQueueOwner>();
       namespaces.set(row.queue_name, {
         status: row.status,
-        ...(notificationReceipt ? { notificationReceipt } : {}),
+        ...(notificationReceipts ? { notificationReceipts } : {}),
         ...(typeof acknowledgedAt === "number" &&
         Number.isSafeInteger(acknowledgedAt) &&
         acknowledgedAt >= 0
@@ -388,10 +410,18 @@ export function completeDeliveryQueueEntryInDatabase(
   database: OpenClawStateDatabase,
   queueName: string,
   id: string,
+  notificationSuppressed?: true,
 ): void {
   const now = Date.now();
   const current = loadDeliveryQueueEntryInDatabase(database, queueName, id, "pending");
-  completeLoadedDeliveryQueueEntryInDatabase(database, queueName, id, current, now);
+  completeLoadedDeliveryQueueEntryInDatabase(
+    database,
+    queueName,
+    id,
+    current,
+    now,
+    notificationSuppressed,
+  );
 }
 
 /** Shared completion policy; reuse a prior read only while its write transaction remains held. */
@@ -401,6 +431,7 @@ export function completeLoadedDeliveryQueueEntryInDatabase(
   id: string,
   current: DeliveryQueueEntryState | null,
   now = Date.now(),
+  notificationSuppressed?: true,
 ): void {
   const requestedRetention = current?.completionRetention;
   const retention = parseDeliveryQueueCompletionRetention(requestedRetention, id);
@@ -408,7 +439,12 @@ export function completeLoadedDeliveryQueueEntryInDatabase(
     throw new Error(`Invalid bounded delivery completion retention: ${queueName}/${id}`);
   }
   const tombstone = projectDeliveryQueueTerminalEntry(
-    { id, retryCount: 0, notificationReceipt: current?.notificationReceipt },
+    {
+      id,
+      retryCount: 0,
+      notificationReceipts: current?.notificationReceipts,
+      notificationSuppressed,
+    },
     now,
     "completed",
     retention,
@@ -516,6 +552,12 @@ export function countFailedDeliveryQueueEntriesInDatabase(database: OpenClawStat
         eb.fn.min<number>("failed_at").as("oldestFailedAt"),
       ])
       .where("status", "=", "failed")
+      .where((eb) =>
+        eb.or([
+          eb("recovery_state", "is", null),
+          eb("recovery_state", "!=", "completed_notification_canceled"),
+        ]),
+      )
       .groupBy("queue_name")
       .orderBy("queue_name", "asc"),
   ).rows;
@@ -555,6 +597,7 @@ export type TerminalizePendingDeliveryQueueEntryParams = {
   id: string;
   entry: DeliveryQueueEntryState;
   expectedStatus?: "pending" | "failed";
+  notificationCanceled?: true;
 };
 
 /** Validate and serialize terminal custody before a standalone call opens its database. */
@@ -568,7 +611,12 @@ export function prepareDeliveryQueueTerminalEntry(
   const expectedJson = JSON.stringify(params.entry);
   const retention = inferDeliveryQueueFailureRetention(params.entry, params.id, params.queueName);
   const failedEntry = retention
-    ? projectDeliveryQueueTerminalEntry(params.entry, now, "failed", retention)
+    ? projectDeliveryQueueTerminalEntry(
+        { ...params.entry, ...(params.notificationCanceled ? { notificationCanceled: true } : {}) },
+        now,
+        "failed",
+        retention,
+      )
     : undefined;
   return {
     queueName: params.queueName,

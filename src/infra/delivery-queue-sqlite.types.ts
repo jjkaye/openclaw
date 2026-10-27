@@ -6,6 +6,11 @@ export type DeliveryQueueCompletionRetention =
   | Readonly<{ idPrefix: string; maxAgeMs: number; maxEntries: number }>;
 
 export const NOTIFICATION_RECEIPT_RESOLVED_RETENTION_MS = 30 * 24 * 60 * 60_000;
+export const NOTIFICATION_TERMINAL_STATES = [
+  "completed_notification",
+  "completed_notification_canceled",
+  "completed_notification_suppressed",
+] as const;
 
 /** Opaque admission identity only; completed receipts never retain notification copy. */
 export type DeliveryQueueNotificationReceipt = Readonly<{
@@ -81,6 +86,26 @@ export function parseDeliveryQueueNotificationReceipt(
   };
 }
 
+/** One physical notification owns a bounded, unambiguous set of topic receipts. */
+export function parseDeliveryQueueNotificationReceipts(
+  value: unknown,
+): readonly DeliveryQueueNotificationReceipt[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 16) {
+    return undefined;
+  }
+  const receipts: DeliveryQueueNotificationReceipt[] = [];
+  const topics = new Set<string>();
+  for (const item of value) {
+    const receipt = parseDeliveryQueueNotificationReceipt(item);
+    if (!receipt || topics.has(receipt.topicKey)) {
+      return undefined;
+    }
+    topics.add(receipt.topicKey);
+    receipts.push(receipt);
+  }
+  return receipts;
+}
+
 /** Parse only the shipped completion-retention shape for one exact producer ID. */
 export function parseDeliveryQueueCompletionRetention(
   value: unknown,
@@ -123,7 +148,7 @@ export function inferDeliveryQueueFailureRetention(
   queueName?: string,
   legacyAmbiguousSendEvidence = false,
 ): DeliveryQueueCompletionRetention | undefined {
-  if (parseDeliveryQueueNotificationReceipt(entry.notificationReceipt)) {
+  if (parseDeliveryQueueNotificationReceipts(entry.notificationReceipts)) {
     return "permanent";
   }
   const explicit =
@@ -173,7 +198,9 @@ export type DeliveryQueueEntryState = {
   /** Durable delivery-call count reserved before invoking the provider path. */
   attemptCount?: number;
   completionRetention?: DeliveryQueueCompletionRetention;
-  notificationReceipt?: DeliveryQueueNotificationReceipt;
+  notificationReceipts?: readonly DeliveryQueueNotificationReceipt[];
+  notificationCanceled?: true;
+  notificationSuppressed?: true;
   /** Failure-only ownership fence; successful acknowledgement ignores this field. */
   retainOnFailure?: true;
   acknowledgedAt?: number;
@@ -210,20 +237,32 @@ export function hasLiveDeliveryQueueClaim(
 
 /** Strip a terminal queue row to the producer policy needed for admission. */
 export function projectDeliveryQueueTerminalEntry(
-  entry: Pick<DeliveryQueueEntryState, "id" | "retryCount" | "notificationReceipt">,
+  entry: Pick<
+    DeliveryQueueEntryState,
+    "id" | "retryCount" | "notificationReceipts" | "notificationCanceled" | "notificationSuppressed"
+  > & {
+    settlement?: { notificationCanceled?: true };
+  },
   terminalAt: number,
   terminal: "completed" | "failed",
   completionRetention?: DeliveryQueueCompletionRetention,
 ): DeliveryQueueEntryState {
-  const notificationReceipt = parseDeliveryQueueNotificationReceipt(entry.notificationReceipt);
-  if (entry.notificationReceipt !== undefined && !notificationReceipt) {
-    throw new Error("Invalid notification delivery receipt");
+  const notificationReceipts = parseDeliveryQueueNotificationReceipts(entry.notificationReceipts);
+  if (entry.notificationReceipts !== undefined && !notificationReceipts) {
+    throw new Error("Invalid notification delivery receipts");
   }
-  const retainedPolicy = notificationReceipt ? "permanent" : completionRetention;
+  const retainedPolicy = notificationReceipts ? "permanent" : completionRetention;
   const retryCount =
     Number.isSafeInteger(entry.retryCount) && entry.retryCount >= 0 ? entry.retryCount : 0;
-  const recoveryState = notificationReceipt
-    ? "completed_notification"
+  const canceled =
+    notificationReceipts && (entry.notificationCanceled || entry.settlement?.notificationCanceled);
+  const suppressed = notificationReceipts && entry.notificationSuppressed;
+  const recoveryState = notificationReceipts
+    ? canceled
+      ? "completed_notification_canceled"
+      : suppressed
+        ? "completed_notification_suppressed"
+        : "completed_notification"
     : retainedPolicy === "permanent"
       ? "completed_permanent"
       : retainedPolicy
@@ -233,9 +272,13 @@ export function projectDeliveryQueueTerminalEntry(
     id: entry.id,
     enqueuedAt: terminalAt,
     retryCount,
-    ...(terminal === "completed" ? { acknowledgedAt: terminalAt } : { failedAt: terminalAt }),
+    ...(terminal === "completed"
+      ? !canceled && !suppressed
+        ? { acknowledgedAt: terminalAt }
+        : {}
+      : { failedAt: terminalAt }),
     ...(retainedPolicy ? { completionRetention: retainedPolicy } : {}),
-    ...(notificationReceipt ? { notificationReceipt } : {}),
+    ...(notificationReceipts ? { notificationReceipts } : {}),
     ...(recoveryState ? { recoveryState } : {}),
   };
 }

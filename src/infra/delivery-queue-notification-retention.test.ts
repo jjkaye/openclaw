@@ -31,9 +31,12 @@ describe("notification receipt database retention", () => {
 
   afterEach(() => db.close());
 
-  const seed = (id: string, notificationReceipt: DeliveryQueueNotificationReceipt) => {
+  const seedGroup = (
+    id: string,
+    notificationReceipts: readonly DeliveryQueueNotificationReceipt[],
+  ) => {
     const entry = projectDeliveryQueueTerminalEntry(
-      { id, retryCount: 0, notificationReceipt },
+      { id, retryCount: 0, notificationReceipts },
       1,
       "completed",
     );
@@ -46,6 +49,7 @@ describe("notification receipt database retention", () => {
       entry.enqueuedAt,
     );
   };
+  const seed = (id: string, member: DeliveryQueueNotificationReceipt) => seedGroup(id, [member]);
 
   const ids = () =>
     db
@@ -75,7 +79,9 @@ describe("notification receipt database retention", () => {
       "malformed",
       "completed",
       "completed_notification",
-      JSON.stringify({ notificationReceipt: { ...receipt, localDate: "2026-02-30", resolvedAt } }),
+      JSON.stringify({
+        notificationReceipts: [{ ...receipt, localDate: "2026-02-30", resolvedAt }],
+      }),
       1,
     );
     expect(
@@ -84,5 +90,22 @@ describe("notification receipt database retention", () => {
     expect(ids()).toEqual(["malformed", "sibling"]);
     expect(pruneNotificationDeliveryReceipts(db, now)).toBe(true);
     expect(ids()).toEqual(["malformed"]);
+  });
+
+  it("prunes expired members without erasing an open sibling or changing physical acknowledgement", () => {
+    const expired = { ...receipt, resolvedAt: now - NOTIFICATION_RECEIPT_RESOLVED_RETENTION_MS };
+    const open = { ...receipt, ownerKey: "d".repeat(64), topicKey: "e".repeat(64) };
+    seedGroup("mixed", [expired, open]);
+    expect(pruneNotificationDeliveryReceipts(db, now)).toBe(true);
+    const stored = db
+      .prepare("SELECT entry_json FROM delivery_queue_entries WHERE id = ?")
+      .get("mixed");
+    expect(JSON.parse(String(stored?.entry_json))).toMatchObject({
+      id: "mixed",
+      acknowledgedAt: 1,
+      notificationReceipts: [open],
+    });
+    expect(ids()).toEqual(["mixed"]);
+    expect(pruneNotificationDeliveryReceipts(db, now)).toBe(false);
   });
 });

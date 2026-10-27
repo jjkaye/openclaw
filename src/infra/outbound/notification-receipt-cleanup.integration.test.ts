@@ -61,13 +61,15 @@ describe("source-owned notification receipt cleanup", () => {
         to: "!owner:fixture",
         payloads: [{ text: "private completed notification" }],
         completionRetention: "permanent",
-        notificationReceipt: {
-          ownerKey,
-          topicKey: "a".repeat(64),
-          revisionKey: "b".repeat(64),
-          slot: 0,
-          localDate: "2026-10-27",
-        },
+        notificationReceipts: [
+          {
+            ownerKey,
+            topicKey: "a".repeat(64),
+            revisionKey: "b".repeat(64),
+            slot: 0,
+            localDate: "2026-10-27",
+          },
+        ],
       },
       id,
       fixtures.tmpDir(),

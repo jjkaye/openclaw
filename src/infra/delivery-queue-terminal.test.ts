@@ -99,7 +99,7 @@ describe("delivery queue pending terminal transition", () => {
           enqueuedAt: Date.now(),
           retryCount: 0,
           completionRetention: boundedRetention,
-          notificationReceipt,
+          notificationReceipts: [notificationReceipt],
           payloads: [{ text: "private notification body" }],
           target: "private recipient",
         },
@@ -116,7 +116,7 @@ describe("delivery queue pending terminal transition", () => {
         retryCount: 0,
         acknowledgedAt: Date.now(),
         completionRetention: "permanent",
-        notificationReceipt,
+        notificationReceipts: [notificationReceipt],
         recoveryState: "completed_notification",
       });
 
@@ -175,7 +175,7 @@ describe("delivery queue pending terminal transition", () => {
             id,
             enqueuedAt: now,
             retryCount: 0,
-            notificationReceipt: { ...notificationReceipt, resolvedAt },
+            notificationReceipts: [{ ...notificationReceipt, resolvedAt }],
           },
           stateDir,
         });
@@ -210,7 +210,7 @@ describe("delivery queue pending terminal transition", () => {
       id,
       JSON.stringify({
         id,
-        notificationReceipt: { topicKey: "not-a-hash", resolvedAt: 0 },
+        notificationReceipts: [{ topicKey: "not-a-hash", resolvedAt: 0 }],
       }),
     );
     await pruneExpiredDeliveryQueueTombstones(stateDir);
@@ -235,7 +235,7 @@ describe("delivery queue pending terminal transition", () => {
           id,
           enqueuedAt: now,
           retryCount: 0,
-          notificationReceipt: receipt,
+          notificationReceipts: [receipt],
           payloads: [{ text: "private body" }],
           ...entry,
         },
@@ -247,11 +247,11 @@ describe("delivery queue pending terminal transition", () => {
     });
     completeDeliveryQueueEntryInDatabase(database, queueName, "completed");
     seed("pending", {
-      notificationReceipt: { ...receipt, revisionKey: "c".repeat(64) },
+      notificationReceipts: [{ ...receipt, revisionKey: "c".repeat(64) }],
       recoveryState: "unknown_after_send",
     });
     seed("partial", { recoveryState: "settlement_pending" }, "failed");
-    seed("unrelated", { notificationReceipt: { ...receipt, topicKey: "d".repeat(64) } });
+    seed("unrelated", { notificationReceipts: [{ ...receipt, topicKey: "d".repeat(64) }] });
 
     const terminal = await listNotificationDeliveryReceipts({}, stateDir);
     expect(terminal.map((entry) => entry.id)).toEqual(["completed"]);
@@ -270,7 +270,7 @@ describe("delivery queue pending terminal transition", () => {
     );
     expect(owner).toMatchObject({
       status: "completed",
-      notificationReceipt: receipt,
+      notificationReceipts: [receipt],
       acknowledgedAt: expect.any(Number),
     });
   });
@@ -288,7 +288,7 @@ describe("delivery queue pending terminal transition", () => {
     seedDeliveryQueueEntry({
       queueName,
       stateDir,
-      entry: { id, enqueuedAt: now, retryCount: 0, notificationReceipt: receipt },
+      entry: { id, enqueuedAt: now, retryCount: 0, notificationReceipts: [receipt] },
     });
     completeDeliveryQueueEntryInDatabase(
       openOpenClawStateDatabase({ env: { ...process.env, OPENCLAW_STATE_DIR: stateDir } }),

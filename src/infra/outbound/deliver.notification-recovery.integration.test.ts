@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { admitNotification } from "../../notifications/admission.js";
+import { createNotificationCandidate } from "../../notifications/admission.js";
 import type { NotificationProposal } from "../../notifications/proposal.js";
+import { electNotificationReceipt } from "../../notifications/receipt-policy.js";
 import type { NotificationSourceState } from "../../notifications/source-types.js";
 import { createPluginRegistry } from "../../plugins/registry.js";
 import { resetPluginRuntimeStateForTest, setActivePluginRegistry } from "../../plugins/runtime.js";
@@ -16,6 +17,7 @@ import {
   installDeliveryQueueTmpDirHooks,
   readQueuedEntry,
 } from "./delivery-queue.test-helpers.js";
+import type { PreparedOutboundBatch } from "./prepared-batch.js";
 
 let deliver: typeof import("./deliver.js").deliverOutboundPayloads;
 const proposal: NotificationProposal = {
@@ -75,28 +77,30 @@ describe("notification authority after durable recovery", () => {
     return resolve;
   };
 
-  const seedPending = async () => {
-    const admission = admitNotification({
+  const seedPending = async (preparedBatch?: PreparedOutboundBatch) => {
+    const candidate = createNotificationCandidate(
       proposal,
-      context: {
+      {
         agentId: "fixture-agent",
         recipient: { channel: "matrix", to: "!owner:fixture" },
       },
-      state: originalState,
-      deliveries: [],
-      now: Date.now(),
-    });
-    if (!admission) {
+      originalState,
+      0,
+    );
+    const receipt = electNotificationReceipt(candidate, [], Date.now());
+    if (!receipt) {
       throw new Error("Expected initial notification admission");
     }
+    const admission = { id: "notification-recovery-fixture", receipt };
     await enqueueDeliveryOnce(
       {
         channel: "matrix",
         to: "!owner:fixture",
         session: { agentId: "fixture-agent" },
         payloads: [{ text: "private queued decision" }],
-        notification: proposal,
-        notificationReceipt: admission.receipt,
+        ...(preparedBatch ? { preparedBatch } : {}),
+        notificationBlocks: [{ notification: proposal, text: "private queued decision" }],
+        notificationReceipts: [admission.receipt],
         completionRetention: "permanent",
         queuePolicy: "required",
       },
@@ -104,8 +108,8 @@ describe("notification authority after durable recovery", () => {
       fixtures.tmpDir(),
     );
     expect(readQueuedEntry(fixtures.tmpDir(), admission.id)).toMatchObject({
-      notification: proposal,
-      notificationReceipt: admission.receipt,
+      notificationBlocks: [{ notification: proposal, text: "private queued decision" }],
+      notificationReceipts: [admission.receipt],
     });
     await closeStateDatabaseForTest();
     return admission.id;
@@ -163,6 +167,40 @@ describe("notification authority after durable recovery", () => {
     expect(await listNotificationDeliveryReceipts({}, fixtures.tmpDir())).toMatchObject([
       { id, status: "completed" },
     ]);
+  });
+
+  it("settles a recovered group with no accepted prepared payloads without reconstructing its copy", async () => {
+    const preparedBatch: PreparedOutboundBatch = {
+      schemaVersion: 1,
+      sourcePayloadCount: 1,
+      entries: [
+        { sourceIndex: 0, status: "suppressed", reason: "cancelled_by_message_sending_hook" },
+      ],
+    };
+    const id = await seedPending(preparedBatch);
+    const currentResolve = installSource(originalState);
+    const prepareNotificationPayload = vi.fn(async () => ({ text: "must not rebuild old copy" }));
+    const result = await recoverPendingDeliveries({
+      cfg: {},
+      stateDir: fixtures.tmpDir(),
+      log: createRecoveryLog(),
+      deliver: async (params) => {
+        expect(params.payloads).toEqual([]);
+        expect(params.preparedBatch).toEqual(preparedBatch);
+        return deliver({ ...params, prepareNotificationPayload });
+      },
+    });
+    expect(result).toMatchObject({ recovered: 1, failed: 0 });
+    expect(currentResolve).toHaveBeenCalled();
+    expect(oldResolve).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(prepareNotificationPayload).not.toHaveBeenCalled();
+    expect(await listNotificationDeliveryReceipts({}, fixtures.tmpDir())).toMatchObject([
+      { id, status: "completed", recoveryState: "completed_notification_suppressed" },
+    ]);
+    expect(JSON.stringify(readQueuedEntry(fixtures.tmpDir(), id))).not.toContain(
+      "private queued decision",
+    );
   });
 
   it("retains the same occurrence during a source outage and resumes through native recovery", async () => {
