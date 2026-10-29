@@ -9,6 +9,7 @@ import {
 } from "../../auto-reply/reply-payload.js";
 import { SILENT_REPLY_TOKEN } from "../../auto-reply/tokens.js";
 import type { ChannelMessagingAdapter } from "../../channels/plugins/types.public.js";
+import * as backoff from "../../infra/backoff.js";
 import * as deliveryQueueSqlite from "../../infra/delivery-queue-sqlite.js";
 import { resolveAdmittedCronCompletionStatus } from "../completion-status.js";
 
@@ -195,7 +196,10 @@ vi.mock("./subagent-followup.runtime.js", async () => {
 import { retireSessionMcpRuntime } from "../../agents/agent-bundle-mcp-tools.js";
 import { appendAssistantMessageToSessionTranscript } from "../../config/sessions/transcript.runtime.js";
 import { callGateway } from "../../gateway/call.js";
-import { PlatformMessageNotDispatchedError } from "../../infra/outbound/deliver-types.js";
+import {
+  OutboundDeliveryError,
+  PlatformMessageNotDispatchedError,
+} from "../../infra/outbound/deliver-types.js";
 import { deliverOutboundPayloads } from "../../infra/outbound/deliver.js";
 import {
   ensureOutboundSessionEntry,
@@ -1668,6 +1672,57 @@ describe("dispatchCronDelivery", () => {
           route: expect.objectContaining({ to: "123456", from: "telegram:123456" }),
         });
       }
+    },
+  );
+
+  it.each(["acknowledged", "suppressed", "recovered", "pending"] as const)(
+    "tracks the actual notification recovery owner (%s)",
+    async (settlement) => {
+      vi.spyOn(backoff, "sleepWithAbort").mockResolvedValue(undefined);
+      vi.mocked(deliverOutboundPayloads).mockImplementationOnce(async (delivery) => {
+        delivery.onDeliveryIntent?.({
+          id: "notification-owned",
+          channel: "telegram",
+          to: "123456",
+          queuePolicy: "required",
+        });
+        const error = new OutboundDeliveryError("transient transport failure", {
+          cause: new Error("ECONNREFUSED"),
+          stage: "platform_send",
+        });
+        error.queueCustody = "held";
+        throw error;
+      });
+      const pendingOwner = {
+        status: "pending" as const,
+        pendingEntry: {
+          id: "notification-owned",
+          enqueuedAt: Date.now(),
+          retryCount: 1,
+          recoveryState: "prepared",
+        },
+      };
+      const inspect = vi
+        .mocked(deliveryQueueSqlite.inspectDeliveryQueueReceipt)
+        .mockResolvedValueOnce({ status: undefined, pendingEntry: null });
+      if (settlement === "recovered") inspect.mockResolvedValueOnce(pendingOwner);
+      if (settlement === "pending") inspect.mockResolvedValue(pendingOwner);
+      else
+        inspect.mockResolvedValue({
+          status: "completed",
+          pendingEntry: null,
+          notificationAcknowledged: settlement !== "suppressed",
+        });
+      const state = await dispatchCronDelivery(
+        makeBaseParams({ synthesizedText: "A useful notification" }),
+      );
+      expect(deliverOutboundPayloads).toHaveBeenCalledOnce();
+      expect(inspect.mock.calls[1]?.[1]).toBe("notification-owned");
+      expect(state.deliveryState.status).toBe(
+        settlement === "acknowledged" || settlement === "recovered" ? "delivered" : "unknown",
+      );
+      expect(state.deliverySuppressionReason).toBeUndefined();
+      if (settlement === "pending") expect(backoff.sleepWithAbort).toHaveBeenCalledTimes(119);
     },
   );
 

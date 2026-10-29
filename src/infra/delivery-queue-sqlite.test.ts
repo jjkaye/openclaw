@@ -24,6 +24,7 @@ import {
   completeDeliveryQueueEntryInDatabase,
   deleteDeliveryQueueEntryInDatabase,
   getDeliveryQueueEntryOwnersInDatabase,
+  inspectDeliveryQueueReceiptInDatabase,
   updateDeliveryQueueEntryInDatabase,
 } from "./delivery-queue-sqlite.kernel.js";
 import {
@@ -81,6 +82,52 @@ describe("delivery-queue-sqlite corrupt JSON resilience", () => {
       stateDir,
     });
   }
+
+  it("distinguishes acknowledged notification custody from suppressed, canceled, or malformed receipts", () => {
+    const database = openTestDatabase();
+    const receipt = {
+      ownerKey: "a".repeat(64),
+      topicKey: "b".repeat(64),
+      revisionKey: "c".repeat(64),
+      slot: 0,
+      localDate: "2026-10-29",
+    };
+    for (const [index, state, valid, ack, expected] of [
+      [0, "completed_notification", true, true, true],
+      [1, "completed_notification_suppressed", true, true, false],
+      [2, "completed_notification_canceled", true, true, false],
+      [3, "completed_notification", false, true, false],
+      [4, "completed_notification", true, false, false],
+    ] as const) {
+      const id = `notification-${index}`;
+      seedDeliveryQueueEntry({
+        queueName: QUEUE,
+        entry: { id, enqueuedAt: Date.now(), retryCount: 0 },
+        stateDir,
+      });
+      database.db
+        .prepare(
+          "UPDATE delivery_queue_entries SET status = 'completed', recovery_state = ?, entry_json = ? WHERE queue_name = ? AND id = ?",
+        )
+        .run(
+          state,
+          JSON.stringify({
+            id,
+            notificationReceipts: valid ? [receipt] : "invalid",
+            ...(ack ? { acknowledgedAt: Date.now() } : {}),
+          }),
+          QUEUE,
+          id,
+        );
+      expect(
+        inspectDeliveryQueueReceiptInDatabase(database, {
+          queueName: QUEUE,
+          id,
+          includePending: true,
+        }),
+      ).toMatchObject({ status: "completed", notificationAcknowledged: expected });
+    }
+  });
 
   describe("loadDeliveryQueueEntry", () => {
     it("returns null for a row with corrupted entry_json", () => {

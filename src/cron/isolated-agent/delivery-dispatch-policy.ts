@@ -370,28 +370,32 @@ export async function isCompletedDirectCronDelivery(
 ): Promise<boolean> {
   const context = captureDeliveryQueueStateContext();
   const receipt = await inspectDeliveryQueueReceipt(queueName, id, false, context);
-  return receipt.status === "completed";
+  return receipt.status === "completed" && receipt.notificationAcknowledged !== false;
 }
 
-/** Wait only for an active recipient owner, never for crashed ambiguous sends. */
+/** Wait for an active owner, or bounded existing recovery; never initiate a second send. */
 export async function waitForCompletedDirectCronDelivery(params: {
   id: string;
   queueName: string;
   signal?: AbortSignal;
+  waitForRecovery?: boolean;
 }): Promise<boolean> {
   const context = captureDeliveryQueueStateContext();
   // SQLite producer leases fence cross-process sends for at most 30 seconds.
   for (let attempt = 0; attempt < 120; attempt += 1) {
     params.signal?.throwIfAborted();
-    const { status, pendingEntry: owner } = await inspectDeliveryQueueReceipt(
-      params.queueName,
-      params.id,
-      true,
-      context,
-    );
+    const {
+      status,
+      pendingEntry: owner,
+      notificationAcknowledged,
+    } = await inspectDeliveryQueueReceipt(params.queueName, params.id, true, context);
     params.signal?.throwIfAborted();
     if (status === "completed") {
-      return true;
+      return notificationAcknowledged !== false;
+    }
+    if (params.waitForRecovery && status === "pending" && owner) {
+      if (attempt < 119) await sleepWithAbort(250, params.signal);
+      continue;
     }
     if (
       !owner ||

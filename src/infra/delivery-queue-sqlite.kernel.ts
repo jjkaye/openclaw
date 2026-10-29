@@ -105,6 +105,7 @@ type DeliveryQueueOwner = {
   settlementPending?: true;
   notificationReceipts?: readonly DeliveryQueueNotificationReceipt[];
   acknowledgedAt?: number;
+  notificationAcknowledged?: boolean;
 };
 
 /** Minimal opaque custody for source-owned resolution; malformed rows stay retained. */
@@ -259,11 +260,15 @@ export function inspectDeliveryQueueReceiptInDatabase(
   return runSqliteImmediateTransactionSync(
     database.db,
     () => {
-      const status = selectDeliveryQueueEntryOwners(database, [input.queueName], [input.id])
+      const owner = selectDeliveryQueueEntryOwners(database, [input.queueName], [input.id])
         .get(input.id)
-        ?.get(input.queueName)?.status;
+        ?.get(input.queueName);
+      const status = owner?.status;
       return {
         status,
+        ...(owner?.notificationAcknowledged !== undefined
+          ? { notificationAcknowledged: owner.notificationAcknowledged }
+          : {}),
         pendingEntry:
           input.includePending && status === "pending"
             ? loadDeliveryQueueEntryInDatabase(database, input.queueName, input.id, "pending")
@@ -360,6 +365,16 @@ function selectDeliveryQueueEntryOwners(
       const namespaces = owners.get(row.id) ?? new Map<string, DeliveryQueueOwner>();
       namespaces.set(row.queue_name, {
         status: row.status,
+        ...(NOTIFICATION_TERMINAL_STATES.some((state) => state === row.recovery_state)
+          ? {
+              notificationAcknowledged:
+                row.recovery_state === "completed_notification" &&
+                !!notificationReceipts &&
+                typeof acknowledgedAt === "number" &&
+                Number.isSafeInteger(acknowledgedAt) &&
+                acknowledgedAt >= 0,
+            }
+          : {}),
         ...(notificationReceipts ? { notificationReceipts } : {}),
         ...(typeof acknowledgedAt === "number" &&
         Number.isSafeInteger(acknowledgedAt) &&

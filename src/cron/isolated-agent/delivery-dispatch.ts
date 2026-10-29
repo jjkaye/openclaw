@@ -3,6 +3,7 @@ import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../../auto-reply/tokens.j
 import { resolveControlUiSessionUrl } from "../../config/control-ui-link-base.js";
 import { resolveSessionStorePathCore } from "../../config/sessions/inbound.runtime.js";
 import { formatErrorMessage } from "../../infra/errors.js";
+import { isOutboundDeliveryError } from "../../infra/outbound/deliver-types.js";
 import type {
   NormalizedOutboundPayload,
   OutboundDeliveryResult,
@@ -378,17 +379,31 @@ export async function dispatchCronDelivery(
         );
         payloadMayHaveReachedRecipientBeforeFailure ||=
           durableMessageBatchMayHaveReachedRecipient(send);
+        const recoveryOwned =
+          send.status === "failed" &&
+          send.deliveryIntent !== undefined &&
+          send.deliveryIntent.id !== deliveryIdempotencyKey &&
+          isOutboundDeliveryError(send.error) &&
+          send.error.queueCustody === "held";
         if (
           send.status === "failed" &&
           (await waitForCompletedDirectCronDelivery({
-            id: deliveryIdempotencyKey,
+            id: send.deliveryIntent?.id ?? deliveryIdempotencyKey,
             queueName,
             signal: params.abortSignal,
+            waitForRecovery: recoveryOwned,
           }))
         ) {
           params.deliveryAttemptFence?.assertCurrent();
           // Another process committed the same fenced recipient intent.
           completedByConcurrentDelivery = true;
+          return [];
+        }
+        if (recoveryOwned) {
+          recordDelivery(
+            "unknown",
+            "cron delivery has no confirmed provider acknowledgment; inspect the native delivery receipt",
+          );
           return [];
         }
         if (send.status === "failed") {
