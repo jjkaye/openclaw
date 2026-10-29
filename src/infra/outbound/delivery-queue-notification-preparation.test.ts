@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NotificationCanceledError } from "../../notifications/cancellation.js";
 import type { NotificationPreparationCandidate } from "../../notifications/receipt-policy.js";
+import { openOpenClawStateDatabase } from "../../state/openclaw-state-db.js";
 import {
   captureDeliveryQueueStateContext,
   listNotificationDeliveryReceipts,
   pruneExpiredDeliveryQueueTombstones,
   updateNotificationDeliveryReceiptResolution,
 } from "../delivery-queue-sqlite.js";
+import { inspectDeliveryQueueReceiptInDatabase } from "../delivery-queue-sqlite.kernel.js";
+import { seedDeliveryQueueEntry } from "../delivery-queue-sqlite.test-support.js";
 import { executeDeliveryQueueOperation } from "../delivery-queue-worker-store.js";
 import {
   claimNotificationPreparation,
@@ -41,6 +44,56 @@ describe("atomic notification preparation custody", () => {
   });
   afterEach(() => {
     vi.unstubAllEnvs();
+  });
+
+  it("distinguishes acknowledged notification custody from suppressed, canceled, or malformed receipts", () => {
+    const stateDir = fixtures.tmpDir();
+    const QUEUE = "notification-receipt-inspection";
+    const database = openOpenClawStateDatabase({
+      env: { ...process.env, OPENCLAW_STATE_DIR: stateDir },
+    });
+    const receipt = {
+      ownerKey: "a".repeat(64),
+      topicKey: "b".repeat(64),
+      revisionKey: "c".repeat(64),
+      slot: 0,
+      localDate: "2026-10-29",
+    };
+    for (const [index, state, valid, ack, expected] of [
+      [0, "completed_notification", true, true, true],
+      [1, "completed_notification_suppressed", true, true, false],
+      [2, "completed_notification_canceled", true, true, false],
+      [3, "completed_notification", false, true, false],
+      [4, "completed_notification", true, false, false],
+    ] as const) {
+      const id = `notification-${index}`;
+      seedDeliveryQueueEntry({
+        queueName: QUEUE,
+        entry: { id, enqueuedAt: Date.now(), retryCount: 0 },
+        stateDir,
+      });
+      database.db
+        .prepare(
+          "UPDATE delivery_queue_entries SET status = 'completed', recovery_state = ?, entry_json = ? WHERE queue_name = ? AND id = ?",
+        )
+        .run(
+          state,
+          JSON.stringify({
+            id,
+            notificationReceipts: valid ? [receipt] : "invalid",
+            ...(ack ? { acknowledgedAt: Date.now() } : {}),
+          }),
+          QUEUE,
+          id,
+        );
+      expect(
+        inspectDeliveryQueueReceiptInDatabase(database, {
+          queueName: QUEUE,
+          id,
+          includePending: true,
+        }),
+      ).toMatchObject({ status: "completed", notificationAcknowledged: expected });
+    }
   });
 
   it("atomically reserves overlapping groups once and retains independent subjects", async () => {

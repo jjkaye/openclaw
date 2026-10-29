@@ -369,7 +369,7 @@ function selectDeliveryQueueEntryOwners(
           ? {
               notificationAcknowledged:
                 row.recovery_state === "completed_notification" &&
-                !!notificationReceipts &&
+                Boolean(notificationReceipts) &&
                 typeof acknowledgedAt === "number" &&
                 Number.isSafeInteger(acknowledgedAt) &&
                 acknowledgedAt >= 0,
