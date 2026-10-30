@@ -29,9 +29,13 @@ import {
 import {
   NOTIFICATION_RECEIPT_RESOLVED_RETENTION_MS,
   type DeliveryQueueCompletionRetention,
+  type DeliveryQueueEntryState,
 } from "./delivery-queue-sqlite.types.js";
 import { requireNodeSqlite } from "./node-sqlite.js";
+import type { QueuedDeliveryPayload } from "./outbound/delivery-queue-types.js";
 import { resolvePreferredOpenClawTmpDir } from "./tmp-openclaw-dir.js";
+
+type NotificationQueueFixture = DeliveryQueueEntryState & QueuedDeliveryPayload;
 
 describe("delivery queue pending terminal transition", () => {
   let rootDir: string;
@@ -92,19 +96,17 @@ describe("delivery queue pending terminal transition", () => {
         slot: 0,
         localDate: "2026-07-20",
       } as const;
-      seedDeliveryQueueEntry({
-        queueName,
-        entry: {
-          id,
-          enqueuedAt: Date.now(),
-          retryCount: 0,
-          completionRetention: boundedRetention,
-          notificationReceipts: [notificationReceipt],
-          payloads: [{ text: "private notification body" }],
-          target: "private recipient",
-        },
-        stateDir,
-      });
+      const queuedEntry: NotificationQueueFixture = {
+        id,
+        enqueuedAt: Date.now(),
+        retryCount: 0,
+        completionRetention: boundedRetention,
+        notificationReceipts: [notificationReceipt],
+        payloads: [{ text: "private notification body" }],
+        channel: "telegram",
+        to: "private recipient",
+      };
+      seedDeliveryQueueEntry({ queueName, entry: queuedEntry, stateDir });
       completeDeliveryQueueEntryInDatabase(
         openOpenClawStateDatabase({ env: { ...process.env, OPENCLAW_STATE_DIR: stateDir } }),
         queueName,
@@ -226,19 +228,22 @@ describe("delivery queue pending terminal transition", () => {
       slot: 0,
       localDate: "2026-10-27",
     } as const;
-    const seed = (id: string, entry: Record<string, unknown> = {}, status?: "failed") => {
+    const seed = (id: string, entry: Partial<NotificationQueueFixture> = {}, status?: "failed") => {
+      const queuedEntry: NotificationQueueFixture = {
+        id,
+        enqueuedAt: now,
+        retryCount: 0,
+        notificationReceipts: [receipt],
+        payloads: [{ text: "private body" }],
+        channel: "telegram",
+        to: "private recipient",
+        ...entry,
+      };
       seedDeliveryQueueEntry({
         queueName,
         stateDir,
         status,
-        entry: {
-          id,
-          enqueuedAt: now,
-          retryCount: 0,
-          notificationReceipts: [receipt],
-          payloads: [{ text: "private body" }],
-          ...entry,
-        },
+        entry: queuedEntry,
       });
     };
     seed("completed");
