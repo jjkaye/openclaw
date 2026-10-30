@@ -81,7 +81,12 @@ describe("notification policy through the native durable delivery owner", () => 
     registry.createApi(record, { config: {} }).registerNotificationSource({
       contractVersion: 1,
       id: proposal.sourceId,
-      resolve: async (reference) =>
+      resolve: async (reference, context) =>
+        context.agentId === "fixture-agent" &&
+        context.recipient.channel === "matrix" &&
+        context.recipient.to === "!owner:fixture" &&
+        context.recipient.accountId === undefined &&
+        context.recipient.threadId == null &&
         ["next-action", "another-decision", "third-decision"].includes(reference.topicId)
           ? { ...state, ...topicOverrides.get(reference.topicId), topicId: reference.topicId }
           : null,
@@ -148,6 +153,57 @@ describe("notification policy through the native durable delivery owner", () => 
     expect(receipts).toHaveLength(1);
     expect(receipts[0].notificationReceipt.slot).toBe(0);
     expect(JSON.stringify(receipts)).not.toContain("First ask");
+  });
+
+  it.each([
+    ["!owner:fixture", "matrix:!owner:fixture"],
+    ["matrix:!owner:fixture", "!owner:fixture"],
+  ])("shares retained topic custody from %s to %s", async (first, second) => {
+    await deliver({ ...request([payload("Initial decision")]), to: first });
+    expect(send).toHaveBeenCalledTimes(1);
+    const before = await listNotificationDeliveryReceipts({}, fixtures.tmpDir());
+    const outcomes: OutboundPayloadDeliveryOutcome[] = [];
+    await deliver({
+      ...request([payload("Reworded decision")], (outcome) => outcomes.push(outcome)),
+      to: second,
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(outcomes).toEqual([{ index: 0, status: "suppressed", reason: "notification_policy" }]);
+    expect(await listNotificationDeliveryReceipts({}, fixtures.tmpDir())).toEqual(before);
+  });
+
+  it.each([
+    { to: "other:!owner:fixture" },
+    { to: "matrix:!other:fixture" },
+    { to: "matrix:!owner:fixture:topic:7" },
+    { to: "matrix:!owner:fixture", accountId: "other" },
+    { to: "matrix:!owner:fixture", threadId: "7" },
+    { to: "matrix:!owner:fixture", session: { agentId: "other" } },
+  ])("does not widen a source grant for %j", async (route) => {
+    const outcomes: OutboundPayloadDeliveryOutcome[] = [];
+    await deliver({
+      ...request([payload("Foreign decision")], (outcome) => outcomes.push(outcome)),
+      ...route,
+    });
+    expect(send).not.toHaveBeenCalled();
+    expect(outcomes).toEqual([{ index: 0, status: "suppressed", reason: "notification_policy" }]);
+    expect(await listNotificationDeliveryReceipts({}, fixtures.tmpDir())).toEqual([]);
+  });
+
+  it("retains bare pending custody when a prefixed wake arrives", async () => {
+    send.mockResolvedValueOnce({});
+    await deliver(request([payload("Uncertain decision")]));
+    const before = await listNotificationDeliveryReceipts(
+      { includePending: true },
+      fixtures.tmpDir(),
+    );
+    expect(before).toHaveLength(1);
+    expect(before[0].status).toBe("pending");
+    await deliver({ ...request([payload("Repeated decision")]), to: "matrix:!owner:fixture" });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(
+      await listNotificationDeliveryReceipts({ includePending: true }, fixtures.tmpDir()),
+    ).toEqual(before);
   });
 
   it("requires configured producer references even when model output is plain text", async () => {

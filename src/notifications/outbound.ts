@@ -11,6 +11,7 @@ import {
   parseDeliveryQueueNotificationReceipts,
   type DeliveryQueueNotificationReceipt,
 } from "../infra/delivery-queue-sqlite.types.js";
+import { stripTargetProviderPrefix } from "../infra/outbound/channel-target-prefix.js";
 import type { InternalDeliverOutboundPayloadsParams } from "../infra/outbound/deliver-contracts.js";
 import {
   OutboundDeliveryError,
@@ -64,7 +65,8 @@ function resolveContext(params: InternalDeliverOutboundPayloadsParams): Notifica
     agentId,
     recipient: {
       channel: params.channel,
-      to: params.to,
+      // Transport decoration must not split the source grant or retained topic custody.
+      to: stripTargetProviderPrefix(params.to, params.channel),
       accountId: params.accountId,
       threadId: params.threadId,
     },

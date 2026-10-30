@@ -12,6 +12,7 @@ export type NotificationResolveContext = {
   agentId: string;
   recipient: {
     channel: string;
+    /** Selected provider prefix removed; target-kind and topic components remain intact. */
     to: string;
     accountId?: string;
     threadId?: string | number | null;
