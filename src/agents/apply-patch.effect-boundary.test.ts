@@ -24,6 +24,7 @@ function observeHeartbeat(error: unknown, response?: HeartbeatToolResponse) {
   observe({ toolName: "apply_patch", outcome: "failure", result: error });
   const terminal = observe({ toolName: "read", outcome: "success", result: {} });
   const payloads = buildEmbeddedRunPayloads({
+    sessionKey: "agent:fixture-agent:main:heartbeat",
     assistantTexts: [],
     lastAssistant: undefined,
     isHeartbeatTrigger: true,
