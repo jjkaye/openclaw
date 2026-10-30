@@ -72,6 +72,8 @@ export async function inspectActivatedUpdateState(
       ? current.filter(
           (entry) =>
             entry !== shared &&
+            // Candidate-owned retention excludes migration, never rollback comparison.
+            entry.migrationDisposition !== "retained" &&
             entry.userVersion !== null &&
             entry.userVersion !== candidateSchemaVersions.agent,
         )

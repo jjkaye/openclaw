@@ -62,6 +62,10 @@ import {
   readUpdateStateDatabaseSizes,
   readUpdateStateDatabaseSizesInProcess,
 } from "./update-candidate-state.sizes.js";
+import {
+  publishStateDatabaseVersions,
+  readRetainedUpdateAgentPaths,
+} from "./update-candidate-state.versions.js";
 import type { UpdateDatabaseGenerations } from "./update-database-generations.js";
 import type { UpdateRecoveryCaptureAcquisition } from "./update-recovery-capture-acquisition.js";
 
@@ -70,6 +74,7 @@ const UpdateStateSchemaVersionsSchema = z.array(
     path: z.string(),
     userVersion: z.number().nullable(),
     contentVersion: z.number().optional(),
+    migrationDisposition: z.literal("retained").optional(),
   }),
 );
 export type UpdateStateSchemaVersion = z.infer<typeof UpdateStateSchemaVersionsSchema>[number];
@@ -156,6 +161,7 @@ export const UpdateCandidateSnapshotInventorySchema = z.object({
 export const UpdateStateSchemaInspectionPlanSchema = z.object({
   files: z.array(z.tuple([z.string(), StateDatabaseDiscoverySchema])),
   sharedVersion: UpdateStateSchemaVersionsSchema.element,
+  retainedAgentPaths: z.array(z.string()).optional(),
 });
 type UpdateStateSchemaInspectionPlan = z.infer<typeof UpdateStateSchemaInspectionPlanSchema>;
 
@@ -267,24 +273,6 @@ export async function collectStateDatabasePaths(
   );
 }
 
-/** Released updaters compare exact response paths, so every raw alias is published. */
-function publishStateDatabaseVersions(
-  files: Map<string, StateDatabaseDiscovery>,
-  inspected: Map<string, Omit<UpdateStateSchemaVersion, "path">>,
-): UpdateStateSchemaVersion[] {
-  const versions: UpdateStateSchemaVersion[] = [];
-  for (const [identity, discovery] of files) {
-    const result = inspected.get(identity);
-    if (!result) {
-      continue;
-    }
-    for (const spelling of discovery.spellings) {
-      versions.push({ path: spelling, ...result });
-    }
-  }
-  return versions;
-}
-
 /** Read registrations and plugin ownership from one private shared copy before budgeting. */
 export async function readUpdateCandidateStateInventoryInProcess(
   input: StateInput & {
@@ -355,10 +343,12 @@ function readSharedDatabaseVersion(
   location: string,
   shared: string,
   files: Map<string, StateDatabaseDiscovery>,
+  inspectSnapshot?: (db: DatabaseSync) => void,
 ): Omit<UpdateStateSchemaVersion, "path"> {
   const db = openNodeSqliteDatabase(location, { readOnly: true });
   try {
     collectRegisteredPaths(db, shared, files);
+    inspectSnapshot?.(db);
     return {
       userVersion: readSqliteUserVersion(db),
       contentVersion: readStateSchemaContentVersion(db),
@@ -382,17 +372,25 @@ export async function discoverUpdateStateSchemaInspectionInProcess(
   if (!(await fileExists(shared))) {
     return { files: [...files], sharedVersion: { path: shared, userVersion: null } };
   }
+  let retainedAgentPaths: string[] | undefined;
   const sharedVersion = await withStateDatabaseSnapshot(
     shared,
     (location) => ({
       path: shared,
-      ...readSharedDatabaseVersion(location, shared, files),
+      ...readSharedDatabaseVersion(location, shared, files, (db) => {
+        retainedAgentPaths = readRetainedUpdateAgentPaths({
+          ...input,
+          db,
+          sharedPath: shared,
+          paths: [...files.values()].flatMap(({ spellings }) => spellings),
+        });
+      }),
     }),
     input.stagingRoot,
     input.onProgress,
     input.preserveSourceArtifacts,
   );
-  return { files: [...files], sharedVersion };
+  return { files: [...files], sharedVersion, retainedAgentPaths };
 }
 
 /** Missing databases stay explicit so creation is schema-checked and loss blocks rollback. */
@@ -433,7 +431,15 @@ export async function readUpdateStateSchemaVersionsInProcess(
       // Reuse the native WAL-aware owner inside this child, avoiding both agent
       // payload copies and a nested worker with a separate cleanup lifetime.
       const { userVersion } = await inspectSqliteSchemaHeaderInProcess(file);
-      inspected.set(identity, { userVersion });
+      // Every spelling must carry positive physical-store custody. A logical
+      // deleted alias cannot exempt a surviving owner's store.
+      const retained = discovery.spellings.every((pathname) =>
+        input.inspectionPlan?.retainedAgentPaths?.includes(pathname),
+      );
+      inspected.set(identity, {
+        userVersion,
+        ...(retained ? { migrationDisposition: "retained" as const } : {}),
+      });
       continue;
     }
     inspected.set(
