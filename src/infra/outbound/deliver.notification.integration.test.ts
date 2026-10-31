@@ -14,14 +14,29 @@ import {
   type NotificationProposal,
 } from "../../notifications/proposal.js";
 import type { NotificationSourceState } from "../../notifications/source-types.js";
+import { revokePluginRecord } from "../../plugins/registry-lifecycle.js";
 import { createPluginRegistry } from "../../plugins/registry.js";
-import { resetPluginRuntimeStateForTest, setActivePluginRegistry } from "../../plugins/runtime.js";
+import {
+  getActivePluginRegistry,
+  resetPluginRuntimeStateForTest,
+  setActivePluginRegistry,
+} from "../../plugins/runtime.js";
+import {
+  getPluginRuntimeGatewayRequestScope,
+  withPluginRuntimeRegistryScope,
+} from "../../plugins/runtime/gateway-request-scope.js";
 import type { PluginRuntime } from "../../plugins/runtime/types.js";
 import { createPluginRecord } from "../../plugins/status.test-fixtures.js";
 import { createOutboundTestPlugin } from "../../test-utils/channel-plugins.js";
 import { listNotificationDeliveryReceipts } from "../delivery-queue-sqlite.js";
 import type { OutboundPayloadDeliveryOutcome } from "./deliver-types.js";
 import { installDeliveryQueueTmpDirHooks } from "./delivery-queue.test-helpers.js";
+
+let bootstrappedRegistry: ReturnType<typeof createPluginRegistry>["registry"] | undefined;
+vi.mock("./channel-bootstrap.runtime.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./channel-bootstrap.runtime.js")>()),
+  bootstrapOutboundChannelPluginAsync: async () => bootstrappedRegistry,
+}));
 
 let deliver: typeof import("./deliver.js").deliverOutboundPayloads;
 const proposal: NotificationProposal = {
@@ -35,6 +50,8 @@ const proposal: NotificationProposal = {
 describe("notification policy through the native durable delivery owner", () => {
   const fixtures = installDeliveryQueueTmpDirHooks();
   let state: NotificationSourceState;
+  let sourceRegistry: ReturnType<typeof createPluginRegistry>["registry"];
+  const sourceScopes: unknown[] = [];
   let beforeDispatch: (() => Promise<void>) | undefined;
   let topicOverrides: Map<string, Partial<NotificationSourceState>>;
   let chunkLimit: number;
@@ -68,6 +85,8 @@ describe("notification policy through the native durable delivery owner", () => 
       timeZone: "America/New_York",
     };
     beforeDispatch = undefined;
+    bootstrappedRegistry = undefined;
+    sourceScopes.length = 0;
     topicOverrides = new Map();
     chunkLimit = 0;
     send.mockReset().mockImplementation(async () => ({ messageId: "fixture-message" }));
@@ -81,15 +100,19 @@ describe("notification policy through the native durable delivery owner", () => 
     registry.createApi(record, { config: {} }).registerNotificationSource({
       contractVersion: 1,
       id: proposal.sourceId,
-      resolve: async (reference, context) =>
-        context.agentId === "fixture-agent" &&
-        context.recipient.channel === "matrix" &&
-        context.recipient.to === "!owner:fixture" &&
-        context.recipient.accountId === undefined &&
-        context.recipient.threadId == null &&
-        ["next-action", "another-decision", "third-decision"].includes(reference.topicId)
+      resolve: async (reference, context) => {
+        sourceScopes.push(
+          getPluginRuntimeGatewayRequestScope()?.pluginRegistry ?? getActivePluginRegistry(),
+        );
+        return context.agentId === "fixture-agent" &&
+          context.recipient.channel === "matrix" &&
+          context.recipient.to === "!owner:fixture" &&
+          context.recipient.accountId === undefined &&
+          context.recipient.threadId == null &&
+          ["next-action", "another-decision", "third-decision"].includes(reference.topicId)
           ? { ...state, ...topicOverrides.get(reference.topicId), topicId: reference.topicId }
-          : null,
+          : null;
+      },
     });
     registry.registry.channels.push({
       pluginId: "matrix",
@@ -113,12 +136,94 @@ describe("notification policy through the native durable delivery owner", () => 
         },
       }),
     });
+    sourceRegistry = registry.registry;
     setActivePluginRegistry(registry.registry);
   });
   afterEach(() => {
     vi.unstubAllEnvs();
     resetPluginRuntimeStateForTest();
   });
+
+  for (const scoped of [false, true]) {
+    it(`keeps source validation with its admitted owner across channel bootstrap (scoped=${scoped})`, async () => {
+      const channelRegistry = {
+        ...sourceRegistry,
+        notificationSources: [],
+        channels: [...sourceRegistry.channels],
+      };
+      sourceRegistry.channels = sourceRegistry.channels.map((entry) => ({
+        ...entry,
+        plugin: { ...entry.plugin, outbound: undefined },
+      }));
+      bootstrappedRegistry = channelRegistry;
+      send.mockImplementation(async () => {
+        expect(getPluginRuntimeGatewayRequestScope()?.pluginRegistry).toBe(channelRegistry);
+        return { messageId: "scoped-channel-message" };
+      });
+      const run = () => deliver(request([payload("Scoped source result")]));
+      await (scoped ? withPluginRuntimeRegistryScope(sourceRegistry, run) : run());
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(sourceScopes.every((registry) => registry === sourceRegistry)).toBe(true);
+      const receipts = await listNotificationDeliveryReceipts({}, fixtures.tmpDir());
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]?.acknowledgedAt).toBeDefined();
+    });
+  }
+
+  for (const change of [
+    "revocation",
+    "provider replacement",
+    "global replacement",
+    "correction",
+  ] as const) {
+    it(`preserves ${change} fencing across a distinct channel registry`, async () => {
+      const channelRegistry = {
+        ...sourceRegistry,
+        notificationSources: [],
+        channels: [...sourceRegistry.channels],
+      };
+      sourceRegistry.channels = sourceRegistry.channels.map((entry) => ({
+        ...entry,
+        plugin: { ...entry.plugin, outbound: undefined },
+      }));
+      bootstrappedRegistry = channelRegistry;
+      beforeDispatch = async () => {
+        if (change === "revocation") {
+          const record = sourceRegistry.plugins.find((entry) => entry.id === "fixture-source");
+          if (!record) {
+            throw new Error("Missing fixture source owner");
+          }
+          revokePluginRecord(sourceRegistry, record);
+        }
+        if (change === "provider replacement") {
+          const entry = sourceRegistry.notificationSources[0];
+          if (!entry) {
+            throw new Error("Missing fixture source registration");
+          }
+          sourceRegistry.notificationSources[0] = { ...entry };
+        }
+        if (change === "global replacement") {
+          setActivePluginRegistry({ ...sourceRegistry });
+        }
+        if (change === "correction") {
+          state = { ...state, status: "answered" };
+        }
+      };
+      const result = deliver(request([payload("Must remain unsent")]));
+      if (change === "correction") {
+        await expect(result).resolves.toEqual([]);
+      } else {
+        await expect(result).rejects.toThrow();
+      }
+      expect(send).not.toHaveBeenCalled();
+      const receipts = await listNotificationDeliveryReceipts(
+        { includePending: true },
+        fixtures.tmpDir(),
+      );
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]?.acknowledgedAt).toBeUndefined();
+    });
+  }
 
   it("shares topic custody between heartbeat and cron despite changed wording", async () => {
     const heartbeat = createHeartbeatToolResponsePayload({
@@ -336,6 +441,8 @@ describe("notification policy through the native durable delivery owner", () => 
     beforeDispatch = async () => {
       topicOverrides.set("another-decision", { status: "answered" });
       beforeDispatch = undefined;
+      bootstrappedRegistry = undefined;
+      sourceScopes.length = 0;
     };
     const result = await sendDurableMessageBatchCore({
       ...request([

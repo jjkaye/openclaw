@@ -21,6 +21,11 @@ import {
 } from "../infra/outbound/deliver-types.js";
 import { claimNotificationPreparation } from "../infra/outbound/delivery-queue-preparation.js";
 import {
+  getPluginExecutionFrame,
+  InvocationFrame,
+  runWithPluginExecutionFrame,
+} from "../plugins/plugin-instance-invocation.js";
+import {
   createNotificationCandidate,
   notificationStateEligible,
   notificationTopicKey,
@@ -227,47 +232,52 @@ function sourceGuards(
   entries: readonly GuardEntry[],
   context: NotificationResolveContext,
 ) {
-  const assertCurrent = () => {
-    try {
-      params.abortSignal?.throwIfAborted();
-      for (const entry of entries) {
-        entry.source.assertCurrent();
+  // Channel dispatch enters its own registry scope. Source checks retain the
+  // admission frame, including an unscoped global owner that can be replaced.
+  const sourceFrame = getPluginExecutionFrame() ?? new InvocationFrame({});
+  const assertCurrent = () =>
+    runWithPluginExecutionFrame(sourceFrame, () => {
+      try {
+        params.abortSignal?.throwIfAborted();
+        for (const entry of entries) {
+          entry.source.assertCurrent();
+        }
+      } catch (cause) {
+        params.abortSignal?.throwIfAborted();
+        throw sourceUnavailable(cause);
       }
-    } catch (cause) {
-      params.abortSignal?.throwIfAborted();
-      throw sourceUnavailable(cause);
-    }
-  };
-  const validate = async () => {
-    const states = await Promise.allSettled(
-      entries.map((entry) => entry.source.resolve(entry.block.notification, context)),
-    );
-    // A previously successful provider may retire while another provider awaits.
-    assertCurrent();
-    const unavailable = states.find((state) => state.status === "rejected");
-    if (unavailable?.status === "rejected") {
-      throw sourceUnavailable(unavailable.reason);
-    }
-    const excluded: string[] = [];
-    for (const [index, entry] of entries.entries()) {
-      const result = states[index];
-      if (!result || result.status !== "fulfilled") {
-        throw sourceUnavailable(undefined);
+    });
+  const validate = () =>
+    runWithPluginExecutionFrame(sourceFrame, async () => {
+      const states = await Promise.allSettled(
+        entries.map((entry) => entry.source.resolve(entry.block.notification, context)),
+      );
+      // A previously successful provider may retire while another provider awaits.
+      assertCurrent();
+      const unavailable = states.find((state) => state.status === "rejected");
+      if (unavailable?.status === "rejected") {
+        throw sourceUnavailable(unavailable.reason);
       }
-      const proposal = entry.block.notification;
-      if (
-        !notificationStateEligible(proposal, result.value) ||
-        notificationKey(result.value.revision, result.value.consequenceKey ?? "") !==
-          entry.receipt.revisionKey
-      ) {
-        excluded.push(entry.receipt.topicKey);
+      const excluded: string[] = [];
+      for (const [index, entry] of entries.entries()) {
+        const result = states[index];
+        if (!result || result.status !== "fulfilled") {
+          throw sourceUnavailable(undefined);
+        }
+        const proposal = entry.block.notification;
+        if (
+          !notificationStateEligible(proposal, result.value) ||
+          notificationKey(result.value.revision, result.value.consequenceKey ?? "") !==
+            entry.receipt.revisionKey
+        ) {
+          excluded.push(entry.receipt.topicKey);
+        }
       }
-    }
-    if (excluded.length) {
-      throw new NotificationCanceledError(excluded);
-    }
-    assertCurrent();
-  };
+      if (excluded.length) {
+        throw new NotificationCanceledError(excluded);
+      }
+      assertCurrent();
+    });
   return {
     validateNotificationPreparation: async () => {
       await params.validateNotificationPreparation?.();
