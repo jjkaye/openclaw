@@ -236,6 +236,10 @@ export type OpenClawPluginApi = {
   registerHostedMediaResolver: (resolver: OpenClawPluginHostedMediaResolver) => void;
   /** Register a plugin-owned destination for presenting hosted widget documents. */
   registerWidgetPresenter: (presenter: WidgetPresenter) => void;
+  /** Resolve current task authority for live and recovered proactive notifications. */
+  registerNotificationSource: (
+    source: import("../notifications/source-types.js").NotificationSourceV1,
+  ) => void;
   /** Bind a declared MCP server's transport to the trusted message requester. */ registerMcpServerConnectionResolver: (
     resolver: import("./types.mcp-connection.js").OpenClawPluginMcpServerConnectionResolver,
   ) => void;

@@ -53,6 +53,17 @@ function fixtureState(defaultAgentId?: string): CronServiceState {
 const convergence = { enabledExplicit: true, nowMs: NOW };
 
 describe("applyJobPatch", () => {
+  it("preserves and explicitly changes required notification policy through delivery patches", () => {
+    const current = agentJob({ mode: "announce", channel: "telegram", to: "123" });
+    applyJobPatch(current, {
+      delivery: { requireNotificationReference: true },
+    });
+    expect(current.delivery?.requireNotificationReference).toBe(true);
+    applyJobPatch(current, { delivery: { to: "456" } });
+    expect(current.delivery).toMatchObject({ to: "456", requireNotificationReference: true });
+    applyJobPatch(current, { delivery: { requireNotificationReference: false } });
+    expect(current.delivery?.requireNotificationReference).toBe(false);
+  });
   it.each([
     { kind: "agentTurn", message: "Synthetic reminder" },
     { kind: "command", argv: ["printf", "synthetic-proof"] },

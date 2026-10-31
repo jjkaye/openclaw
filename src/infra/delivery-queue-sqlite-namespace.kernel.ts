@@ -190,8 +190,20 @@ export const replacePendingDeliveryQueueEntryInDatabase = pendingEntryMutation(
 /** Completes a pending entry only while its authoritative serialized value is unchanged. */
 export const completePendingDeliveryQueueEntryInDatabase = pendingEntryMutation(
   "complete pending delivery queue entry",
-  (database, params: { queueName: string; expectedEntry: DeliveryQueueEntryState }) => {
-    completeDeliveryQueueEntryInDatabase(database, params.queueName, params.expectedEntry.id);
+  (
+    database,
+    params: {
+      queueName: string;
+      expectedEntry: DeliveryQueueEntryState;
+      notificationSuppressed?: true;
+    },
+  ) => {
+    completeDeliveryQueueEntryInDatabase(
+      database,
+      params.queueName,
+      params.expectedEntry.id,
+      params.notificationSuppressed,
+    );
     return true;
   },
 );

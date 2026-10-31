@@ -270,6 +270,9 @@ describe("outbound audit projection", () => {
         terminal: { outcome: "suppressed", reasonCode: "no_visible_payload" },
       },
     ]);
+    expect(project([{ index: 0, status: "suppressed", reason: "notification_policy" }])).toEqual([
+      { payloadIndex: 0, terminal: { outcome: "suppressed", reasonCode: "no_visible_payload" } },
+    ]);
   });
 
   it("counts physical sends once across receipt representations and result fallbacks", () => {

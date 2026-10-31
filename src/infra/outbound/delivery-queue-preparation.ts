@@ -1,3 +1,5 @@
+import { isNotificationCanceledError } from "../../notifications/cancellation.js";
+import type { NotificationPreparationCandidate } from "../../notifications/receipt-policy.js";
 // Fences stable outbound policy preparation across Gateway processes without
 // persisting payload content or modifying-hook context.
 import {
@@ -24,19 +26,44 @@ export class StableDeliveryPreparationLostError extends Error {
   }
 }
 
+/** Admission reserves every selected topic in the existing preparation namespace. */
+export async function claimNotificationPreparation(
+  params: { candidates: readonly NotificationPreparationCandidate[]; stateDir?: string },
+  context?: DeliveryQueueStateContext,
+) {
+  const captured = context ?? captureDeliveryQueueStateContext(params.stateDir);
+  const claim = await executeDeliveryQueueOperation(captured, undefined, {
+    type: "deliveryQueue.claimNotificationPreparation",
+    input: { candidates: params.candidates },
+  });
+  captured.workerContext.admission.assertCurrent();
+  return claim;
+}
+
 export async function withStableDeliveryPreparation<T>(
   params: {
     id: string;
     stateDir?: string;
+    preclaimed?: StableDeliveryPreparation;
     run: (owner: StableDeliveryPreparationOwner) => Promise<T>;
   },
   context?: DeliveryQueueStateContext,
 ): Promise<{ status: "claimed"; value: T } | { status: "existing" }> {
   const captured = context ?? captureDeliveryQueueStateContext(params.stateDir);
-  const claim = await executeDeliveryQueueOperation(captured, params.stateDir, {
-    type: "deliveryQueue.claimPreparation",
-    input: { id: params.id },
-  });
+  if (
+    params.preclaimed &&
+    (params.preclaimed.id !== params.id ||
+      params.preclaimed.preparationState !== "claimed" ||
+      !params.preclaimed.preparationOwnerId)
+  ) {
+    throw new StableDeliveryPreparationLostError(params.id);
+  }
+  const claim = params.preclaimed
+    ? { status: "claimed" as const, entry: params.preclaimed }
+    : await executeDeliveryQueueOperation(captured, params.stateDir, {
+        type: "deliveryQueue.claimPreparation",
+        input: { id: params.id },
+      });
   if (claim.status === "existing") {
     return claim;
   }
@@ -124,7 +151,12 @@ export async function withStableDeliveryPreparation<T>(
   } catch (error) {
     await stopRenewals();
     if (!published && !leaseLost) {
-      if (entry.preparationState === "claimed") {
+      if (entry.notificationReceipts && isNotificationCanceledError(error)) {
+        await executeDeliveryQueueOperation(captured, params.stateDir, {
+          type: "deliveryQueue.failPreparation",
+          input: { entry, notificationCanceled: true },
+        });
+      } else if (entry.preparationState === "claimed") {
         const released: StableDeliveryPreparation = {
           ...entry,
           preparationOwnerId: undefined,
@@ -134,7 +166,7 @@ export async function withStableDeliveryPreparation<T>(
           type: "deliveryQueue.replacePreparation",
           input: { expectedEntry: entry, replacementEntry: released },
         });
-      } else {
+      } else if (!entry.notificationReceipts) {
         await executeDeliveryQueueOperation(captured, params.stateDir, {
           type: "deliveryQueue.failPreparation",
           input: { entry },

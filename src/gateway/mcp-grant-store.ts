@@ -82,6 +82,8 @@ export type McpLoopbackRequestContext = {
   toolsAllow?: string[];
   /** Host-minted search exclusion; independent of coding-tool authority in toolsAllow. */
   webSearchDisabled?: true;
+  /** Host final delivery owns sends; CLI tool arguments cannot reopen this capability. */
+  messageToolDisabled?: true;
   /** Canonical observed native authority; null awaits this turn's initialization. */
   nativeCronCreatorToolAllowlist?: string[] | null;
   /**

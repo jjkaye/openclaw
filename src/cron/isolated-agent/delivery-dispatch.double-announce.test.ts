@@ -2,9 +2,16 @@ import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { hasDescendantRunAwaitingSettleFromRuns } from "../../agents/subagents/registry/subagent-registry-queries.js";
 import type { SubagentRunRecord } from "../../agents/subagents/registry/subagent-registry.types.js";
+import {
+  getReplyPayloadMetadata,
+  setReplyPayloadMetadata,
+  type ReplyPayload,
+} from "../../auto-reply/reply-payload.js";
 import { SILENT_REPLY_TOKEN } from "../../auto-reply/tokens.js";
 import type { ChannelMessagingAdapter } from "../../channels/plugins/types.public.js";
+import * as backoff from "../../infra/backoff.js";
 import * as deliveryQueueSqlite from "../../infra/delivery-queue-sqlite.js";
+import { resolveAdmittedCronCompletionStatus } from "../completion-status.js";
 
 const directCronCompletionRetention = {
   idPrefix: "cron-direct-delivery:v1:",
@@ -189,7 +196,10 @@ vi.mock("./subagent-followup.runtime.js", async () => {
 import { retireSessionMcpRuntime } from "../../agents/agent-bundle-mcp-tools.js";
 import { appendAssistantMessageToSessionTranscript } from "../../config/sessions/transcript.runtime.js";
 import { callGateway } from "../../gateway/call.js";
-import { PlatformMessageNotDispatchedError } from "../../infra/outbound/deliver-types.js";
+import {
+  OutboundDeliveryError,
+  PlatformMessageNotDispatchedError,
+} from "../../infra/outbound/deliver-types.js";
 import { deliverOutboundPayloads } from "../../infra/outbound/deliver.js";
 import {
   ensureOutboundSessionEntry,
@@ -202,6 +212,7 @@ import { createOutboundTestPlugin, createTestRegistry } from "../../test-utils/c
 import { resolveCronDeliveryPlan } from "../delivery-plan.js";
 import { withTempCronHome } from "../isolated-agent.test-harness.js";
 import type { CronDelivery } from "../types.js";
+import { prepareCronDeliveryPayloads } from "./delivery-dispatch-policy.js";
 import type { DispatchCronDeliveryParams } from "./delivery-dispatch-types.js";
 import {
   dispatchCronDelivery,
@@ -397,28 +408,62 @@ describe("dispatchCronDelivery", () => {
     expect(enqueueSystemEvent).not.toHaveBeenCalled();
   });
 
-  it("records identityless transport after an earlier suppression as unknown", async () => {
-    vi.mocked(deliverOutboundPayloads).mockImplementationOnce(async (params) => {
-      params.onPayloadDeliveryOutcome?.({
+  it("completes an intentionally suppressed notification without claiming delivery or requesting repair", async () => {
+    vi.mocked(deliverOutboundPayloads).mockImplementationOnce(async (delivery) => {
+      delivery.onPayloadDeliveryOutcome?.({
         index: 0,
         status: "suppressed",
-        reason: "cancelled_by_message_sending_hook",
-      });
-      params.onPayloadDeliveryOutcome?.({
-        index: 1,
-        status: "suppressed",
-        reason: "adapter_returned_no_identity",
+        reason: "notification_policy",
       });
       return [];
     });
-    const state = await dispatchCronDelivery(makeBaseParams({ synthesizedText: "Report ready" }));
+    const params = makeBaseParams({ synthesizedText: "An unchanged task decision." });
+    const state = await dispatchCronDelivery(params);
     expect(state.deliveryState).toMatchObject({
-      status: "unknown",
-      error: "cron delivery outcome is unknown: adapter_returned_no_identity",
+      status: "not-delivered",
+      delivered: false,
+      deliverySuppressionReason: "notification_policy",
     });
-    expect(state.delivered).not.toBe(true);
-    expect(deliverOutboundPayloads).toHaveBeenCalledTimes(1);
+    expect(state.deliveryError).toBeUndefined();
+    expect(
+      resolveAdmittedCronCompletionStatus(
+        params.job,
+        "ok",
+        state.deliveryState.status,
+        state.deliverySuppressionReason,
+      ),
+    ).toBe("succeeded");
+    expect(appendAssistantMessageToSessionTranscript).not.toHaveBeenCalled();
+    expect(enqueueSystemEvent).not.toHaveBeenCalled();
+    expect(deliverOutboundPayloads).toHaveBeenCalledOnce();
   });
+
+  it.each(["cancelled_by_message_sending_hook", "notification_policy"] as const)(
+    "records identityless transport after earlier %s suppression as unknown",
+    async (reason) => {
+      vi.mocked(deliverOutboundPayloads).mockImplementationOnce(async (params) => {
+        params.onPayloadDeliveryOutcome?.({
+          index: 0,
+          status: "suppressed",
+          reason,
+        });
+        params.onPayloadDeliveryOutcome?.({
+          index: 1,
+          status: "suppressed",
+          reason: "adapter_returned_no_identity",
+        });
+        return [];
+      });
+      const state = await dispatchCronDelivery(makeBaseParams({ synthesizedText: "Report ready" }));
+      expect(state.deliveryState).toMatchObject({
+        status: "unknown",
+        error: "cron delivery outcome is unknown: adapter_returned_no_identity",
+      });
+      expect(state.delivered).not.toBe(true);
+      expect(state.deliverySuppressionReason).toBeUndefined();
+      expect(deliverOutboundPayloads).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("records text emptied by TTS as a delivery failure", async () => {
     const params = makeBaseParams({ synthesizedText: "Report ready" });
@@ -994,6 +1039,149 @@ describe("dispatchCronDelivery", () => {
     );
   });
 
+  it.each([
+    { required: true, batch: false },
+    { required: false, batch: false },
+    { required: false, batch: true },
+  ])("defers notification TTS to the composed payload for %j", async ({ required, batch }) => {
+    const notifications = ["closed", "first", "second"].map((ownerId) => ({
+      sourceId: "fixture-tasks",
+      ownerId,
+      topicId: "next-action",
+      purpose: "decision" as const,
+      expectedRevision: "v1",
+    }));
+    const blocks = notifications.map((notification) => ({
+      notification,
+      text: `Briefing for ${notification.ownerId}`,
+    }));
+    const params = makeBaseParams({
+      synthesizedText: JSON.stringify({
+        $schema: "openclaw.notification.v1",
+        notifications: blocks,
+      }),
+    });
+    params.job.delivery = { mode: "announce", requireNotificationReference: required };
+    params.cfgWithAgentDefaults = { tts: { auto: "always", provider: "microsoft" } };
+    const batchCarrier = {
+      text: blocks.map(({ text }) => text).join("\n\n"),
+      channelData: { openclawNotificationBatch: blocks },
+    };
+    if (batch) {
+      params.deliveryPayloads = [batchCarrier];
+    }
+    const selected: ReplyPayload = {
+      text: "Briefing for first\n\nBriefing for second",
+      spokenText: "Briefing for first. Briefing for second.",
+      channelData: { openclawNotificationBatch: blocks.slice(1) },
+    };
+    const speech: ReplyPayload = {
+      ...selected,
+      mediaUrl: "file:///tmp/selected-briefing.ogg",
+      audioAsVoice: true,
+    };
+    // Selection belongs to outbound admission; this consumer verifies the callback handoff.
+    vi.mocked(deliverOutboundPayloads).mockImplementationOnce(async (delivery) => {
+      expect(maybeApplyTtsToPayloadMock).not.toHaveBeenCalled();
+      expect(delivery.payloads).toEqual(
+        batch
+          ? [batchCarrier]
+          : blocks.map(({ text, notification }) => ({
+              text,
+              channelData: { openclawNotification: notification },
+            })),
+      );
+      expect(delivery.requireNotificationReference).toBe(required);
+      expect(delivery.prepareNotificationPayload).toBeTypeOf("function");
+      const prepared = await delivery.prepareNotificationPayload?.(selected);
+      expect(prepared).toEqual(speech);
+      delivery.onPayload?.({
+        ...speech,
+        hookContent: speech.spokenText,
+        mediaUrls: [speech.mediaUrl!],
+      });
+      return [{ channel: "telegram", messageId: "selected-briefing" }];
+    });
+    maybeApplyTtsToPayloadMock.mockResolvedValue(speech);
+
+    expectDelivered(await dispatchCronDelivery(params));
+    expect(maybeApplyTtsToPayloadMock).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ payload: selected, kind: "final", channel: "telegram" }),
+    );
+    expect(appendAssistantMessageToSessionTranscript).toHaveBeenCalledWith(
+      expect.objectContaining({ text: selected.spokenText }),
+    );
+  });
+
+  it("does not restore the pre-selection notification when TTS produces an empty payload or fails", async () => {
+    const raw = { text: "Suppressed topic must never be restored" };
+    const { prepareNotificationPayload } = await prepareCronDeliveryPayloads({
+      cfg: { tts: { auto: "always", provider: "microsoft" } },
+      payloads: [raw],
+      delivery: makeResolvedDelivery(),
+      agentId: "main",
+      requireNotificationReference: true,
+    });
+    const selected = { text: "Only the current topic" };
+    maybeApplyTtsToPayloadMock.mockResolvedValueOnce({});
+    await expect(prepareNotificationPayload?.(selected)).rejects.toThrow(
+      "cron notification payload was empty or incoherent after TTS",
+    );
+    maybeApplyTtsToPayloadMock.mockRejectedValueOnce(new Error("speech failed"));
+    await expect(prepareNotificationPayload?.(selected)).rejects.toThrow("speech failed");
+    expect(maybeApplyTtsToPayloadMock.mock.calls.map(([call]) => call.payload)).toEqual([
+      selected,
+      selected,
+    ]);
+  });
+
+  it("preserves selected source metadata when TTS returns a replacement payload", async () => {
+    const selected: ReplyPayload = {
+      text: "Selected decision",
+      channelData: { openclawNotification: { ownerId: "selected" } },
+    };
+    setReplyPayloadMetadata(selected, { ttsExplicit: true, tts: { text: "Selected narration" } });
+    const { prepareNotificationPayload } = await prepareCronDeliveryPayloads({
+      cfg: { tts: { auto: "always", provider: "microsoft" } },
+      payloads: [{ text: "Unfiltered original" }],
+      delivery: makeResolvedDelivery(),
+      agentId: "main",
+      requireNotificationReference: true,
+    });
+    maybeApplyTtsToPayloadMock.mockResolvedValue({
+      text: "Selected decision",
+      spokenText: "Spoken selected decision",
+      mediaUrl: "file:///tmp/decision.ogg",
+      channelData: { speechHint: "voice", openclawNotification: { ownerId: "wrong" } },
+    });
+    const prepared = await prepareNotificationPayload?.(selected);
+    expect(getReplyPayloadMetadata(prepared!)).toEqual({
+      ttsExplicit: true,
+      tts: { text: "Selected narration" },
+    });
+    expect(prepared).toEqual({
+      text: "Selected decision",
+      spokenText: "Spoken selected decision",
+      mediaUrl: "file:///tmp/decision.ogg",
+      channelData: { ...selected.channelData, speechHint: "voice" },
+    });
+    const transformed = setReplyPayloadMetadata(
+      { text: "Prepared decision" },
+      { ttsExplicit: true, tts: { text: "Prepared narration" } },
+    );
+    maybeApplyTtsToPayloadMock.mockResolvedValueOnce(transformed);
+    const preparedWithOwnMetadata = await prepareNotificationPayload?.(
+      setReplyPayloadMetadata(
+        { text: "Selected decision" },
+        { tts: { text: "Selected narration" } },
+      ),
+    );
+    expect(getReplyPayloadMetadata(preparedWithOwnMetadata!)).toEqual({
+      ttsExplicit: true,
+      tts: { text: "Prepared narration" },
+    });
+  });
+
   it("mirrors the effective outbound payload after send hooks rewrite delivery text", async () => {
     mockResolvedOutboundRoute();
     vi.mocked(deliverOutboundPayloads).mockImplementationOnce(async (params) => {
@@ -1484,6 +1672,57 @@ describe("dispatchCronDelivery", () => {
           route: expect.objectContaining({ to: "123456", from: "telegram:123456" }),
         });
       }
+    },
+  );
+
+  it.each(["acknowledged", "suppressed", "recovered", "pending"] as const)(
+    "tracks the actual notification recovery owner (%s)",
+    async (settlement) => {
+      vi.spyOn(backoff, "sleepWithAbort").mockResolvedValue(undefined);
+      vi.mocked(deliverOutboundPayloads).mockImplementationOnce(async (delivery) => {
+        delivery.onDeliveryIntent?.({
+          id: "notification-owned",
+          channel: "telegram",
+          to: "123456",
+          queuePolicy: "required",
+        });
+        const error = new OutboundDeliveryError("transient transport failure", {
+          cause: new Error("ECONNREFUSED"),
+          stage: "platform_send",
+        });
+        error.queueCustody = "held";
+        throw error;
+      });
+      const pendingOwner = {
+        status: "pending" as const,
+        pendingEntry: {
+          id: "notification-owned",
+          enqueuedAt: Date.now(),
+          retryCount: 1,
+          recoveryState: "prepared",
+        },
+      };
+      const inspect = vi
+        .mocked(deliveryQueueSqlite.inspectDeliveryQueueReceipt)
+        .mockResolvedValueOnce({ status: undefined, pendingEntry: null });
+      if (settlement === "recovered") inspect.mockResolvedValueOnce(pendingOwner);
+      if (settlement === "pending") inspect.mockResolvedValue(pendingOwner);
+      else
+        inspect.mockResolvedValue({
+          status: "completed",
+          pendingEntry: null,
+          notificationAcknowledged: settlement !== "suppressed",
+        });
+      const state = await dispatchCronDelivery(
+        makeBaseParams({ synthesizedText: "A useful notification" }),
+      );
+      expect(deliverOutboundPayloads).toHaveBeenCalledOnce();
+      expect(inspect.mock.calls[1]?.[1]).toBe("notification-owned");
+      expect(state.deliveryState.status).toBe(
+        settlement === "acknowledged" || settlement === "recovered" ? "delivered" : "unknown",
+      );
+      expect(state.deliverySuppressionReason).toBeUndefined();
+      if (settlement === "pending") expect(backoff.sleepWithAbort).toHaveBeenCalledTimes(119);
     },
   );
 

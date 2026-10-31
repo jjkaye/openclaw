@@ -309,6 +309,9 @@ Use `accountId` to target a specific account on multi-account channels like Tele
 <ParamField path="isolatedSession" type="boolean" default="false">
   When true, each heartbeat runs in a fresh session with no prior conversation history. Uses the same isolation pattern as automation jobs with `sessionTarget: "isolated"`. Dramatically reduces per-heartbeat token cost. Combine with `lightContext: true` for maximum savings. Delivery routing and conversation context still follow the selected conversation, including its channel, account, and topic. A background command's completion keeps its original event route if that conversation later moves. It does not borrow the new room's description or activation policy. A conversation's own background command completion is not isolated; see [Session and target routing](#delivery-behavior).
 </ParamField>
+<ParamField path="requireNotificationReference" type="boolean" default="false">
+  Require a current source-backed task/topic reference for ordinary monitoring alerts. Untagged alerts stay internal even if the source plugin is unavailable. The host revalidates references before dispatch and shares topic receipts with selected automation announcements. Genuine execution-completion relays and runtime failure notices keep their existing source-owned delivery contracts; a model's `outcome` choice cannot grant that exemption. See [notification sources](/plugins/sdk-overview/capabilities#notification-sources-contract-version-1).
+</ParamField>
 <ParamField path="session" type="string">
   Optional session key for heartbeat runs.
 

@@ -1,6 +1,11 @@
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString as readString } from "@openclaw/normalization-core/string-coerce";
 import { assertCronJobScratchContent } from "../cron/scratch-contract.js";
+import {
+  NOTIFICATION_CHANNEL_DATA_KEY,
+  parseNotificationProposal,
+  type NotificationProposal,
+} from "../notifications/proposal.js";
 import { readTrimmedStringAlias } from "../utils/string-readers.js";
 import { setReplyPayloadMetadata, type ReplyPayload } from "./reply-payload.js";
 import { HEARTBEAT_TOKEN } from "./tokens.js";
@@ -29,6 +34,7 @@ export type HeartbeatToolResponse = {
   notify: boolean;
   summary: string;
   notificationText?: string;
+  notification?: NotificationProposal;
   reason?: string;
   priority?: HeartbeatToolPriority;
   nextCheck?: string;
@@ -56,6 +62,10 @@ export function normalizeHeartbeatToolResponse(value: unknown): HeartbeatToolRes
   const reason = readString(value.reason);
   const nextCheck = readTrimmedStringAlias(value, ["nextCheck", "next_check"]);
   const scratch = typeof value.scratch === "string" ? value.scratch : undefined;
+  const notification = parseNotificationProposal(value.notification);
+  if (Object.hasOwn(value, "notification") && !notification) {
+    return undefined;
+  }
   if (scratch !== undefined) {
     try {
       assertCronJobScratchContent(scratch);
@@ -68,6 +78,7 @@ export function normalizeHeartbeatToolResponse(value: unknown): HeartbeatToolRes
     notify,
     summary,
     ...(notificationText ? { notificationText } : {}),
+    ...(notification ? { notification } : {}),
     ...(reason ? { reason } : {}),
     ...(priority && PRIORITIES.has(priority)
       ? { priority: priority as HeartbeatToolPriority }
@@ -89,6 +100,7 @@ export function createHeartbeatToolResponsePayload(response: HeartbeatToolRespon
     text: response.notify ? getHeartbeatToolNotificationText(response) : HEARTBEAT_TOKEN,
     channelData: {
       [HEARTBEAT_RESPONSE_CHANNEL_DATA_KEY]: publicResponse,
+      ...(response.notification ? { [NOTIFICATION_CHANNEL_DATA_KEY]: response.notification } : {}),
     },
   };
   if (scratch !== undefined) {
