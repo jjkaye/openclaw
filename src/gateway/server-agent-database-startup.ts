@@ -8,11 +8,11 @@ import {
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.types.js";
 import type { PluginRegistry } from "../plugins/registry-types.js";
-import { withPluginRuntimeRegistryScope } from "../plugins/runtime/gateway-request-scope.js";
 import { getSpawnBroker, runWithSpawnBroker } from "../process/spawn-broker/context.js";
 import { withAgentDatabasePreparationGuard } from "../state/agent-database-admission.js";
 import type { getAgentDatabaseStartupAdmission } from "../state/agent-database-startup.js";
 import { isSameOpenClawAgentDatabasePath } from "../state/openclaw-agent-db.paths.js";
+import { publishDeferredAgentModelRuntime } from "./server-agent-model-runtime-startup.js";
 
 function assertAgentDatabaseConfiguration(
   cfg: OpenClawConfig,
@@ -143,7 +143,7 @@ export function activateGatewayAgentDatabaseStartup(params: {
       runWithSpawnBroker(broker, async () => {
         phase("secrets");
         const [
-          { refreshPreparedModelRuntimeSnapshots, getPreparedModelRuntimeSnapshot },
+          { getPreparedModelRuntimeSnapshot },
           { listConfiguredOwnerInputs },
           {
             getActiveSecretsRuntimeSnapshot,
@@ -208,27 +208,17 @@ export function activateGatewayAgentDatabaseStartup(params: {
             throw new Error(`Agent ${agentId} model preparation has not published`);
           }
         };
-        const agentIds = new Set([agentId]);
         assertPreparationCurrent();
         await withAgentDatabasePreparationGuard(assertPreparationCurrent, async () => {
           phase("models");
           const pluginMetadataSnapshot = params.getPluginMetadataSnapshot();
-          await withPluginRuntimeRegistryScope(params.getPluginRegistry(), () =>
-            refreshPreparedModelRuntimeSnapshots(cfg, {
-              agentIds,
-              catalogMode: "static",
-              allowGatewaySubagentBinding: true,
-              ...(pluginMetadataSnapshot ? { pluginMetadataSnapshot } : {}),
-              isPublicationCurrent: () => {
-                try {
-                  assertPreparationCurrent();
-                  return true;
-                } catch {
-                  return false;
-                }
-              },
-            }),
-          );
+          await publishDeferredAgentModelRuntime({
+            cfg,
+            agentId,
+            pluginRegistry: params.getPluginRegistry(),
+            ...(pluginMetadataSnapshot ? { pluginMetadataSnapshot } : {}),
+            assertCurrent: assertPreparationCurrent,
+          });
           preparedInput = listConfiguredOwnerInputs(cfg, undefined, true).find(
             (input) => input.agentId === agentId,
           );
