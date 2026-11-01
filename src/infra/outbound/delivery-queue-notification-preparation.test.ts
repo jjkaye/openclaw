@@ -1,3 +1,4 @@
+import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NotificationCanceledError } from "../../notifications/cancellation.js";
 import type { NotificationPreparationCandidate } from "../../notifications/receipt-policy.js";
@@ -137,7 +138,10 @@ describe("atomic notification preparation custody", () => {
     ).rejects.toBeInstanceOf(NotificationCanceledError);
     const second = await requireClaim([candidate("a")]);
     expect(second.entry.id).not.toBe(first.entry.id);
-    expect(second.selected[0].receipt).toMatchObject({ ...candidate("a").receiptBase, slot: 0 });
+    expect(expectDefined(second.selected[0], "selected notification").receipt).toMatchObject({
+      ...candidate("a").receiptBase,
+      slot: 0,
+    });
     const rows = await listNotificationDeliveryReceipts(
       { includePending: true },
       fixtures.tmpDir(),
@@ -202,7 +206,10 @@ describe("atomic notification preparation custody", () => {
         await owner.markPrepared();
       },
     });
-    const [stored] = await listNotificationDeliveryReceipts({}, fixtures.tmpDir());
+    const stored = expectDefined(
+      (await listNotificationDeliveryReceipts({}, fixtures.tmpDir()))[0],
+      "notification receipt",
+    );
     expect(stored).toMatchObject({
       status: "completed",
       recoveryState: "completed_notification_suppressed",
@@ -291,7 +298,12 @@ describe("atomic notification preparation custody", () => {
       enqueuePreparedDeliveryOnce(
         {
           ...params,
-          notificationReceipts: [{ ...first.selected[0].receipt, topicKey: "b".repeat(64) }],
+          notificationReceipts: [
+            {
+              ...expectDefined(first.selected[0], "selected notification").receipt,
+              topicKey: "b".repeat(64),
+            },
+          ],
         },
         first.entry.id,
         first.entry,

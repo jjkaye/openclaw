@@ -1,3 +1,4 @@
+import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { createHeartbeatToolResponsePayload } from "../../auto-reply/heartbeat-tool-response.js";
@@ -55,7 +56,7 @@ describe("notification policy through the native durable delivery owner", () => 
   let beforeDispatch: (() => Promise<void>) | undefined;
   let topicOverrides: Map<string, Partial<NotificationSourceState>>;
   let chunkLimit: number;
-  const send = vi.fn(async (_text: string): Promise<{ messageId?: string }> => ({
+  const send = vi.fn(async (_text: string): Promise<{ messageId: string }> => ({
     messageId: "fixture-message",
   }));
   const payload = (text: string, notification = proposal) => ({
@@ -256,7 +257,7 @@ describe("notification policy through the native durable delivery owner", () => 
     expect(outcomes).toEqual([{ index: 0, status: "suppressed", reason: "notification_policy" }]);
     const receipts = await listNotificationDeliveryReceipts({}, fixtures.tmpDir());
     expect(receipts).toHaveLength(1);
-    expect(receipts[0].notificationReceipt.slot).toBe(0);
+    expect(expectDefined(receipts[0], "notification receipt").notificationReceipt.slot).toBe(0);
     expect(JSON.stringify(receipts)).not.toContain("First ask");
   });
 
@@ -296,14 +297,15 @@ describe("notification policy through the native durable delivery owner", () => 
   });
 
   it("retains bare pending custody when a prefixed wake arrives", async () => {
-    send.mockResolvedValueOnce({});
+    // An empty platform ID provides no acknowledgment.
+    send.mockResolvedValueOnce({ messageId: "" });
     await deliver(request([payload("Uncertain decision")]));
     const before = await listNotificationDeliveryReceipts(
       { includePending: true },
       fixtures.tmpDir(),
     );
     expect(before).toHaveLength(1);
-    expect(before[0].status).toBe("pending");
+    expect(expectDefined(before[0], "pending receipt").status).toBe("pending");
     await deliver({ ...request([payload("Repeated decision")]), to: "matrix:!owner:fixture" });
     expect(send).toHaveBeenCalledTimes(1);
     expect(
@@ -360,11 +362,12 @@ describe("notification policy through the native durable delivery owner", () => 
       fixtures.tmpDir(),
     );
     expect(receipts).toHaveLength(1);
-    expect(receipts[0].status).toBe("failed");
+    expect(expectDefined(receipts[0], "notification receipt").status).toBe("failed");
   });
 
   it("retains an unknown prior revision while continuing an unrelated topic", async () => {
-    send.mockResolvedValueOnce({});
+    // An empty platform ID provides no acknowledgment.
+    send.mockResolvedValueOnce({ messageId: "" });
     await deliver(request([payload("Uncertain send")]));
     state = { ...state, revision: "v2" };
     const changed = { ...proposal, expectedRevision: "v2" };
@@ -414,8 +417,12 @@ describe("notification policy through the native durable delivery owner", () => 
     const transform = vi.fn(async (current: ReplyPayload) => current);
     await deliver({ ...request([selected, excluded]), prepareNotificationPayload: transform });
     expect(transform).toHaveBeenCalledTimes(1);
-    expect(transform.mock.calls[0][0].text).toBe("Selected decision");
-    expect(transform.mock.calls[0][0].spokenText).toBe("Selected spoken decision");
+    expect(expectDefined(transform.mock.calls[0], "transformation call")[0].text).toBe(
+      "Selected decision",
+    );
+    expect(expectDefined(transform.mock.calls[0], "transformation call")[0].spokenText).toBe(
+      "Selected spoken decision",
+    );
     expect(JSON.stringify(transform.mock.calls)).not.toContain("Stale spoken decision");
     expect(send).toHaveBeenCalledWith("Selected decision");
   });
@@ -431,7 +438,7 @@ describe("notification policy through the native durable delivery owner", () => 
     const transform = vi.fn(async (current: ReplyPayload) => current);
     await deliver({ ...request([first, second]), prepareNotificationPayload: transform });
     expect(transform).toHaveBeenCalledTimes(1);
-    const combined = transform.mock.calls[0][0];
+    const combined = expectDefined(transform.mock.calls[0], "transformation call")[0];
     expect(combined.text).toBe("First decision\n\nSecond decision");
     expect(combined.spokenText).toBe("Speak first\n\nSpeak second");
     expect(getReplyPayloadMetadata(combined)?.tts?.text).toBe("Speak first\n\nSpeak second");
@@ -503,7 +510,9 @@ describe("notification policy through the native durable delivery owner", () => 
     expect(send).not.toHaveBeenCalled();
     const receipts = await listNotificationDeliveryReceipts({}, fixtures.tmpDir());
     expect(receipts).toHaveLength(1);
-    expect(receipts[0].recoveryState).toBe("completed_notification_suppressed");
-    expect(receipts[0].acknowledgedAt).toBeUndefined();
+    expect(expectDefined(receipts[0], "notification receipt").recoveryState).toBe(
+      "completed_notification_suppressed",
+    );
+    expect(expectDefined(receipts[0], "notification receipt").acknowledgedAt).toBeUndefined();
   });
 });

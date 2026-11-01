@@ -1,3 +1,4 @@
+import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NotificationCanceledError } from "../../notifications/cancellation.js";
 import { createPluginRegistry } from "../../plugins/registry.js";
@@ -112,7 +113,10 @@ describe("durable wholly-unsent notification cancellation", () => {
       deliver,
     });
     expect(deliver).not.toHaveBeenCalled();
-    const [stored] = await listNotificationDeliveryReceipts({}, fixtures.tmpDir());
+    const stored = expectDefined(
+      (await listNotificationDeliveryReceipts({}, fixtures.tmpDir()))[0],
+      "notification receipt",
+    );
     expect(stored).toMatchObject({
       id: first.entry.id,
       status: "failed",
@@ -130,7 +134,10 @@ describe("durable wholly-unsent notification cancellation", () => {
     expect(next.status).toBe("claimed");
     if (next.status === "claimed") {
       expect(next.entry.id).not.toBe(first.entry.id);
-      expect(next.selected[0].receipt).toMatchObject({ ...candidate.receiptBase, slot: 0 });
+      expect(expectDefined(next.selected[0], "selected notification").receipt).toMatchObject({
+        ...candidate.receiptBase,
+        slot: 0,
+      });
     }
   });
 
@@ -236,7 +243,10 @@ describe("durable wholly-unsent notification cancellation", () => {
         return [];
       },
     });
-    const [stored] = await listNotificationDeliveryReceipts({}, fixtures.tmpDir());
+    const stored = expectDefined(
+      (await listNotificationDeliveryReceipts({}, fixtures.tmpDir()))[0],
+      "notification receipt",
+    );
     expect(stored).toMatchObject({
       id: first.entry.id,
       status: "completed",

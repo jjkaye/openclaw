@@ -3,6 +3,7 @@ import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { NOTIFICATION_CHANNEL_DATA_KEY } from "../../notifications/proposal.js";
 import { withPluginMetadataSnapshotScope } from "../../plugins/current-plugin-metadata-snapshot.js";
 import {
   cleanupPluginLoaderFixturesForTest,
@@ -21,13 +22,31 @@ import {
 import { clearPluginMetadataLifecycleCaches } from "../../plugins/plugin-metadata-lifecycle.js";
 import { finalizePluginMetadataSnapshot } from "../../plugins/plugin-metadata-snapshot.js";
 import { createPluginMetadataSnapshotFixture } from "../../plugins/plugin-metadata.test-support.js";
+import {
+  capturePluginLifecycleAuthority,
+  revokePluginRecord,
+} from "../../plugins/registry-lifecycle.js";
 import type { PluginRegistry } from "../../plugins/registry-types.js";
-import { disposePluginRegistryInstances } from "../../plugins/runtime.js";
+import { createPluginRegistry } from "../../plugins/registry.js";
+import {
+  disposePluginRegistryInstances,
+  getActivePluginRegistry,
+  setActivePluginRegistry,
+} from "../../plugins/runtime.js";
+import {
+  getPluginRuntimeGatewayRequestScope,
+  withPluginRuntimeRegistryScope,
+} from "../../plugins/runtime/gateway-request-scope.js";
+import type { PluginRuntime } from "../../plugins/runtime/types.js";
+import { createPluginRecord } from "../../plugins/status.test-fixtures.js";
+import { listNotificationDeliveryReceipts } from "../delivery-queue-sqlite.js";
 import {
   bootstrapOutboundChannelPlugin,
   bootstrapOutboundChannelPluginAsync,
   resetOutboundChannelBootstrapStateForTests,
 } from "./channel-bootstrap.runtime.js";
+import { deliverOutboundPayloads } from "./deliver.js";
+import { installDeliveryQueueTmpDirHooks } from "./delivery-queue.test-helpers.js";
 
 afterEach(() => {
   resetOutboundChannelBootstrapStateForTests();
@@ -36,10 +55,14 @@ afterEach(() => {
 });
 afterAll(cleanupPluginLoaderFixturesForTest);
 
-function createFixture({ global = false, deferInstall = false } = {}) {
+function createFixture({
+  global = false,
+  deferInstall = false,
+  stateDir: selectedStateDir = "",
+} = {}) {
   useNoBundledPlugins();
   const root = makePluginLoaderTempDir();
-  const stateDir = path.join(root, "state");
+  const stateDir = selectedStateDir || path.join(root, "state");
   vi.stubEnv("OPENCLAW_HOME", path.join(root, "home"));
   vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
   const id = "bootstrap-lifecycle";
@@ -61,7 +84,12 @@ function createFixture({ global = false, deferInstall = false } = {}) {
           config: { listAccountIds: () => ["default"], resolveAccount: () => ({}) },
           outbound: {
             deliveryMode: "direct",
-            async sendText() { record("sent:${label}"); return { channel: "${id}", messageId: "${label}" }; },
+            async sendText({ onPlatformSendDispatch, assertDirectAdapterHandoff }) {
+              await onPlatformSendDispatch?.();
+              assertDirectAdapterHandoff?.();
+              record("sent:${label}");
+              return { channel: "${id}", messageId: "${label}" };
+            },
           },
         } });`,
     });
@@ -211,5 +239,140 @@ it("keeps an async bootstrap outcome in its captured state namespace", async () 
     await expect(sender(await pending)(request)).resolves.toMatchObject({ messageId: "first" });
     const next = await bootstrapOutboundChannelPluginAsync(fixture.params);
     await expect(sender(next)(request)).resolves.toMatchObject({ messageId: "second" });
+  });
+});
+
+describe("native notification admission across real cold channel loading", () => {
+  const queues = installDeliveryQueueTmpDirHooks();
+
+  it.each([
+    { scoped: false, change: "none" },
+    { scoped: true, change: "none" },
+    { scoped: true, change: "revocation" },
+    { scoped: true, change: "replacement" },
+  ])("preserves source fences (scoped=$scoped, change=$change)", async ({ scoped, change }) => {
+    const fixture = createFixture({ stateDir: queues.tmpDir() });
+    await using cache = createPluginCache();
+    await withPluginCache(cache, async () => {
+      const owner = createPluginRegistry({
+        logger: { info() {}, warn() {}, error() {}, debug() {} },
+        runtime: {} as PluginRuntime,
+        activateGlobalSideEffects: false,
+      });
+      const registry = owner.registry;
+      const record = createPluginRecord({ id: "notification-owner" });
+      registry.plugins.push(record);
+      const sourceId = "cold-loader-tasks";
+      const observations: { sameRegistry: boolean; authorityValid: boolean; sameEntry: boolean }[] =
+        [];
+      let changed = false;
+      owner.createApi(record, { config: {} }).registerNotificationSource({
+        contractVersion: 1,
+        id: sourceId,
+        resolve: async () => {
+          observations.push({
+            sameRegistry:
+              (getPluginRuntimeGatewayRequestScope()?.pluginRegistry ??
+                getActivePluginRegistry()) === registry,
+            authorityValid: authority(),
+            sameEntry: registry.notificationSources[0] === entry,
+          });
+          // The real loader's registration is the barrier; admission happened before it.
+          if (
+            !changed &&
+            change !== "none" &&
+            fs.existsSync(path.join(fixture.root, "events.txt"))
+          ) {
+            changed = true;
+            if (change === "revocation") {
+              revokePluginRecord(registry, record);
+            } else {
+              registry.notificationSources[0] = { ...entry };
+            }
+          }
+          return {
+            topicId: "next-action",
+            revision: "v1",
+            status: "open",
+            timeZone: "America/New_York",
+          };
+        },
+      });
+      const entry = expectDefined(registry.notificationSources[0], "notification source");
+      const authority = expectDefined(
+        capturePluginLifecycleAuthority(registry, record, { scopedRuntime: true }),
+        "source authority",
+      );
+      setActivePluginRegistry(registry);
+      expect(registry.channels).toEqual([]);
+      expect(fs.existsSync(path.join(fixture.root, "events.txt"))).toBe(false);
+      const run = (text: string) =>
+        deliverOutboundPayloads({
+          cfg: fixture.config,
+          channel: fixture.plugin.id,
+          to: "fixture-recipient",
+          session: { agentId: "fixture-agent" },
+          payloads: [
+            {
+              text,
+              channelData: {
+                [NOTIFICATION_CHANNEL_DATA_KEY]: {
+                  sourceId,
+                  ownerId: "task-1",
+                  topicId: "next-action",
+                  purpose: "decision",
+                  expectedRevision: "v1",
+                },
+              },
+            },
+          ],
+        });
+      const attempt = () =>
+        scoped
+          ? withPluginRuntimeRegistryScope(registry, () => run("One useful decision"))
+          : run("One useful decision");
+      if (change === "none") {
+        await attempt();
+        const loaded = await bootstrapOutboundChannelPluginAsync({
+          ...fixture.params,
+          agentId: "fixture-agent",
+        });
+        expect(loaded).toBeDefined();
+        expect(loaded).not.toBe(registry);
+        expect(loaded?.notificationSources).toEqual([]);
+        expect(fixture.events()).toEqual(["registered:first", "sent:first"]);
+        await (scoped
+          ? withPluginRuntimeRegistryScope(registry, () => run("Same decision, different wording"))
+          : run("Same decision, different wording"));
+        expect(fixture.events()).toEqual(["registered:first", "sent:first"]);
+      } else {
+        let cause: unknown = await attempt().then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        while (cause instanceof Error && cause.cause) {
+          cause = cause.cause;
+        }
+        expect(cause).toMatchObject({
+          name: "NotificationSourceUnavailableError",
+          reason: "retired",
+        });
+        expect(changed).toBe(true);
+        expect(fixture.events()).toEqual(["registered:first"]);
+      }
+      expect(observations.length).toBeGreaterThan(0);
+      expect(
+        observations.every(
+          (observation) =>
+            observation.sameRegistry && observation.authorityValid && observation.sameEntry,
+        ),
+      ).toBe(true);
+      const receipts = await listNotificationDeliveryReceipts(
+        { includePending: true },
+        queues.tmpDir(),
+      );
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]?.acknowledgedAt !== undefined).toBe(change === "none");
+    });
   });
 });
