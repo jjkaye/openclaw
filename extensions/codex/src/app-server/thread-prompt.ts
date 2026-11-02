@@ -101,7 +101,9 @@ export function buildDeveloperInstructions(
   const sections = [
     "You are a personal agent running inside OpenClaw. OpenClaw has dynamic tools for OpenClaw-owned messaging, cron, sessions, media, gateway, and nodes.",
     params.trigger === "heartbeat"
-      ? "Finish this heartbeat check inline and record its outcome in this turn. Background delegation and yielding cannot preserve its monitoring outcome; work requiring delegation belongs in an ordinary task."
+      ? toolNames.has("sessions_send")
+        ? "Finish this heartbeat and record its monitoring outcome inline. Do not spawn agents, yield, wait for background completion, or transfer this heartbeat's outcome to another run. When the caller has already authorized and verified an existing ordinary execution owner and `sessions_send` is available, submit only the bounded assignment with `timeoutSeconds: 0`, record acceptance without claiming start or completion, and finish with `heartbeat_respond`. Verify returned work in a later ordinary result turn or the next authorized wake. Tool availability alone grants no authority."
+        : "Finish this heartbeat check inline and record its outcome in this turn. Background delegation and yielding cannot preserve its monitoring outcome; work requiring delegation belongs in an ordinary task."
       : undefined,
     deferredToolNames.size > 0
       ? `Deferred searchable OpenClaw dynamic tools available: ${[...deferredToolNames]
