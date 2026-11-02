@@ -10,10 +10,12 @@ import type {
 } from "../../channels/message/types.js";
 import type { SessionDeliveryGeneration } from "../../config/sessions/session-delivery-generation.types.js";
 import type { ReplyToMode } from "../../config/types.js";
+import type { NotificationBlock } from "../../notifications/proposal.js";
 import type { PluginHookReplyPayloadSendingContext } from "../../plugins/hook-types.js";
 import type {
   DeliveryQueueCompletionRetention,
   DeliveryQueueEntryState,
+  DeliveryQueueNotificationReceipt,
 } from "../delivery-queue-sqlite.types.js";
 import type { IndexedOutboundAuditTerminal } from "./deliver-types.js";
 import type { OutboundDeliveryFormattingOptions } from "./formatting.js";
@@ -68,6 +70,9 @@ export type QueuedReplyPayloadSendingHook = {
 };
 
 export type QueuedDeliveryPayload = {
+  notificationBlocks?: readonly NotificationBlock[];
+  notificationReceipts?: readonly DeliveryQueueNotificationReceipt[];
+  requireNotificationReference?: boolean;
   sessionGeneration?: SessionDeliveryGeneration;
   channel: string;
   to: string;
@@ -119,6 +124,7 @@ export type LegacyQueuedDeliveryPreparation = LegacyQueuedDelivery & {
 };
 
 export type DeliveryFailureSettlement = {
+  notificationCanceled?: true;
   error: string;
   unknownSendCleanup?: true;
   terminals?: readonly IndexedOutboundAuditTerminal[];

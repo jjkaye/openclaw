@@ -36,6 +36,10 @@ function buildGrant(
 }
 
 describe("buildCliMcpGrantContext source-reply authority", () => {
+  it("carries host message-tool denial independently of the advisory allowlist", () => {
+    expect(buildGrant({ disableMessageTool: true }).messageToolDisabled).toBe(true);
+    expect(buildGrant({ disableMessageTool: false })).not.toHaveProperty("messageToolDisabled");
+  });
   it.each(["heartbeat", "cron-event", "exec-event"])(
     "keeps the reply channel separate from the %s turn source",
     (messageProvider) => {

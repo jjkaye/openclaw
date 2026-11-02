@@ -3,6 +3,7 @@ import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../../auto-reply/tokens.j
 import { resolveControlUiSessionUrl } from "../../config/control-ui-link-base.js";
 import { resolveSessionStorePathCore } from "../../config/sessions/inbound.runtime.js";
 import { formatErrorMessage } from "../../infra/errors.js";
+import { isOutboundDeliveryError } from "../../infra/outbound/deliver-types.js";
 import type {
   NormalizedOutboundPayload,
   OutboundDeliveryResult,
@@ -12,7 +13,6 @@ import {
   createOutboundPayloadPlan,
   projectOutboundPayloadPlanForMirror,
 } from "../../infra/outbound/payloads.js";
-import { hasReplyPayloadContent } from "../../interactive/payload.js";
 import { stringifyRouteThreadId } from "../../plugin-sdk/channel-route.js";
 import { isCronSessionKey } from "../../routing/session-key.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
@@ -44,10 +44,11 @@ import {
   logCronDeliveryError,
   logCronDeliveryErrorDeferred,
   logCronDeliveryWarn,
-  maybeApplyTtsToCronPayloads,
+  prepareCronDeliveryPayloads,
   normalizeSilentReplyText,
   resolveDescendantSubagentFollowup,
   resolveDirectCronDeliveryGeneration,
+  resolveDirectCronSuppression,
   resolveStaleCronDeliveryError,
   retryTransientDirectCronDelivery,
   waitForCompletedDirectCronDelivery,
@@ -245,7 +246,6 @@ export async function dispatchCronDelivery(
       deliveryAttempted = true;
       return null;
     }
-    const identity = resolveAgentOutboundIdentity(params.cfgWithAgentDefaults, params.agentId);
     try {
       if (params.isAborted()) {
         return { kind: "error", error: params.abortReason() };
@@ -259,15 +259,15 @@ export async function dispatchCronDelivery(
         await logCronDeliveryWarn(`[cron:${params.job.id}] ${deliveryError}`);
         return { kind: "suppressed" };
       }
-      const payloadsForDelivery = (
-        await maybeApplyTtsToCronPayloads({
+      const { payloads: payloadsForDelivery, prepareNotificationPayload } =
+        await prepareCronDeliveryPayloads({
           cfg: params.cfgWithAgentDefaults,
           payloads: normalizedPayloads,
           delivery,
           agentId: params.agentId,
           ttsAuto: params.ttsAuto,
-        })
-      ).filter((p) => hasReplyPayloadContent(p, { trimText: true }));
+          requireNotificationReference: params.job.delivery?.requireNotificationReference,
+        });
       if (payloadsForDelivery.length === 0) {
         recordDelivery("not-delivered", "cron delivery payload was empty after TTS");
         return null;
@@ -355,8 +355,10 @@ export async function dispatchCronDelivery(
             accountId: delivery.accountId,
             threadId: delivery.threadId,
             payloads: linkedPayloadsForDelivery,
+            prepareNotificationPayload,
+            requireNotificationReference: params.job.delivery?.requireNotificationReference,
             session: deliverySession,
-            identity,
+            identity: resolveAgentOutboundIdentity(params.cfgWithAgentDefaults, params.agentId),
             bestEffort: params.deliveryBestEffort,
             durability: params.deliveryBestEffort ? "best_effort" : "required",
             deliveryIntentId: deliveryIdempotencyKey,
@@ -377,17 +379,31 @@ export async function dispatchCronDelivery(
         );
         payloadMayHaveReachedRecipientBeforeFailure ||=
           durableMessageBatchMayHaveReachedRecipient(send);
+        const recoveryOwned =
+          send.status === "failed" &&
+          send.deliveryIntent !== undefined &&
+          send.deliveryIntent.id !== deliveryIdempotencyKey &&
+          isOutboundDeliveryError(send.error) &&
+          send.error.queueCustody === "held";
         if (
           send.status === "failed" &&
           (await waitForCompletedDirectCronDelivery({
-            id: deliveryIdempotencyKey,
+            id: send.deliveryIntent?.id ?? deliveryIdempotencyKey,
             queueName,
             signal: params.abortSignal,
+            waitForRecovery: recoveryOwned,
           }))
         ) {
           params.deliveryAttemptFence?.assertCurrent();
           // Another process committed the same fenced recipient intent.
           completedByConcurrentDelivery = true;
+          return [];
+        }
+        if (recoveryOwned) {
+          recordDelivery(
+            "unknown",
+            "cron delivery has no confirmed provider acknowledgment; inspect the native delivery receipt",
+          );
           return [];
         }
         if (send.status === "failed") {
@@ -402,13 +418,8 @@ export async function dispatchCronDelivery(
           deliveryState.error ??= formatErrorMessage(send.error);
         }
         if (send.status === "suppressed") {
-          // The first suppressed payload can precede an identityless platform send.
           const uncertain = durableMessageBatchMayHaveReachedRecipient(send);
-          const reason = uncertain ? "adapter_returned_no_identity" : send.reason;
-          recordDelivery(
-            uncertain ? "unknown" : "not-delivered",
-            `cron delivery ${uncertain ? "outcome is unknown" : "was suppressed"}: ${reason}`,
-          );
+          recordDelivery(...resolveDirectCronSuppression(send.reason, uncertain));
         }
         return send.status === "sent" || send.status === "partial_failed" ? send.results : [];
       };

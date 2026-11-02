@@ -82,6 +82,9 @@ export function shouldUseHeartbeatResponseToolPrompt(params: {
   sessionKey?: string;
   chatType?: ChatType;
 }): boolean {
+  if (params.heartbeat?.requireNotificationReference) {
+    return true;
+  }
   const chatType = normalizeChatType(params.chatType);
   const visibleReplies =
     chatType === "group" || chatType === "channel"

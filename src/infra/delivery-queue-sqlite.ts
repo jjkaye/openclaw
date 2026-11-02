@@ -10,7 +10,11 @@ import {
   type TerminalizePendingDeliveryQueueEntryParams,
   type TerminalizePendingDeliveryQueueEntryResult,
 } from "./delivery-queue-sqlite.kernel.js";
-import type { DeliveryQueueEntryState } from "./delivery-queue-sqlite.types.js";
+import type {
+  DeliveryQueueEntryState,
+  DeliveryQueueNotificationReceiptQuery,
+  DeliveryQueueNotificationResolution,
+} from "./delivery-queue-sqlite.types.js";
 import {
   captureDeliveryQueueStateContext,
   resolveDeliveryQueueStateEnv,
@@ -21,6 +25,10 @@ import { executeDeliveryQueueOperation } from "./delivery-queue-worker-store.js"
 export type {
   DeliveryQueueCompletionRetention,
   DeliveryQueueEntryState,
+  DeliveryQueueNotificationReceipt,
+  DeliveryQueueNotificationReceiptQuery,
+  DeliveryQueueNotificationReceiptSnapshot,
+  DeliveryQueueNotificationResolution,
 } from "./delivery-queue-sqlite.types.js";
 
 export {
@@ -47,6 +55,36 @@ export async function inspectDeliveryQueueReceipt(
     input: { queueName, id, includePending },
   });
   context.workerContext.admission.assertCurrent();
+  return result;
+}
+
+/** Read opaque custody; the source-resolution sweep requests terminal rows by default. */
+export async function listNotificationDeliveryReceipts(
+  query: DeliveryQueueNotificationReceiptQuery = {},
+  stateDir?: string,
+  context?: DeliveryQueueStateContext,
+) {
+  const captured = context ?? captureDeliveryQueueStateContext(stateDir);
+  const result = await executeDeliveryQueueOperation(captured, undefined, {
+    type: "deliveryQueue.listNotificationReceipts",
+    input: query,
+  });
+  captured.workerContext.admission.assertCurrent();
+  return result;
+}
+
+/** Apply a current owner's closure or verified reopen without moving its first closure time. */
+export async function updateNotificationDeliveryReceiptResolution(
+  resolution: DeliveryQueueNotificationResolution,
+  stateDir?: string,
+  context?: DeliveryQueueStateContext,
+): Promise<number> {
+  const captured = context ?? captureDeliveryQueueStateContext(stateDir);
+  const result = await executeDeliveryQueueOperation(captured, undefined, {
+    type: "deliveryQueue.resolveNotificationReceipts",
+    input: resolution,
+  });
+  captured.workerContext.admission.assertCurrent();
   return result;
 }
 

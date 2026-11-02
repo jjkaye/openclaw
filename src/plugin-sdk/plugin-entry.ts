@@ -21,6 +21,16 @@ export type {
 } from "../plugins/capability-catalog-context.types.js";
 export type { PluginCapabilityCatalog } from "../plugins/capability-catalog.types.js";
 export type { OpenClawConfig } from "../config/types.openclaw.js";
+export { notificationOwnerKey } from "../notifications/proposal.js";
+export type {
+  NotificationSourceReference,
+  NotificationResolveContext,
+  NotificationSourceStatus,
+  NotificationSourceState,
+  NotificationReceiptState,
+  NotificationReceiptResolveContext,
+  NotificationSourceV1,
+} from "../notifications/source-types.js";
 
 export type {
   AgentHarness,

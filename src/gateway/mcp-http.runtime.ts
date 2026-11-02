@@ -303,10 +303,13 @@ async function constructMcpLoopbackTools(
   params.assertCurrent();
   // Retain the row identity so construction cannot publish facts from before an awaited read.
   const sessionFacts = captureMcpCatalogSessionFacts(params);
-  const { toolsAllow, webSearchDisabled, ...context } = params.context;
+  const { toolsAllow, webSearchDisabled, messageToolDisabled, ...context } = params.context;
   const excludeToolNames = new Set(NATIVE_TOOL_EXCLUDE);
   if (webSearchDisabled) {
     excludeToolNames.add("web_search");
+  }
+  if (messageToolDisabled) {
+    excludeToolNames.add("message");
   }
   // Restricted CLI grants use OpenClaw's implementations for coding tools;
   // native CLI tools bypass path, approval, sandbox, and exec policy.

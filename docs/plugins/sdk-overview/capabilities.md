@@ -36,6 +36,7 @@ worker, storage, or embedding provider must satisfy. Part of the
 | `api.registerWebFetchProvider(...)`              | Web fetch / scrape provider                                                       |
 | `api.registerWebSearchProvider(...)`             | Web search                                                                        |
 | `api.registerCompactionProvider(...)`            | Pluggable transcript-compaction backend                                           |
+| `api.registerNotificationSource(...)`            | Current task authority for proactive notification admission and receipt cleanup   |
 
 Transcript source providers that share an account namespace with an inbound
 channel declare an `accountOwnership` descriptor with that channel id and a
@@ -49,6 +50,42 @@ account exists. Configured auto-start must supply a nonempty source account or
 resolve one with this descriptor. OpenClaw rejects ambiguous or unresolved ownership before it
 persists the start or invokes the provider. Provider aliases are lookup names
 only and must not be used for this declaration.
+
+### Notification sources (contract version 1)
+
+Import `NotificationSourceV1` and its reference, context, and state types from
+`openclaw/plugin-sdk/plugin-entry`. Register a source with
+`api.registerNotificationSource({ contractVersion: 1, id, resolve, resolveReceipt? })`.
+Source IDs belong to one plugin; a competing plugin cannot replace them. The
+owning plugin may replace its own registration, which invalidates captured handles.
+
+`resolve(reference, context)` receives `{ sourceId, ownerId, topicId, purpose }`,
+where `purpose` is `"decision"` or `"result"`, and host-owned agent and recipient
+context. Return `null` when the exact authorized owner/topic is absent. Otherwise,
+return the source-confirmed `topicId`, meaningful `revision`, `status`, and IANA
+`timeZone`, with optional `resolvedAt` (Unix milliseconds), `resolvedOn` (an explicit
+source closure date in `YYYY-MM-DD` form), and `consequenceKey`. Preserve source
+date precision instead of inventing a closure timestamp.
+Status is `"open"`, `"paused"`, `"answered"`, `"resolved"`, or `"superseded"`.
+The source must verify the allowed recipient, topic and current state through its
+existing authorized read route. Model-selected IDs, a changed message, review
+timestamps, or a new run do not establish a material revision. `consequenceKey`
+must describe a source-verified change, such as an approaching real deadline.
+
+The optional `resolveReceipt(ownerKey, { signal })` matches an opaque owner hash
+against the source's finite current owners and returns only `{ status, resolvedAt?, resolvedOn? }`.
+Use `notificationOwnerKey(sourceId, ownerId)` from the same SDK entrypoint to
+derive the exact hash used by the host; do not invent a second key format.
+Return `null` for unknown owners; absence and source outages never establish task
+resolution. Cleanup uses one finite registration snapshot and rejects evidence if
+any contributing registration loses authority before the lookup settles.
+
+Resolvers are read-only and must honor cancellation. OpenClaw bounds each call,
+checks current plugin authority before and after awaited work, and sanitizes source
+errors. Pending delivery stores references rather than callbacks and reacquires
+the current source on recovery. Registration supplies no new task access, recipient
+permission, schedule, or external-action authority. Keep source values stable after
+returning them, following the [plugin value boundary](/plugins/sdk-runtime#plugin-value-boundary).
 
 ### Storage providers
 

@@ -140,7 +140,9 @@ export async function runEmbeddedFallbackCandidate(
           agentHarnessPolicy.runtimeSource !== "implicit" ? agentHarnessPolicy.runtime : undefined,
         sandboxSessionKey: turn.runtimePolicySessionKey,
         explicitSkillSelections: turn.followupRun.explicitSkillSelections,
-        forceMessageTool: turn.followupRun.run.sourceReplyDeliveryMode === "message_tool_only",
+        forceMessageTool:
+          turn.opts?.disableMessageTool !== true &&
+          turn.followupRun.run.sourceReplyDeliveryMode === "message_tool_only",
         suppressTranscriptOnlyAssistantPersistence:
           turn.followupRun.run.suppressTranscriptOnlyAssistantPersistence,
         assistantErrorTranscript: params.assistantErrorTranscript,

@@ -4,6 +4,7 @@ import type { CronDeliveryPlan } from "../delivery-plan.js";
 export function resolveCronSourceDeliveryPlan(params: {
   deliveryPlan: CronDeliveryPlan;
   resolvedDelivery: SourceDeliveryPlan["target"] & { ok?: boolean };
+  requireNotificationReference?: boolean;
 }): SourceDeliveryPlan {
   const webhook = params.deliveryPlan.mode === "webhook";
   const announce = !webhook && params.deliveryPlan.mode !== "none";
@@ -21,7 +22,7 @@ export function resolveCronSourceDeliveryPlan(params: {
     normalFinal: announce ? "visible" : "private",
     sourceReplyDeliveryMode: undefined,
     messageTool: {
-      enabled: !webhook,
+      enabled: !webhook && !params.requireNotificationReference,
       force: false,
       requireExplicitTarget: announce,
       requireExplicitTargetEvidence: announce,

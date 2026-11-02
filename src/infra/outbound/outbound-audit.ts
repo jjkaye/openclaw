@@ -78,7 +78,9 @@ function projectRecordedOutboundAuditTerminal(
     return {
       outcome: "suppressed",
       reasonCode:
-        latest.reason === "adapter_returned_no_send" ? "no_visible_payload" : latest.reason,
+        latest.reason === "adapter_returned_no_send" || latest.reason === "notification_policy"
+          ? "no_visible_payload"
+          : latest.reason,
     };
   }
   return undefined;

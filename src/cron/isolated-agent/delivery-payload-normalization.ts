@@ -3,6 +3,10 @@ import { normalizeOptionalString } from "@openclaw/normalization-core/string-coe
 import { copyReplyPayloadMetadata, type ReplyPayload } from "../../auto-reply/reply-payload.js";
 import type { NormalizeReplyOutcome } from "../../auto-reply/reply/normalize-reply.js";
 import { hasReplyPayloadContent } from "../../interactive/payload.js";
+import {
+  NOTIFICATION_CHANNEL_DATA_KEY,
+  unwrapNotificationEnvelopes,
+} from "../../notifications/proposal.js";
 import { normalizeSilentReplyText } from "./delivery-dispatch-policy.js";
 
 type CronChannelTransform = {
@@ -16,14 +20,31 @@ function shouldAttachDirectCronFallbackText(payload: ReplyPayload): boolean {
   );
 }
 
-function normalizeDirectPayload(payload: ReplyPayload): ReplyPayload {
+function normalizeDirectPayload(payload: ReplyPayload): ReplyPayload[] {
   const normalized = payload.text ? normalizeSilentReplyText(payload.text) : undefined;
-  return normalized
+  const candidate = normalized
     ? copyReplyPayloadMetadata(payload, {
         ...payload,
         text: normalized.strippedTrailingSilentToken ? undefined : normalized.text,
       })
     : payload;
+  const envelopes = candidate.text ? unwrapNotificationEnvelopes(candidate.text) : undefined;
+  if (!envelopes) {
+    return [candidate];
+  }
+  if (
+    envelopes.length > 1 &&
+    hasReplyPayloadContent({ ...candidate, text: undefined }, { trimText: true })
+  ) {
+    throw new Error("Multiple notification topics require text-only payloads");
+  }
+  return envelopes.map(({ text, notification }) =>
+    copyReplyPayloadMetadata(candidate, {
+      ...candidate,
+      text,
+      channelData: { ...candidate.channelData, [NOTIFICATION_CHANNEL_DATA_KEY]: notification },
+    }),
+  );
 }
 
 export function normalizeDirectCronDeliveryPayloads(params: {
@@ -38,11 +59,22 @@ export function normalizeDirectCronDeliveryPayloads(params: {
       normalizeOptionalString(params.summary) ??
       normalizeOptionalString(params.synthesizedText),
   );
-  const fallbackText = fallback.strippedTrailingSilentToken ? undefined : fallback.text;
+  const fallbackRawText = fallback.strippedTrailingSilentToken ? undefined : fallback.text;
+  const fallbackEnvelopes = fallbackRawText
+    ? unwrapNotificationEnvelopes(fallbackRawText)
+    : undefined;
+  const fallbackText = fallbackEnvelopes ? undefined : fallbackRawText;
   const candidates = params.deliveryPayloads
-    .map(normalizeDirectPayload)
+    .flatMap(normalizeDirectPayload)
     .filter((payload) => hasReplyPayloadContent(payload, { trimText: true }));
-  if (candidates.length === 0 && fallbackText) {
+  if (candidates.length === 0 && fallbackEnvelopes) {
+    candidates.push(
+      ...fallbackEnvelopes.map(({ text, notification }) => ({
+        text,
+        channelData: { [NOTIFICATION_CHANNEL_DATA_KEY]: notification },
+      })),
+    );
+  } else if (candidates.length === 0 && fallbackText) {
     candidates.push({ text: fallbackText });
   }
   const fallbackIndex = fallbackText
@@ -115,6 +147,15 @@ export function appendCronRunInspectionLink(
   payloads: ReplyPayload[],
   inspectionUrl: string | undefined,
 ): ReplyPayload[] {
+  // Source-backed proactive copy stays conversational. The run's native
+  // inspection record remains available without appending bookkeeping to it.
+  if (
+    payloads.some(
+      (payload) => payload.channelData && NOTIFICATION_CHANNEL_DATA_KEY in payload.channelData,
+    )
+  ) {
+    return payloads;
+  }
   const index = payloads.findLastIndex((payload) => payload.text?.trim());
   if (!inspectionUrl || index < 0) {
     return payloads;

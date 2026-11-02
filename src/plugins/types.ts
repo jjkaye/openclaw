@@ -93,6 +93,15 @@ export type {
   WebSearchProviderToolExecutionContext,
 } from "./web-provider-types.js";
 export type * from "./types.mcp-connection.js";
+export type {
+  NotificationSourceReference,
+  NotificationResolveContext,
+  NotificationSourceStatus,
+  NotificationSourceState,
+  NotificationReceiptState,
+  NotificationReceiptResolveContext,
+  NotificationSourceV1,
+} from "../notifications/source-types.js";
 
 export { WorkerProviderError } from "./capability-provider.types.js";
 export type * from "./capability-provider.types.js";

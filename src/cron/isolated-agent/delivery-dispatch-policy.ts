@@ -1,11 +1,13 @@
 /** Formatting, retry, and idempotency policy for direct cron delivery. */
-import type { ReplyPayload } from "../../auto-reply/reply-payload.js";
+import { copyReplyPayloadMetadata, type ReplyPayload } from "../../auto-reply/reply-payload.js";
+import type { NormalizeReplySkipReason } from "../../auto-reply/reply/normalize-reply-skip-reason.js";
 import {
   SILENT_REPLY_TOKEN,
   startsWithSilentToken,
   stripLeadingSilentToken,
   stripSilentToken,
 } from "../../auto-reply/tokens.js";
+import type { DurableMessageBatchSendResult } from "../../channels/message/send.js";
 import { resolveSessionStorePathCore } from "../../config/sessions/paths.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { TtsAutoMode } from "../../config/types.tts.js";
@@ -20,6 +22,11 @@ import * as deliveryRecovery from "../../infra/delivery-recovery.shared.js";
 import { isFastTestRuntimeEnv } from "../../infra/env.js";
 import { normalizeTargetForProvider } from "../../infra/outbound/target-normalization.js";
 import { retryAsync } from "../../infra/retry.js";
+import { hasReplyPayloadContent } from "../../interactive/payload.js";
+import {
+  NOTIFICATION_BATCH_CHANNEL_DATA_KEY,
+  NOTIFICATION_CHANNEL_DATA_KEY,
+} from "../../notifications/proposal.js";
 import { stringifyRouteThreadId } from "../../plugin-sdk/channel-route.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import { shouldAttemptTtsPayload } from "../../tts/tts-config.js";
@@ -39,6 +46,24 @@ export const DIRECT_CRON_DELIVERY_COMPLETION_RETENTION = {
   maxAgeMs: 24 * 60 * 60_000,
   maxEntries: 2_000,
 } as const satisfies DeliveryQueueCompletionRetention;
+
+/** Policy silence completes the review; uncertain platform evidence still owns recovery. */
+export function resolveDirectCronSuppression(
+  reason: Extract<DurableMessageBatchSendResult, { status: "suppressed" }>["reason"],
+  uncertain: boolean,
+): [
+  status: "unknown" | "not-delivered",
+  error?: string,
+  suppressionReason?: NormalizeReplySkipReason,
+] {
+  if (!uncertain && reason === "notification_policy") {
+    return ["not-delivered", undefined, "notification_policy"];
+  }
+  return [
+    uncertain ? "unknown" : "not-delivered",
+    `cron delivery ${uncertain ? "outcome is unknown" : "was suppressed"}: ${uncertain ? "adapter_returned_no_identity" : reason}`,
+  ];
+}
 
 /** Carry the implicit source's generation through outbound custody and recovery. */
 export function resolveDirectCronDeliveryGeneration(
@@ -268,6 +293,54 @@ export async function maybeApplyTtsToCronPayloads(params: {
   );
 }
 
+/** Source-controlled cron speech consumes only the topics selected by outbound admission. */
+export async function prepareCronDeliveryPayloads(
+  params: Parameters<typeof maybeApplyTtsToCronPayloads>[0] & {
+    requireNotificationReference?: boolean;
+  },
+): Promise<{
+  payloads: ReplyPayload[];
+  prepareNotificationPayload?: (payload: ReplyPayload) => Promise<ReplyPayload>;
+}> {
+  const deferNotificationTts =
+    params.requireNotificationReference ||
+    params.payloads.some(
+      ({ channelData }) =>
+        channelData &&
+        (NOTIFICATION_CHANNEL_DATA_KEY in channelData ||
+          NOTIFICATION_BATCH_CHANNEL_DATA_KEY in channelData),
+    );
+  if (!deferNotificationTts) {
+    return {
+      payloads: (await maybeApplyTtsToCronPayloads(params)).filter((payload) =>
+        hasReplyPayloadContent(payload, { trimText: true }),
+      ),
+    };
+  }
+  return {
+    payloads: params.payloads,
+    // Ephemeral preparation runs after source selection; custody stores its result for recovery.
+    prepareNotificationPayload: async (payload) => {
+      const transformed = await maybeApplyTtsToCronPayloads({ ...params, payloads: [payload] });
+      const prepared = transformed[0];
+      if (
+        transformed.length !== 1 ||
+        !prepared ||
+        !hasReplyPayloadContent(prepared, { trimText: true })
+      ) {
+        throw new Error("cron notification payload was empty or incoherent after TTS");
+      }
+      const merged = {
+        ...prepared,
+        ...(payload.channelData
+          ? { channelData: { ...prepared.channelData, ...payload.channelData } }
+          : {}),
+      };
+      return copyReplyPayloadMetadata(prepared, copyReplyPayloadMetadata(payload, merged));
+    },
+  };
+}
+
 export function buildDirectCronDeliveryIdempotencyKey(params: {
   jobId: string;
   runStartedAt: number;
@@ -297,28 +370,32 @@ export async function isCompletedDirectCronDelivery(
 ): Promise<boolean> {
   const context = captureDeliveryQueueStateContext();
   const receipt = await inspectDeliveryQueueReceipt(queueName, id, false, context);
-  return receipt.status === "completed";
+  return receipt.status === "completed" && receipt.notificationAcknowledged !== false;
 }
 
-/** Wait only for an active recipient owner, never for crashed ambiguous sends. */
+/** Wait for an active owner, or bounded existing recovery; never initiate a second send. */
 export async function waitForCompletedDirectCronDelivery(params: {
   id: string;
   queueName: string;
   signal?: AbortSignal;
+  waitForRecovery?: boolean;
 }): Promise<boolean> {
   const context = captureDeliveryQueueStateContext();
   // SQLite producer leases fence cross-process sends for at most 30 seconds.
   for (let attempt = 0; attempt < 120; attempt += 1) {
     params.signal?.throwIfAborted();
-    const { status, pendingEntry: owner } = await inspectDeliveryQueueReceipt(
-      params.queueName,
-      params.id,
-      true,
-      context,
-    );
+    const {
+      status,
+      pendingEntry: owner,
+      notificationAcknowledged,
+    } = await inspectDeliveryQueueReceipt(params.queueName, params.id, true, context);
     params.signal?.throwIfAborted();
     if (status === "completed") {
-      return true;
+      return notificationAcknowledged !== false;
+    }
+    if (params.waitForRecovery && status === "pending" && owner) {
+      if (attempt < 119) await sleepWithAbort(250, params.signal);
+      continue;
     }
     if (
       !owner ||

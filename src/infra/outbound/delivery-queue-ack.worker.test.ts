@@ -19,7 +19,7 @@ import {
   loadPendingDelivery,
 } from "./delivery-queue-storage.js";
 import { holdAcknowledgementReply } from "./delivery-queue-worker-reply.test-support.js";
-import { installDeliveryQueueTmpDirHooks } from "./delivery-queue.test-helpers.js";
+import { installDeliveryQueueTmpDirHooks, readQueuedEntry } from "./delivery-queue.test-helpers.js";
 
 describe("outbound acknowledgement worker", () => {
   const fixtures = installDeliveryQueueTmpDirHooks();
@@ -27,6 +27,52 @@ describe("outbound acknowledgement worker", () => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
   });
+
+  it.each([false, true])(
+    "preserves intentional omission semantics for notification custody=%s",
+    async (tagged) => {
+      const stateDir = fixtures.tmpDir();
+      const id = "intentionally-suppressed";
+      const notificationReceipts = [
+        {
+          ownerKey: "a".repeat(64),
+          topicKey: "b".repeat(64),
+          revisionKey: "c".repeat(64),
+          slot: 0 as const,
+          localDate: "2026-10-27",
+        },
+      ];
+      await enqueueDeliveryOnce(
+        {
+          channel: "matrix",
+          to: "!synthetic:example",
+          payloads: [{ text: "private omitted copy" }],
+          completionRetention: "permanent",
+          ...(tagged ? { notificationReceipts } : {}),
+        },
+        id,
+        stateDir,
+      );
+      const claimId = await claimDeliveryPlatformSendAttempt(id, stateDir);
+      await ackDelivery(id, stateDir, {
+        expectedPlatformSendAttemptId: claimId,
+        suppressCompletionReceipt: true,
+      });
+      expect(await loadPendingDelivery(id, stateDir)).toBeNull();
+      if (tagged) {
+        const retained = readQueuedEntry(stateDir, id);
+        expect(retained).toMatchObject({
+          recoveryState: "completed_notification_suppressed",
+          notificationReceipts,
+        });
+        expect(retained.acknowledgedAt).toBeUndefined();
+        expect(retained.payloads).toBeUndefined();
+        expect(retained.preparedBatch).toBeUndefined();
+      } else {
+        expect(() => readQueuedEntry(stateDir, id)).toThrow("Missing queued entry");
+      }
+    },
+  );
 
   it("settles a generation-bound owner without host data SQL after cold reopen", async () => {
     const stateDir = fixtures.tmpDir();

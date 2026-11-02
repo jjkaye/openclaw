@@ -1,5 +1,6 @@
 // Persists queue state around the irreversible platform-send boundary.
 import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { isNotificationCanceledError } from "../../notifications/cancellation.js";
 import type { DeliveryQueueStateContext } from "../delivery-queue-sqlite.js";
 import {
   findPlatformMessageRejectedError,
@@ -79,7 +80,9 @@ export function createQueuedDeliveryOwner(
       failure.queueCustody = custody;
       return failure;
     },
-    async retireUnsent(terminalOutcome?: "failed"): ReturnType<typeof retireUnsentDelivery> {
+    async retireUnsent(
+      terminalOutcome?: "failed" | "notification-canceled",
+    ): ReturnType<typeof retireUnsentDelivery> {
       owner.signal?.throwIfAborted();
       if (!owner.claimId) {
         return undefined;
@@ -207,6 +210,7 @@ export async function rejectQueuedDelivery(
           outcome: "failed",
           error: rejection.message,
           rejectionError: rejection.message,
+          ...(isNotificationCanceledError(rejection) ? { notificationCanceled: true } : {}),
           terminals,
         },
         owner.stateDir,
@@ -216,7 +220,9 @@ export async function rejectQueuedDelivery(
     } catch (error) {
       // A staging failure may leave only the unsent claim. Its owner can retain
       // a failed receipt without bypassing send evidence or completion recovery.
-      const release = await owner.retireUnsent("failed");
+      const release = await owner.retireUnsent(
+        isNotificationCanceledError(rejection) ? "notification-canceled" : "failed",
+      );
       if (!release) {
         throw error;
       }

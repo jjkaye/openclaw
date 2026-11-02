@@ -24,6 +24,21 @@ const HeartbeatResponseToolSchema = Type.Object(
     notify: Type.Boolean(),
     summary: Type.String(),
     notificationText: Type.Optional(Type.String()),
+    notification: Type.Optional(
+      Type.Object(
+        {
+          sourceId: Type.String(),
+          ownerId: Type.String(),
+          topicId: Type.String(),
+          purpose: stringEnum(["decision", "result"]),
+          expectedRevision: Type.String(),
+        },
+        {
+          additionalProperties: false,
+          description: "Current notification reference returned by the authorized task source.",
+        },
+      ),
+    ),
     reason: Type.Optional(Type.String()),
     priority: optionalStringEnum(HEARTBEAT_TOOL_PRIORITIES),
     nextCheck: Type.Optional(Type.String()),
@@ -47,7 +62,7 @@ export function createHeartbeatResponseTool(): AnyAgentTool {
     catalogMode: "direct-only",
     displaySummary: "Accept heartbeat outcome/notify choice.",
     description:
-      "Accept heartbeat result for post-turn handling. `notify=false` no visible send. `notify=true` needs concise notificationText. Scratch is monitor prose only.",
+      "Accept heartbeat result for post-turn handling. `notify=false` no visible send. `notify=true` needs concise notificationText. Include notification for task-based asks or results, using the current source reference. Scratch is monitor prose only.",
     parameters: HeartbeatResponseToolSchema,
     execute: async (_toolCallId, args) => {
       if (!isRecord(args)) {

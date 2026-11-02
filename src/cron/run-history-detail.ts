@@ -91,7 +91,7 @@ const cronRunLogEntrySchema = z.looseObject({
   deliveryStatus: cronDeliveryStatusSchema.optional().catch(undefined),
   deliveryError: optionalCronStringSchema,
   deliverySuppressionReason: z
-    .enum(["empty", "silent", "heartbeat", "channel_transform"])
+    .enum(["empty", "silent", "heartbeat", "channel_transform", "notification_policy"])
     .optional()
     .catch(undefined),
   failureNotificationDelivery: cronFailureNotificationDeliverySchema,

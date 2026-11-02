@@ -11,6 +11,9 @@ import type { QueuedDelivery, QueuedDeliveryPayload } from "./delivery-queue-typ
 /** Copies shared send options without transferring queue custody or process-local callbacks. */
 export function projectQueuedDeliveryOptions(params: QueuedDeliveryPayload) {
   return {
+    notificationBlocks: params.notificationBlocks,
+    notificationReceipts: params.notificationReceipts,
+    requireNotificationReference: params.requireNotificationReference,
     channel: params.channel,
     to: params.to,
     accountId: params.accountId,

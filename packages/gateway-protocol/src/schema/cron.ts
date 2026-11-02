@@ -323,6 +323,7 @@ const CronDeliverySharedProperties = {
   threadId: Type.Optional(Type.Union([Type.String(), Type.Number()])),
   accountId: Type.Optional(NonEmptyString),
   bestEffort: Type.Optional(Type.Boolean()),
+  requireNotificationReference: Type.Optional(Type.Boolean()),
   failureDestination: Type.Optional(CronFailureDestinationSchema),
 };
 
@@ -331,6 +332,7 @@ const CronDeliveryPatchSharedProperties = {
   threadId: Type.Optional(Type.Union([Type.String(), Type.Number(), Type.Null()])),
   accountId: Type.Optional(Type.Union([NonEmptyString, Type.Null()])),
   bestEffort: Type.Optional(Type.Boolean()),
+  requireNotificationReference: Type.Optional(Type.Boolean()),
   failureDestination: Type.Optional(Type.Union([CronFailureDestinationPatchSchema, Type.Null()])),
 };
 
