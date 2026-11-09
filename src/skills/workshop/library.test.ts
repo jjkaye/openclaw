@@ -213,7 +213,7 @@ describe("workshop library", () => {
     expect(entry?.versions.map((version) => version.id)).toEqual([versionId]);
   });
 
-  it("keeps the newest ten versions per skill", async () => {
+  it("preserves every version through edits, archive, and restoring the oldest version", async () => {
     await createWorkshopSkill(ctx, { name: "deploy", content: skill("deploy", "step 0") });
     for (let step = 1; step <= 12; step += 1) {
       await patchWorkshopSkill(ctx, {
@@ -223,10 +223,15 @@ describe("workshop library", () => {
       });
     }
     const [entry] = await listWorkshopArchive({}, "main");
-    expect(entry?.versions).toHaveLength(10);
+    expect(entry?.versions).toHaveLength(12);
     const oldest = entry?.versions.at(-1)?.id ?? "";
     const view = await viewWorkshopSkill({}, "main", "deploy", undefined, oldest);
-    expect(view.content).toContain("step 2");
+    expect(view.content).toContain("step 0");
+    await archiveWorkshopSkill(ctx, { name: "deploy" });
+    expect((await listWorkshopArchive({}, "main"))[0]?.versions).toHaveLength(13);
+    await restoreWorkshopSkill(ctx, { name: "deploy", versionId: oldest });
+    expect(await readLive("deploy")).toContain("step 0");
+    expect((await listWorkshopArchive({}, "main"))[0]?.versions).toHaveLength(13);
   });
 
   it.each(["patch", "archive"] as const)(

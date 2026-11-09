@@ -206,9 +206,12 @@ through `/learn`, or in a **Learn from past conversations** session. See
 `OPENCLAW_STATE_DIR` overrides it.
 
 A version is saved before every change, including archive and restore. The
-newest 10 versions per skill are kept. An archived skill has no live directory;
-its newest version restores it. The change feed (who changed which skill, when,
-and why) lives in the state database and keeps the newest 500 entries per agent.
+saved versions are kept until explicitly removed by operator-authorized maintenance.
+An archived skill has no live directory; its newest version restores it. The change
+feed (who changed which skill, when, and why) lives in the state database. Normal
+changes do not prune saved versions or change-feed entries. History grows with use;
+back it up before any separately authorized cleanup. Change-feed reads remain
+bounded to 500 entries per request; use `beforeMs` to read older history.
 
 ## Operator surfaces
 
