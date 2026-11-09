@@ -32,8 +32,6 @@ export type WorkshopChange = {
 
 type ChangesDatabase = Pick<DB, "skill_workshop_changes">;
 
-const MAX_CHANGES_PER_AGENT = 500;
-
 export type WorkshopChangesQuery = {
   agentId: string;
   limit: number;
@@ -41,7 +39,7 @@ export type WorkshopChangesQuery = {
   runId?: string;
 };
 
-/** Appends one change and keeps the newest rows per agent. */
+/** Appends one change without deleting earlier history. */
 export function recordWorkshopChangeInDatabase(
   database: OpenClawStateDatabase,
   change: WorkshopChange,
@@ -69,23 +67,6 @@ export function recordWorkshopChangeInDatabase(
       run_id: change.runId ?? null,
       created_at_ms: change.createdAtMs,
     }),
-  );
-  executeSqliteQuerySync(
-    db,
-    kysely
-      .deleteFrom("skill_workshop_changes")
-      .where("agent_id", "=", change.agentId)
-      .where(
-        "change_id",
-        "not in",
-        kysely
-          .selectFrom("skill_workshop_changes")
-          .select("change_id")
-          .where("agent_id", "=", change.agentId)
-          .orderBy("created_at_ms", "desc")
-          .orderBy(sql`rowid`, "desc")
-          .limit(MAX_CHANGES_PER_AGENT),
-      ),
   );
 }
 

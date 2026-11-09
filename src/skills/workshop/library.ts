@@ -28,7 +28,6 @@ import { resolveSkillWorkshopConfig } from "./config.js";
 import { withSkillLocks } from "./skill-locks.js";
 import {
   listVersions,
-  pruneVersions,
   snapshotSkill,
   type MutationPaths,
   type SkillPaths,
@@ -335,7 +334,6 @@ async function mutateSkill(
     // Checked at lock time to skip needless work, and again right before each file effect.
     const { summary, versionId } = await apply({ ...paths, assertLive: () => ctx.assertLive?.() });
     const after = await snapshotArtifact();
-    await pruneVersions(paths.versionsDir);
     bumpSkillsSnapshotVersion({
       reason: "workshop",
       changedPath: path.join(paths.skillDir, SKILL_FILE),

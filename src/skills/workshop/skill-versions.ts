@@ -24,7 +24,6 @@ export type SkillPaths = { root: string; skillDir: string; versionsDir: string }
 /** Paths for one locked mutation; `assertLive` runs immediately before each final file effect. */
 export type MutationPaths = SkillPaths & { assertLive: () => void };
 
-const MAX_VERSIONS_PER_SKILL = 10;
 const VERSION_ID_PATTERN = new RegExp(
   `^(\\d{4})(\\d{2})(\\d{2})T(\\d{2})(\\d{2})(\\d{2})(\\d{3})Z-(${WORKSHOP_CHANGE_ACTIONS.join("|")})$`,
 );
@@ -99,12 +98,4 @@ export async function snapshotSkill(
     throw error;
   }
   return versionId;
-}
-
-/** Keeps the newest versions within the per-skill limit. */
-export async function pruneVersions(versionsDir: string): Promise<void> {
-  const stale = (await listVersions(versionsDir)).slice(MAX_VERSIONS_PER_SKILL);
-  for (const version of stale) {
-    await fs.rm(path.join(versionsDir, version.id), { recursive: true, force: true });
-  }
 }
