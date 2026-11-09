@@ -8,7 +8,7 @@ it("preserves older changes beyond 500 while keeping history queries bounded", (
   const database: OpenClawStateDatabase = {
     db,
     path: ":memory:",
-    get walMaintenance() {
+    get walMaintenance(): never {
       throw new Error("This in-memory kernel test must not request WAL maintenance.");
     },
   };
