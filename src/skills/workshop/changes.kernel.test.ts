@@ -33,7 +33,9 @@ it("preserves older changes beyond 500 while keeping history queries bounded", (
       listWorkshopChangesInDatabase(db, { agentId: "main", limit: 1, runId: "oldest-run" }),
     ).toMatchObject([{ id: "change-0", summary: "Change 0" }]);
     expect(
-      listWorkshopChangesInDatabase(db, { agentId: "main", limit: 2, beforeMs: 2 }).map((row) => row.id),
+      listWorkshopChangesInDatabase(db, { agentId: "main", limit: 2, beforeMs: 2 }).map(
+        (row) => row.id,
+      ),
     ).toEqual(["change-1", "change-0"]);
     expect(listWorkshopChangesInDatabase(db, { agentId: "other", limit: 1 })).toEqual([]);
   } finally {
