@@ -84,6 +84,61 @@ async function migrateToolConsentAgent() {
 }
 
 describe("Claw tool policy consent provenance", () => {
+  it("preserves the host tool policy when only workspace files are enrolled", async () => {
+    const root = tempDirs.make("openclaw-retained-claw-tool-consent-");
+    const env = stateEnv(root);
+    vi.stubEnv("OPENCLAW_STATE_DIR", env.OPENCLAW_STATE_DIR);
+    const workspace = join(root, "workspace");
+    mkdirSync(workspace);
+    writeFileSync(join(workspace, "AGENTS.md"), "Use the existing workspace.\n");
+    const config: OpenClawConfig = {
+      agents: {
+        defaults: { skills: ["site-default"] },
+        entries: {
+          worker: {
+            workspace,
+            skills: ["host-only"],
+            tools: { profile: "coding", deny: ["exec"] },
+          },
+        },
+      },
+    };
+    const availableTools = () => {
+      const captured = structuredClone(config);
+      prepareCapturedClawToolPolicyConsent(captured, { env });
+      const capabilityProfile = resolveConversationCapabilityProfile({
+        agentId: "worker",
+        config: captured,
+      });
+      return applyToolPolicyPipeline({
+        tools: [
+          createReadTool(workspace),
+          createExecTool({ cwd: workspace, host: "gateway", security: "full", ask: "off" }),
+        ],
+        toolMeta: () => undefined,
+        warn: () => {},
+        steps: buildConversationToolPolicyPipelineSteps({
+          capabilityProfile,
+          policies: resolveConversationToolPolicies({ capabilityProfile }),
+          includeRuntimeToolPolicy: true,
+        }),
+      }).map((tool) => tool.name);
+    };
+    setRuntimeConfigSnapshot(config);
+    expect(availableTools()).toEqual(["read"]);
+    const migration = await buildClawMigrationPlan({
+      agentId: "worker",
+      config,
+      retainAgentConfig: true,
+      options: { env },
+    });
+    await applyClawMigrationPlan({ migration, config, options: { env } });
+    expect(availableTools()).toEqual(["read"]);
+    closeOpenClawStateDatabase();
+    setRuntimeConfigSnapshot(config);
+    expect(availableTools()).toEqual(["read"]);
+  });
+
   it("runs an adopted agent with frozen tools and inherited settings after restart", async () => {
     const { config, env } = await migrateToolConsentAgent();
     const workspace = config.agents.entries.worker.workspace;

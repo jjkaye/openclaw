@@ -39,6 +39,7 @@ import {
   type ClawPackageInspection,
   type PackageRemovalDeps,
 } from "./package-remove.js";
+import { retainsClawAgentConfig } from "./provenance-agent-origin.js";
 import { readClawPackageOwnership } from "./provenance-async.js";
 import {
   readClawInstallRecords,
@@ -282,18 +283,25 @@ export async function readClawStatus(
       install.agentOrigin === "adopted" && listedMcp?.ok
         ? withAuthoredAgentRoster(config, listedMcp.sourceConfigBeforeMigrations)
         : config;
-    const agent = listAgentEntries(lifecycleConfig).find(
+    const agents = listAgentEntries(lifecycleConfig).filter(
       (candidate) => candidate.id === install.agentId,
     );
+    const agent = agents[0];
     let comparableAgent = agent;
     if (agent?.id && install.agentOrigin === "adopted") {
       try {
-        comparableAgent = normalizeWorkspaceConfig(
-          resolveMigrationAgentSettings(lifecycleConfig, agent),
-          await realpath(resolveAgentWorkspaceDir(config, install.agentId, options.env)).catch(() =>
-            resolve(resolveAgentWorkspaceDir(config, install.agentId, options.env)),
-          ),
+        const configuredWorkspace = resolveAgentWorkspaceDir(config, install.agentId, options.env);
+        const workspace = await realpath(configuredWorkspace).catch(() =>
+          resolve(configuredWorkspace),
         );
+        const retainsConfig = retainsClawAgentConfig(install.agentOrigin, install.agentOwnedPaths);
+        comparableAgent = normalizeWorkspaceConfig(
+          retainsConfig ? { id: agent.id } : resolveMigrationAgentSettings(lifecycleConfig, agent),
+          workspace,
+        );
+        if (retainsConfig && agents.length !== 1) {
+          comparableAgent = undefined;
+        }
       } catch {
         comparableAgent = undefined;
       }

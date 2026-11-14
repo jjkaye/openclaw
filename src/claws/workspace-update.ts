@@ -50,6 +50,11 @@ export async function applyClawWorkspaceUpdate(
     maxBytes: MAX_UPDATE_FILE_BYTES,
     symlinks: "reject",
   });
+  if (updatePlan.retainsAgentConfig && workspace.rootReal !== workspaceRoot) {
+    throw new ClawWorkspaceUpdateError(
+      "The enrolled workspace no longer resolves to its original path.",
+    );
+  }
   const source = await fsSafeRoot(packageRoot, {
     hardlinks: "reject",
     maxBytes: MAX_UPDATE_FILE_BYTES,

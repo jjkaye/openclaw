@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { stableStringify } from "@openclaw/normalization-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -11,10 +11,12 @@ import { hasPluginLifecycleLease } from "../plugins/plugin-lifecycle-lease.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
 import { withEnvAsync } from "../test-utils/env.js";
 import { readClawCronRefs } from "./cron.js";
+import { exportClawAgent } from "./export.js";
 import { readClawStatus } from "./lifecycle-status.js";
 import { applyClawMigrationPlan, buildClawMigrationPlan } from "./migrate.js";
 import { ClawPackageUpdateError } from "./package-update.js";
 import { persistClawInstallRecord, readClawInstallRecord } from "./provenance.js";
+import { readClawManifestFile } from "./reader.js";
 import type { ClawAddPlan, ClawManifest, ClawOpenClawProfile } from "./types.js";
 import { applyClawUpdatePlan } from "./update-apply.js";
 import { addPlan, consent, install, manifest, plan, source } from "./update-apply.test-helpers.js";
@@ -780,6 +782,115 @@ async function adoptedFixture() {
 }
 
 describe("updating an adopted agent", () => {
+  it("updates and restores Claw files without claiming host configuration", async () => {
+    const root = tempDirs.make("openclaw-retained-config-update-");
+    const workspace = join(root, "workspace");
+    await mkdir(workspace);
+    const role = join(workspace, "ROLE.md");
+    await writeFile(role, "# Original role\n");
+    const env = { OPENCLAW_STATE_DIR: join(root, "state") };
+    const config: OpenClawConfig = {
+      agents: {
+        defaults: { skills: ["site-default"] },
+        entries: { worker: { name: "Host name", workspace, skills: ["host-only"] } },
+      },
+    };
+    const migration = await buildClawMigrationPlan({
+      agentId: "worker",
+      retainAgentConfig: true,
+      workspaceFiles: ["ROLE.md"],
+      config,
+      options: { env },
+    });
+    await applyClawMigrationPlan({ migration, config, options: { env } });
+    const rollbackPackage = join(root, "original");
+    await exportClawAgent("worker", rollbackPackage, { config, env, sourceMcpServers: {} });
+    const original = await readClawManifestFile(rollbackPackage);
+    expect(original.ok).toBe(true);
+    if (!original.ok) {
+      throw new Error("Original Claw failed inspection");
+    }
+    expect(original.source.name).toBe(migration.plan.packageName);
+    expect(original.manifest.agent).toEqual({ id: "worker" });
+    expect(original.openClawProfile).toBeUndefined();
+
+    const candidatePath = join(root, "candidate");
+    await mkdir(join(candidatePath, "workspace"), { recursive: true });
+    for (const [path, content] of migration.packageFiles) {
+      await writeFile(join(candidatePath, path), content);
+    }
+    await writeFile(join(candidatePath, "workspace", "ROLE.md"), "# Revised role\n");
+    const candidate = await readClawManifestFile(candidatePath);
+    expect(candidate.ok).toBe(true);
+    if (!candidate.ok) {
+      throw new Error("Candidate Claw failed inspection");
+    }
+    const target = {
+      targetManifest: candidate.manifest,
+      targetSource: candidate.source,
+    };
+    const makePlan = (activeConfig: OpenClawConfig, input = target) =>
+      buildClawUpdatePlan({
+        agentId: "worker",
+        ...input,
+        config: activeConfig,
+        sourceMcpServers: {},
+        stateOptions: { env },
+      });
+    const takeover = await makePlan(config, {
+      ...target,
+      targetManifest: { ...target.targetManifest, agent: { id: "worker", name: "Package name" } },
+    });
+    expect(takeover.blockers).toMatchObject([{ code: "host_owned_agent_config" }]);
+    const implicitSkill = await makePlan(config, {
+      ...target,
+      targetManifest: {
+        ...target.targetManifest,
+        workspace: {
+          ...target.targetManifest.workspace,
+          files: [{ path: "skills/example/SKILL.md", source: "workspace/ROLE.md" }],
+        },
+      },
+    });
+    expect(implicitSkill.blockers).toMatchObject([{ code: "host_owned_agent_config" }]);
+    const moved = structuredClone(config);
+    moved.agents!.entries!.worker!.workspace = join(root, "different");
+    expect((await makePlan(moved)).actions).toContainEqual(
+      expect.objectContaining({ kind: "agent", action: "manual", blocked: true }),
+    );
+    const overlapped = structuredClone(config);
+    overlapped.agents!.entries!.other = { workspace: join(workspace, "nested") };
+    expect((await makePlan(overlapped)).blockers).toMatchObject([
+      { code: "workspace_ownership_ambiguous" },
+    ]);
+
+    const commitConfig =
+      vi.fn<NonNullable<Parameters<typeof applyClawUpdatePlan>[2]["commitConfig"]>>();
+    for (const [artifact, expected] of [
+      [candidate, "# Revised role\n"],
+      [original, "# Original role\n"],
+    ] as const) {
+      const input = { targetManifest: artifact.manifest, targetSource: artifact.source };
+      const update = await makePlan(config, input);
+      expect(update).toMatchObject({
+        retainsAgentConfig: true,
+        blockers: [],
+        capabilityChanges: [],
+      });
+      await expect(
+        applyClawUpdatePlan(update, input, {
+          config,
+          env,
+          sourceMcpServers: {},
+          consentPlanIntegrity: update.planIntegrity,
+          commitConfig,
+        }),
+      ).resolves.toMatchObject({ status: "complete", installRecord: { agentOwnedPaths: [] } });
+      expect(await readFile(role, "utf8")).toBe(expected);
+    }
+    expect(commitConfig).not.toHaveBeenCalled();
+  });
+
   it("updates a present agent with inherited settings and keeps status consistent", async () => {
     const current = await adoptedFixture();
     let config = current.config;

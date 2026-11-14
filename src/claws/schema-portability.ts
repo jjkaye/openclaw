@@ -44,6 +44,20 @@ export function portableClawPathKey(value: string): string {
   return value.replaceAll("\\", "/").normalize("NFC").toLowerCase();
 }
 
+export function isClawGuidancePath(path: string): boolean {
+  if (path.includes("\\") || !isSafeClawRelativePath(path)) {
+    return false;
+  }
+  const parts = portableClawPathKey(path).split("/");
+  if (parts.some((part) => part.startsWith("."))) {
+    return false;
+  }
+  if (parts.length === 1) {
+    return parts[0]!.endsWith(".md");
+  }
+  return (parts[0] === "brain" || parts[0] === "docs") && /\.(?:md|json)$/u.test(parts.at(-1)!);
+}
+
 export function conflictsWithClawPath(targets: Set<string>, candidate: string): boolean {
   for (const target of targets) {
     if (

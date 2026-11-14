@@ -75,6 +75,10 @@ function applyPreparedClawToolPolicyConsent(
       });
       continue;
     }
+    if (schemaVersionRead.retainsAgentConfig) {
+      preparedClawToolPolicies.delete(candidate.tools);
+      continue;
+    }
     const adopted = schemaVersionRead.schemaVersion === CLAW_INSTALL_RECORD_ADOPTED_SCHEMA_VERSION;
     const current =
       adopted || schemaVersionRead.schemaVersion === CLAW_INSTALL_RECORD_SCHEMA_VERSION;

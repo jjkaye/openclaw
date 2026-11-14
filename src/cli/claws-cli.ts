@@ -26,6 +26,8 @@ export type ClawsMigrateOptions = {
   yes?: boolean;
   planIntegrity?: string;
   json?: boolean;
+  retainAgentConfig?: boolean;
+  workspaceFile?: string[];
 };
 
 export type ClawsStatusOptions = { json?: boolean };
@@ -129,6 +131,11 @@ export function registerClawsCli(program: Command) {
     .command("migrate")
     .description("Enroll one existing local agent as a Claw without replacing its workspace")
     .argument("<agent-id>", "Existing configured agent id")
+    .option("--retain-agent-config", "Keep agent configuration under host ownership")
+    .option(
+      "--workspace-file <path...>",
+      "Enroll only these existing workspace-relative guidance files",
+    )
     .option("--dry-run", "Preview migration without creating a package or ownership record", false)
     .option("--yes", "Apply after confirming the exact migration plan", false)
     .option("--plan-integrity <digest>", "Bind automation consent to an exact dry-run plan")

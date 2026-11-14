@@ -122,6 +122,7 @@ export async function applyClawUpdatePlan(
     runtime?: RuntimeEnv;
     reloadPlugins?: PluginInstallBatchReload;
     commitConfig?: ConfigCommit;
+    assertCurrentConfig?: () => Promise<void>;
     rebuildPlan?: typeof buildClawUpdatePlan;
     buildAddPlan?: typeof buildClawAddPlan;
     readInstall?: typeof readClawInstallRecord;
@@ -393,6 +394,7 @@ export async function applyClawUpdatePlan(
   };
 
   const applyWorkspace = options.applyWorkspace ?? applyClawWorkspaceUpdate;
+  await options.assertCurrentConfig?.();
   let workspaceExecution: ClawWorkspaceUpdateExecution;
   try {
     workspaceExecution = await applyWorkspace(fresh, targetAddPlan, options);
