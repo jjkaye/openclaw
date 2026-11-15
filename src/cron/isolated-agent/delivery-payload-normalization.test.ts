@@ -40,8 +40,8 @@ it("keeps automatic run receipts out of source-backed proactive copy", () => {
     appendCronRunInspectionLink(
       [{ text: "Ordinary scheduled output" }],
       "https://example.test/run",
-    )[0].text,
-  ).toContain("Inspect:");
+    ),
+  ).toEqual([expect.objectContaining({ text: expect.stringContaining("Inspect:") })]);
 });
 
 describe("cron notification envelope delivery", () => {

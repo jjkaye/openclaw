@@ -394,7 +394,9 @@ export async function waitForCompletedDirectCronDelivery(params: {
       return notificationAcknowledged !== false;
     }
     if (params.waitForRecovery && status === "pending" && owner) {
-      if (attempt < 119) await sleepWithAbort(250, params.signal);
+      if (attempt < 119) {
+        await sleepWithAbort(250, params.signal);
+      }
       continue;
     }
     if (

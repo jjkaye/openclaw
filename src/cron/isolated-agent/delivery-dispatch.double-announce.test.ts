@@ -1070,16 +1070,16 @@ describe("dispatchCronDelivery", () => {
     if (batch) {
       params.deliveryPayloads = [batchCarrier];
     }
-    const selected: ReplyPayload = {
+    const selected = {
       text: "Briefing for first\n\nBriefing for second",
       spokenText: "Briefing for first. Briefing for second.",
       channelData: { openclawNotificationBatch: blocks.slice(1) },
-    };
-    const speech: ReplyPayload = {
+    } satisfies ReplyPayload;
+    const speech = {
       ...selected,
       mediaUrl: "file:///tmp/selected-briefing.ogg",
       audioAsVoice: true,
-    };
+    } satisfies ReplyPayload;
     // Selection belongs to outbound admission; this consumer verifies the callback handoff.
     vi.mocked(deliverOutboundPayloads).mockImplementationOnce(async (delivery) => {
       expect(maybeApplyTtsToPayloadMock).not.toHaveBeenCalled();
@@ -1098,7 +1098,7 @@ describe("dispatchCronDelivery", () => {
       delivery.onPayload?.({
         ...speech,
         hookContent: speech.spokenText,
-        mediaUrls: [speech.mediaUrl!],
+        mediaUrls: [speech.mediaUrl],
       });
       return [{ channel: "telegram", messageId: "selected-briefing" }];
     });
@@ -1140,7 +1140,10 @@ describe("dispatchCronDelivery", () => {
       text: "Selected decision",
       channelData: { openclawNotification: { ownerId: "selected" } },
     };
-    setReplyPayloadMetadata(selected, { ttsExplicit: true, tts: { text: "Selected narration" } });
+    setReplyPayloadMetadata(selected, {
+      ttsExplicit: true,
+      tts: { tagged: true, text: "Selected narration" },
+    });
     const { prepareNotificationPayload } = await prepareCronDeliveryPayloads({
       cfg: { tts: { auto: "always", provider: "microsoft" } },
       payloads: [{ text: "Unfiltered original" }],
@@ -1157,7 +1160,7 @@ describe("dispatchCronDelivery", () => {
     const prepared = await prepareNotificationPayload?.(selected);
     expect(getReplyPayloadMetadata(prepared!)).toEqual({
       ttsExplicit: true,
-      tts: { text: "Selected narration" },
+      tts: { tagged: true, text: "Selected narration" },
     });
     expect(prepared).toEqual({
       text: "Selected decision",
@@ -1167,18 +1170,18 @@ describe("dispatchCronDelivery", () => {
     });
     const transformed = setReplyPayloadMetadata(
       { text: "Prepared decision" },
-      { ttsExplicit: true, tts: { text: "Prepared narration" } },
+      { ttsExplicit: true, tts: { tagged: true, text: "Prepared narration" } },
     );
     maybeApplyTtsToPayloadMock.mockResolvedValueOnce(transformed);
     const preparedWithOwnMetadata = await prepareNotificationPayload?.(
       setReplyPayloadMetadata(
         { text: "Selected decision" },
-        { tts: { text: "Selected narration" } },
+        { tts: { tagged: true, text: "Selected narration" } },
       ),
     );
     expect(getReplyPayloadMetadata(preparedWithOwnMetadata!)).toEqual({
       ttsExplicit: true,
-      tts: { text: "Prepared narration" },
+      tts: { tagged: true, text: "Prepared narration" },
     });
   });
 
@@ -1705,14 +1708,18 @@ describe("dispatchCronDelivery", () => {
       const inspect = vi
         .mocked(deliveryQueueSqlite.inspectDeliveryQueueReceipt)
         .mockResolvedValueOnce({ status: undefined, pendingEntry: null });
-      if (settlement === "recovered") inspect.mockResolvedValueOnce(pendingOwner);
-      if (settlement === "pending") inspect.mockResolvedValue(pendingOwner);
-      else
+      if (settlement === "recovered") {
+        inspect.mockResolvedValueOnce(pendingOwner);
+      }
+      if (settlement === "pending") {
+        inspect.mockResolvedValue(pendingOwner);
+      } else {
         inspect.mockResolvedValue({
           status: "completed",
           pendingEntry: null,
           notificationAcknowledged: settlement !== "suppressed",
         });
+      }
       const state = await dispatchCronDelivery(
         makeBaseParams({ synthesizedText: "A useful notification" }),
       );
@@ -1722,7 +1729,9 @@ describe("dispatchCronDelivery", () => {
         settlement === "acknowledged" || settlement === "recovered" ? "delivered" : "unknown",
       );
       expect(state.deliverySuppressionReason).toBeUndefined();
-      if (settlement === "pending") expect(backoff.sleepWithAbort).toHaveBeenCalledTimes(119);
+      if (settlement === "pending") {
+        expect(backoff.sleepWithAbort).toHaveBeenCalledTimes(119);
+      }
     },
   );
 
