@@ -34,11 +34,10 @@ import { findNotificationCancellation, NotificationCanceledError } from "./cance
 import {
   NOTIFICATION_BATCH_CHANNEL_DATA_KEY,
   NOTIFICATION_CHANNEL_DATA_KEY,
-  notificationKey,
-  notificationOwnerKey,
   parseNotificationProposal,
   type NotificationBlock,
 } from "./proposal.js";
+import { notificationKey, notificationOwnerKey } from "./receipt-keys.js";
 import { captureNotificationSource } from "./source-registry.js";
 import type { NotificationResolveContext } from "./source-types.js";
 

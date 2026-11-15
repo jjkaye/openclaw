@@ -5,12 +5,36 @@ import { ClawMigrationError } from "./migrate-errors.js";
 import { lstatMigrationPathIfExists } from "./migrate-package.js";
 import type { CapturedWorkspaceFile } from "./migrate-package.js";
 import { containsPotentialSecret } from "./migrate-validation.js";
+import {
+  conflictsWithClawPath,
+  isClawGuidancePath,
+  portableClawPathKey,
+} from "./schema-portability.js";
 import { MAX_MANAGED_FILE_BYTES, MAX_MANAGED_WORKSPACE_BYTES } from "./source-limits.js";
 import { CLAW_BOOTSTRAP_FILE_NAMES } from "./types.js";
 
 export async function readSelectedWorkspaceFiles(
   workspace: string,
+  selectedPaths?: readonly string[],
 ): Promise<CapturedWorkspaceFile[]> {
+  const defaultPaths = new Set<string>(CLAW_BOOTSTRAP_FILE_NAMES);
+  const defaultKeys = new Set(CLAW_BOOTSTRAP_FILE_NAMES.map(portableClawPathKey));
+  const reserved = new Set([portableClawPathKey("BOOTSTRAP.md")]);
+  for (const path of selectedPaths ?? []) {
+    const key = portableClawPathKey(path);
+    if (
+      !isClawGuidancePath(path) ||
+      (defaultKeys.has(key) && !defaultPaths.has(path)) ||
+      conflictsWithClawPath(reserved, key)
+    ) {
+      throw new ClawMigrationError(
+        "workspace_file_invalid",
+        `Selected workspace file ${JSON.stringify(path)} must be a unique guidance path with its native spelling. BOOTSTRAP.md stays unmanaged.`,
+        "$.workspace",
+      );
+    }
+    reserved.add(key);
+  }
   const root = await fsSafeRoot(workspace, {
     hardlinks: "reject",
     maxBytes: MAX_MANAGED_FILE_BYTES,
@@ -18,9 +42,16 @@ export async function readSelectedWorkspaceFiles(
   });
   const captured: CapturedWorkspaceFile[] = [];
   let totalBytes = 0;
-  for (const name of CLAW_BOOTSTRAP_FILE_NAMES) {
+  for (const name of selectedPaths?.toSorted() ?? CLAW_BOOTSTRAP_FILE_NAMES) {
     const info = await lstatMigrationPathIfExists(resolve(workspace, name));
     if (!info) {
+      if (selectedPaths) {
+        throw new ClawMigrationError(
+          "workspace_file_missing",
+          `Selected workspace file ${JSON.stringify(name)} does not exist.`,
+          `$.workspace.${name}`,
+        );
+      }
       continue;
     }
     if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) {

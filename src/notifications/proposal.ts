@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type { NotificationSourceReference } from "./source-types.js";
 
@@ -39,15 +38,6 @@ export function parseNotificationProposal(value: unknown): NotificationProposal 
     purpose: value.purpose,
     expectedRevision: value.expectedRevision,
   };
-}
-
-/** Length-framed values prevent delimiter ambiguity; keys never contain task text. */
-export function notificationKey(...values: string[]): string {
-  return createHash("sha256").update(JSON.stringify(values)).digest("hex");
-}
-
-export function notificationOwnerKey(sourceId: string, ownerId: string): string {
-  return notificationKey(sourceId, ownerId);
 }
 
 /** Only explicitly tagged cron output is interpreted as a notification envelope. */

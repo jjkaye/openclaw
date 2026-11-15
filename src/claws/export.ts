@@ -16,6 +16,7 @@ import { resolveUserPath } from "../utils.js";
 import { digestClawBytes } from "./digest.js";
 import { readClawStatus } from "./lifecycle-state.js";
 import type { PackageRemovalDeps } from "./package-remove.js";
+import { retainsClawAgentConfig } from "./provenance-agent-origin.js";
 import { readClawManifestFile } from "./reader.js";
 import { isPortableClawAvatar } from "./schema-portability.js";
 import { parseClawManifest, parseClawOpenClawProfile } from "./schema.js";
@@ -323,6 +324,10 @@ export async function exportClawAgent(
       `Installed Claw agent ${JSON.stringify(agentId)} is in ${JSON.stringify(record.install.status)} state; finish or repair it before export.`,
     );
   }
+  const retainsConfig = retainsClawAgentConfig(
+    record.install.agentOrigin,
+    record.install.agentOwnedPaths,
+  );
   const agent = listAgentEntries(options.config).find((candidate) => candidate.id === agentId);
   if (!agent) {
     throw new ClawExportError(
@@ -408,21 +413,29 @@ export async function exportClawAgent(
     symlinks: "reject",
   });
   const allContents: ExportContent[] = await Promise.all(
-    record.workspaceFiles.map(async (file) => ({
-      path: normalizedRelativePath(file.path),
-      content: await workspace.readBytes(file.path, { maxBytes: MAX_EXPORT_FILE_BYTES }),
-    })),
+    record.workspaceFiles.map(async (file) => {
+      const content = await workspace.readBytes(file.path, { maxBytes: MAX_EXPORT_FILE_BYTES });
+      if (digestClawBytes(content) !== file.contentDigest) {
+        throw new ClawExportError(
+          "workspace_files_drifted",
+          `Cannot export ${JSON.stringify(file.path)} because it changed after inspection.`,
+        );
+      }
+      return { path: normalizedRelativePath(file.path), content };
+    }),
   );
   const soul = allContents.find((file) => file.path === "SOUL.md");
   const decodedSoul = soul ? decodeUtf8(soul.content) : undefined;
   let clawMarkdownBody =
     soul && decodedSoul !== undefined && decodedSoul.trim().length > 0 ? soul.content : undefined;
   const contents = allContents.filter((file) => file !== soul || !clawMarkdownBody);
-  const avatar = await readPortableAvatar({
-    config: options.config,
-    agent,
-    workspace: record.install.workspace,
-  });
+  const avatar = retainsConfig
+    ? {}
+    : await readPortableAvatar({
+        config: options.config,
+        agent,
+        workspace: record.install.workspace,
+      });
   const managedPaths = new Set(contents.map((file) => file.path));
   if (avatar.sidecar && !managedPaths.has(avatar.sidecar.path)) {
     contents.push(avatar.sidecar);
@@ -472,7 +485,7 @@ export async function exportClawAgent(
       version: pkg.version,
     }))
     .toSorted((left, right) => comparePortableText(left.id, right.id));
-  const openClawProfile = portableOpenClawProfile(agent, extensions);
+  const openClawProfile = retainsConfig ? undefined : portableOpenClawProfile(agent, extensions);
   const openClawProfilePath = "profiles/openclaw.yml";
   const openClawProfileRaw = openClawProfile
     ? Buffer.from(stringifyYaml(openClawProfile))
@@ -492,7 +505,7 @@ export async function exportClawAgent(
     });
   const manifest: ClawManifest = {
     schemaVersion: CLAW_SCHEMA_VERSION,
-    agent: portableAgent(agent, avatar.source),
+    agent: retainsConfig ? { id: agentId } : portableAgent(agent, avatar.source),
     workspace: { bootstrapFiles, files },
     packages: portablePackages,
     mcpServers: Object.fromEntries(
@@ -566,7 +579,7 @@ export async function exportClawAgent(
       filesWritten.push(openClawProfilePath);
     }
     const packageJson = {
-      name: `openclaw-claw-${record.install.agentId}`,
+      name: retainsConfig ? record.install.claw.name : `openclaw-claw-${record.install.agentId}`,
       version: derivativePackageVersion(manifest, [
         ...contents,
         ...(clawMarkdownBody ? [{ path: "CLAW.md#body", content: clawMarkdownBody }] : []),

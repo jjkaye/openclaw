@@ -94,6 +94,9 @@ const extensionPackageBoundaryBaseConfig = "../tsconfig.package-boundary.base.js
 const FAILURE_OUTPUT_TAIL_LINES = 40;
 const STEP_OUTPUT_MAX_CHARS = 256 * 1024;
 const SLOW_COMPILE_SUMMARY_LIMIT = 10;
+// This aggregate includes discovery, SDK emission, producer emissions, and record
+// validation. Each child retains its own deadline and managed cleanup boundary.
+export const BOUNDARY_PREPARATION_TIMEOUT_MS = 15 * 60_000;
 const ROOTDIR_BOUNDARY_CANARY_IMPORT_PATH =
   "../../src/plugins/contracts/rootdir-boundary-canary.ts";
 const ROOTDIR_BOUNDARY_CANARY_OUTPUT_HINT = "src/plugins/contracts/rootdir-boundary-canary.ts";
@@ -457,7 +460,7 @@ async function runCompileCheck(extensionIds: string[], selectedPreparation: bool
           ? [`--extensions=${JSON.stringify(extensionIds)}`]
           : []),
     ],
-    420_000,
+    BOUNDARY_PREPARATION_TIMEOUT_MS,
   );
   process.stdout.write(preparation.stdout);
   const prepElapsedMs = Date.now() - prepStartedAt;

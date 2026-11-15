@@ -458,6 +458,24 @@ their setting paths in the diagnostic. An empty compaction placeholder or the
 effective `safeguard` default materialized by OpenClaw has no effect beyond the
 runtime default and is ignored.
 
+Keep an existing agent's settings under host ownership with
+`--retain-agent-config`. The generated Claw manages workspace files, while
+the existing OpenClaw configuration owns the model, tools, skills, paths,
+routing and schedules. Use `--workspace-file` to list exactly which existing
+files to enroll, including any standard bootstrap files you want Claws to own.
+
+```bash
+openclaw claws migrate research-agent --retain-agent-config \
+  --workspace-file AGENTS.md SOUL.md ROLE.md docs/research.md --dry-run --json
+```
+
+Repeat the same options when applying the preview. Updates to an enrolled
+workspace-only Claw require the same agent id and a workspace-only package.
+Additional guidance can use Markdown at the workspace root or Markdown and
+JSON under `brain/` or `docs/`.
+OpenClaw stops the update if the host agent disappears or moves to another
+workspace. Export preserves the package name and includes the managed files.
+
 `claws status` and `claws update` use the generated package after migration.
 Removing an adopted Claw releases its ownership records while retaining the
 pre-existing agent, workspace, local package, credentials, databases, sessions,

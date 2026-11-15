@@ -7,6 +7,7 @@ import {
 import { collectFilesSync } from "../check-file-utils.ts";
 import { portableRelativePath } from "./build-artifact-cache.mts";
 import { collectBundledPluginBuildEntries } from "./bundled-plugin-build-entries.mjs";
+import { isDirectRunUrl } from "./direct-run.mjs";
 import {
   BOUNDARY_CACHE_ROOT,
   BOUNDARY_PLUGIN_UNITS,
@@ -15,7 +16,6 @@ import {
 } from "./extension-boundary-inputs.mts";
 import { createDeclarationInputBoundary } from "./local-check-runtime.mts";
 import { readNativeTypeScriptConfig } from "./native-typescript-config.mts";
-import { createNativeTypeScriptProjectAsync } from "./native-typescript.mts";
 import { isRecord } from "./record-shared.mjs";
 
 function exportTargets(value: unknown): string[] {
@@ -193,6 +193,70 @@ export async function resolveExtensionBoundaryPreparation(
     boundary.root,
     extensionIds,
   ).map(({ config }) => ({ config }));
+  const { API } = await import("typescript/unstable/async");
+  await using api = new API({
+    cwd: boundary.root,
+    fs: {
+      fileExists(file) {
+        return owned(file) ? currentSdkDeclaration(file) || declaration(file) !== null : undefined;
+      },
+      readFile(file) {
+        // The first pass never consumes cache contents. A later pass follows only
+        // the SDK tree just validated by its owner, discovering further producers.
+        return owned(file) && !currentSdkDeclaration(file)
+          ? declaration(file)
+            ? ""
+            : null
+          : undefined;
+      },
+      directoryExists(directory) {
+        if (!owned(directory)) {
+          return undefined;
+        }
+        if (boundary.resolve(directory) === pluginOutput) {
+          return true;
+        }
+        const location = sourceLocation(directory);
+        return Boolean(
+          location && fs.statSync(location.source, { throwIfNoEntry: false })?.isDirectory(),
+        );
+      },
+      getAccessibleEntries(directory) {
+        if (!owned(directory)) {
+          return undefined;
+        }
+        if (boundary.resolve(directory) === pluginOutput) {
+          return { files: [], directories: [...producerIds] };
+        }
+        const location = sourceLocation(directory);
+        if (!location || !fs.statSync(location.source, { throwIfNoEntry: false })?.isDirectory()) {
+          return { files: [], directories: [] };
+        }
+        const entries = fs.readdirSync(location.source, { withFileTypes: true });
+        return {
+          files: [
+            ...new Set(
+              entries
+                .filter((entry) => entry.isFile() && !/\.d\.[cm]?ts$/u.test(entry.name))
+                .flatMap((entry) =>
+                  /\.tsx?$/u.test(entry.name)
+                    ? [entry.name.replace(/\.tsx?$/u, ".d.ts")]
+                    : /\.[cm]ts$/u.test(entry.name)
+                      ? [entry.name.replace(/\.([cm]ts)$/u, ".d.$1")]
+                      : [],
+                ),
+            ),
+          ],
+          directories: entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name),
+        };
+      },
+      realpath(file) {
+        return owned(file) ? boundary.assert(file) : undefined;
+      },
+    },
+  });
+  let snapshot: Awaited<ReturnType<typeof api.createSnapshot>> | undefined;
+  let previousConfig: string | undefined;
   const visited = new Set<string>();
   for (const { config: candidate, producerId } of queue) {
     const config = boundary.assert(candidate);
@@ -200,74 +264,24 @@ export async function resolveExtensionBoundaryPreparation(
       continue;
     }
     visited.add(config);
-    await using project = await createNativeTypeScriptProjectAsync({
-      cwd: boundary.root,
-      configFileName: config,
-      fs: {
-        fileExists(file) {
-          return owned(file)
-            ? currentSdkDeclaration(file) || declaration(file) !== null
-            : undefined;
-        },
-        readFile(file) {
-          // The first pass never consumes cache contents. A later pass follows only
-          // the SDK tree just validated by its owner, discovering further producers.
-          return owned(file) && !currentSdkDeclaration(file)
-            ? declaration(file)
-              ? ""
-              : null
-            : undefined;
-        },
-        directoryExists(directory) {
-          if (!owned(directory)) {
-            return undefined;
-          }
-          if (boundary.resolve(directory) === pluginOutput) {
-            return true;
-          }
-          const location = sourceLocation(directory);
-          return Boolean(
-            location && fs.statSync(location.source, { throwIfNoEntry: false })?.isDirectory(),
-          );
-        },
-        getAccessibleEntries(directory) {
-          if (!owned(directory)) {
-            return undefined;
-          }
-          if (boundary.resolve(directory) === pluginOutput) {
-            return { files: [], directories: [...producerIds] };
-          }
-          const location = sourceLocation(directory);
-          if (
-            !location ||
-            !fs.statSync(location.source, { throwIfNoEntry: false })?.isDirectory()
-          ) {
-            return { files: [], directories: [] };
-          }
-          const entries = fs.readdirSync(location.source, { withFileTypes: true });
-          return {
-            files: [
-              ...new Set(
-                entries
-                  .filter((entry) => entry.isFile() && !/\.d\.[cm]?ts$/u.test(entry.name))
-                  .flatMap((entry) =>
-                    /\.tsx?$/u.test(entry.name)
-                      ? [entry.name.replace(/\.tsx?$/u, ".d.ts")]
-                      : /\.[cm]ts$/u.test(entry.name)
-                        ? [entry.name.replace(/\.([cm]ts)$/u, ".d.$1")]
-                        : [],
-                  ),
-              ),
-            ],
-            directories: entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name),
-          };
-        },
-        realpath(file) {
-          return owned(file) ? boundary.assert(file) : undefined;
-        },
-      },
-    });
-    for (const file of await project.project.program.getSourceFileNames()) {
+    // Retain shared source parsing while keeping only one configured project open.
+    const previous = snapshot;
+    snapshot = previous
+      ? await previous.update({
+          closeProjects: previousConfig ? [previousConfig] : [],
+          openProjects: [config],
+          ensurePrograms: true,
+        })
+      : await api.createSnapshot({ openProjects: [config], ensurePrograms: true });
+    if (previous && previous !== snapshot) {
+      await previous.dispose();
+    }
+    previousConfig = config;
+    const project = snapshot.getConfiguredProject(config);
+    if (!project) {
+      throw new Error(`Native TypeScript did not open ${config}`);
+    }
+    for (const file of await project.program.getSourceFileNames()) {
       if (!owned(file) || currentSdkDeclaration(file)) {
         continue;
       }
@@ -312,4 +326,21 @@ export async function resolveExtensionBoundaryPreparation(
     visit(id, []);
   }
   return { sdkRoots: [...sdkRoots].toSorted(), pluginIds: ordered };
+}
+
+if (isDirectRunUrl(process.argv[1], import.meta.url)) {
+  const extensionIds: unknown = JSON.parse(process.argv[2] ?? "null");
+  if (
+    !Array.isArray(extensionIds) ||
+    !extensionIds.length ||
+    !extensionIds.every((id) => typeof id === "string" && /^[a-z0-9][a-z0-9-]*$/u.test(id)) ||
+    process.argv.length > 4 ||
+    (process.argv[3] !== undefined && process.argv[3] !== "--prepared-sdk")
+  ) {
+    throw new Error("Invalid extension boundary discovery request");
+  }
+  const preparation = await resolveExtensionBoundaryPreparation(process.cwd(), extensionIds, {
+    preparedSdk: process.argv[3] === "--prepared-sdk",
+  });
+  process.stdout.write(`${JSON.stringify(preparation)}\n`);
 }

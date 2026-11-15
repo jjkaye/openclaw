@@ -8,6 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
+  BOUNDARY_PREPARATION_TIMEOUT_MS,
   formatBoundaryCheckSuccessSummary,
   formatSlowCompileSummary,
   formatSkippedCompileProgress,
@@ -234,6 +235,30 @@ describe("check-extension-package-tsc-boundary", () => {
       fs.existsSync(path.join(root, ".artifacts/extension-package-boundary/compile/demo.json")),
     ).toBe(false);
   }, 30_000);
+  it("allows sequential preparation stages to outlive one compiler budget", async () => {
+    // Scale the real orchestration budget; three individually bounded stages
+    // exceed the old aggregate deadline without weakening any child deadline.
+    const moduleUrl = pathToFileURL(
+      path.resolve("scripts/check-extension-package-tsc-boundary.mts"),
+    ).href;
+    const preparation = `
+      const { runNodeStepAsync } = await import(${JSON.stringify(moduleUrl)});
+      for (let stage = 0; stage < 3; stage++) {
+        const result = await runNodeStepAsync(
+          "preparation stage " + stage,
+          ["--eval", "setTimeout(() => console.log('prepared'), 2000)"],
+          3000,
+        );
+        process.stdout.write(stage + ":" + result.stdout.trim() + "\\n");
+      }
+    `;
+    const result = await runNodeStepAsync(
+      "sequential preparation",
+      ["--input-type=module", "--eval", preparation],
+      BOUNDARY_PREPARATION_TIMEOUT_MS / 100,
+    );
+    expect(result.stdout.trim().split("\n")).toEqual(["0:prepared", "1:prepared", "2:prepared"]);
+  }, 20_000);
   it("keeps matching canary diagnostics classified as a timeout when the compiler never exits", async () => {
     const diagnostic = "TS6059 src/plugins/contracts/rootdir-boundary-canary.ts";
     await expect(

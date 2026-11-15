@@ -107,11 +107,16 @@ export async function runClawsMigrateCommand(
 
   let migration: Awaited<ReturnType<typeof buildClawMigrationPlan>>;
   let previewConfig: Awaited<ReturnType<typeof readMigrationConfig>>;
+  const selection = {
+    retainAgentConfig: opts.retainAgentConfig,
+    workspaceFiles: opts.workspaceFile,
+  };
   try {
     previewConfig = await readMigrationConfig();
     migration = await buildClawMigrationPlan({
       agentId,
       config: previewConfig.config,
+      ...selection,
       options: { env: process.env },
     });
   } catch (error) {
@@ -174,6 +179,7 @@ export async function runClawsMigrateCommand(
             const current = await buildClawMigrationPlan({
               agentId,
               config: latest.config,
+              ...selection,
               options: { env: process.env },
             });
             if (current.plan.planIntegrity !== migration.plan.planIntegrity) {

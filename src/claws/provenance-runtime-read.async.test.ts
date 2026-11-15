@@ -38,6 +38,7 @@ const row = {
   agentId: "worker",
   schemaVersion: CLAW_INSTALL_RECORD_SCHEMA_VERSION,
   agentConfigDigest: "original",
+  agentOwnedPathsJson: '["agents.entries.worker"]',
 };
 
 function schemaVersions(agentConfigDigest: string) {

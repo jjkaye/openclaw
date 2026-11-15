@@ -98,6 +98,92 @@ function createCheckout(prefix = "openclaw-dist-owner-") {
   return root;
 }
 
+function installDiscoveryFixture(root: string) {
+  installScripts(
+    root,
+    ["prepare-extension-package-boundary-artifacts.mts", "run-tsgo.mts", "check-file-utils.ts"],
+    { dependencies: ["@openclaw/fs-safe"] },
+  );
+  for (const file of [
+    "src/shared/non-packaged-plugin-dirs.ts",
+    "src/plugins/package-entrypoints.ts",
+  ]) {
+    write(root, file, fs.readFileSync(path.join(sourceRoot, file), "utf8"));
+  }
+  write(
+    root,
+    "tsconfig.json",
+    JSON.stringify({
+      compilerOptions: {
+        module: "NodeNext",
+        target: "ES2022",
+        types: [],
+        noLib: true,
+        paths: {
+          "openclaw/plugin-sdk/*": ["./packages/plugin-sdk/dist/src/plugin-sdk/*.d.ts"],
+          "openclaw/plugin-discord": [
+            "./.artifacts/extension-package-boundary/plugins/discord/api.d.ts",
+          ],
+          "openclaw/plugin-memory": [
+            "./.artifacts/extension-package-boundary/plugins/memory-core/api.d.ts",
+          ],
+        },
+      },
+    }),
+  );
+  for (const id of ["demo", "second", "discord", "memory-core"]) {
+    write(
+      root,
+      `extensions/${id}/package.json`,
+      JSON.stringify({ name: `@openclaw/${id}`, openclaw: { extensions: ["./index.ts"] } }),
+    );
+    write(root, `extensions/${id}/openclaw.plugin.json`, JSON.stringify({ id }));
+    write(
+      root,
+      `extensions/${id}/tsconfig.json`,
+      JSON.stringify({ extends: "../../tsconfig.json", files: ["index.ts"], include: [] }),
+    );
+    write(
+      root,
+      `extensions/${id}/index.ts`,
+      'export type { Shared } from "openclaw/plugin-sdk/core";',
+    );
+  }
+  write(root, "src/plugin-sdk/core.ts", "export interface Shared { x: string }");
+  write(
+    root,
+    "packages/plugin-sdk/dist/src/plugin-sdk/core.d.ts",
+    'export type Shared = import("openclaw/plugin-discord").Discord;',
+  );
+  write(root, "extensions/discord/index.ts", 'export * from "./api.js";');
+  write(
+    root,
+    "extensions/discord/api.ts",
+    'export type Discord = import("openclaw/plugin-memory").Memory;',
+  );
+  write(root, "extensions/memory-core/index.ts", 'export * from "./api.js";');
+  write(root, "extensions/memory-core/api.ts", "export interface Memory { x: string }");
+  return write(
+    root,
+    "observe-native.mjs",
+    String.raw`
+    import child from 'node:child_process';
+    import fs from 'node:fs';
+    import {syncBuiltinESMExports} from 'node:module';
+    const spawn = child.spawn;
+    child.spawn = function(bin, args, options) {
+      const result = spawn.call(this, bin, args, options);
+      if (args?.includes('--api') && args.includes('--async')) {
+        fs.appendFileSync('native-pids.jsonl', JSON.stringify({pid: result.pid})+'\n');
+        if (process.env.DISCOVERY_SIGNAL_PID) result.once('spawn', () => process.kill(Number(process.env.DISCOVERY_SIGNAL_PID), 'SIGTERM'));
+      }
+      return result;
+    };
+    syncBuiltinESMExports();
+  `,
+  );
+}
+
 function installCompiler(root: string, afterEmit = "", native = resolveInstalledNativeCompiler()) {
   const launcher = path.join(root, "node_modules/.bin/tsgo");
   fs.rmSync(launcher, { force: true });
@@ -598,6 +684,130 @@ describe.skipIf(process.platform === "win32")("dist artifact ownership", () => {
     expect((error as { error?: unknown }).error ?? error).toBe(error);
     expect(fs.existsSync(path.join(resolveDistArtifactLockPath(root), "owner.json"))).toBe(false);
     expect(fs.existsSync(path.join(resolveDistArtifactLockPath(root), "unjoined"))).toBe(false);
+  });
+
+  it("releases the artifact claim after signaled declaration work joins", async ({ signal }) => {
+    await withProcesses(async ({ start }) => {
+      const root = createCheckout();
+      installScripts(root, ["prepare-extension-package-boundary-artifacts.mts", "run-tsgo.mts"], {
+        dependencies: ["@openclaw/fs-safe"],
+      });
+      const entry = write(
+        root,
+        "signal-entry.mts",
+        String.raw`
+          import { runNodeStep } from './scripts/prepare-extension-package-boundary-artifacts.mts';
+          await runNodeStep('signaled declaration', ['--eval',
+            "setInterval(() => {}, 1000); process.stdout.write('ready\\n');"
+          ], 30_000, {
+            onStdoutLine(line) {
+              if (line.trim() === 'ready') process.kill(process.pid, 'SIGTERM');
+              return false;
+            },
+          });
+          `,
+      );
+      const runner = write(
+        root,
+        "signal-runner.mts",
+        `
+          import { withDistArtifactOwnership, distArtifactEntryArgs } from './scripts/lib/dist-artifact-ownership.mts';
+          import { runManagedCommand } from './scripts/lib/managed-child-process.mts';
+          process.exitCode = await withDistArtifactOwnership(process.cwd(), () => runManagedCommand({
+            bin: process.execPath,
+            args: distArtifactEntryArgs(${JSON.stringify(entry)}, [], { native: true }),
+            requireProcessTreeExit: true,
+          }));
+          `,
+      );
+      const result = await start(root, runner).done;
+      expect(result.code, result.output).toBe(143);
+      const lock = resolveDistArtifactLockPath(root);
+      expect(fs.existsSync(path.join(lock, "owner.json")), result.output).toBe(false);
+      expect(fs.readdirSync(lock).filter((name) => name.startsWith("child-"))).toEqual([]);
+    }, signal);
+  });
+
+  it("keeps discovery graphs isolated while reusing one native compiler per pass", async ({
+    signal,
+  }) => {
+    await withProcesses(async ({ start }) => {
+      const root = createCheckout();
+      const observer = installDiscoveryFixture(root);
+      const runner = write(
+        root,
+        "discovery-runner.mts",
+        `
+        import fs from 'node:fs';
+        import {runBoundaryDiscovery} from './scripts/prepare-extension-package-boundary-artifacts.mts';
+        process.env.NODE_OPTIONS = ${JSON.stringify(`--import=${pathToFileURL(observer).href}`)};
+        const ids = ['demo', 'second'];
+        const unprepared = await runBoundaryDiscovery(ids);
+        const prepared = await runBoundaryDiscovery(ids, true);
+        fs.writeFileSync('packages/plugin-sdk/dist/src/plugin-sdk/core.d.ts', 'export interface Shared { x: string }');
+        const changed = await runBoundaryDiscovery(ids, true);
+        fs.writeFileSync('result.json', JSON.stringify({unprepared, prepared, changed}));
+      `,
+      );
+      const result = await start(root, runner).done;
+      expect(result.code, result.output).toBe(0);
+      expect(JSON.parse(fs.readFileSync(path.join(root, "result.json"), "utf8"))).toEqual({
+        unprepared: { sdkRoots: ["src/plugin-sdk/core.ts"], pluginIds: [] },
+        prepared: { sdkRoots: [], pluginIds: ["memory-core", "discord"] },
+        changed: { sdkRoots: [], pluginIds: [] },
+      });
+      // Each pass owns one compiler, rather than one per consumer/producer graph.
+      expect(
+        fs.readFileSync(path.join(root, "native-pids.jsonl"), "utf8").trim().split("\n"),
+      ).toHaveLength(3);
+    }, signal);
+  });
+
+  it("joins the real discovery compiler before releasing signaled artifact ownership", async ({
+    signal,
+  }) => {
+    await withProcesses(async ({ start }) => {
+      const root = createCheckout();
+      const observer = installDiscoveryFixture(root);
+      const entry = write(
+        root,
+        "discovery-entry.mts",
+        `
+        import {runBoundaryDiscovery} from './scripts/prepare-extension-package-boundary-artifacts.mts';
+        process.env.NODE_OPTIONS = ${JSON.stringify(`--import=${pathToFileURL(observer).href}`)};
+        process.env.DISCOVERY_SIGNAL_PID = String(process.pid);
+        await runBoundaryDiscovery(['demo', 'second'], true);
+      `,
+      );
+      const runner = write(
+        root,
+        "discovery-owner.mts",
+        `
+        import {withDistArtifactOwnership,distArtifactEntryArgs} from './scripts/lib/dist-artifact-ownership.mts';
+        import {runManagedCommand} from './scripts/lib/managed-child-process.mts';
+        process.exitCode = await withDistArtifactOwnership(process.cwd(), () => runManagedCommand({
+          bin: process.execPath, args: distArtifactEntryArgs(${JSON.stringify(entry)}, [], {native:true}),
+          requireProcessTreeExit: true,
+        }));
+      `,
+      );
+      const result = await start(root, runner).done;
+      expect(result.code, result.output).toBe(143);
+      const pids = fs
+        .readFileSync(path.join(root, "native-pids.jsonl"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line).pid as number);
+      expect(pids).toHaveLength(1);
+      for (const pid of pids) {
+        await waitForForeignProcessExit(pid, signal);
+      }
+      const lock = resolveDistArtifactLockPath(root);
+      expect(fs.existsSync(path.join(lock, "owner.json")), result.output).toBe(false);
+      expect(
+        fs.readdirSync(lock).filter((name) => name === "unjoined" || name.startsWith("child-")),
+      ).toEqual([]);
+    }, signal);
   });
 
   it.for([false, true])(

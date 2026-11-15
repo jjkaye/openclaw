@@ -1,4 +1,4 @@
-import { access, mkdir, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
@@ -46,6 +46,65 @@ async function fixture(agent: Record<string, unknown> = {}) {
 }
 
 describe("Claw migration planning", () => {
+  it("adopts selected workspace files while retaining host-owned agent settings", async () => {
+    const { workspace, env, config } = await fixture({
+      agentDir: "/local/runtime/worker",
+      cwd: "/local/projects",
+      skills: ["host-only"],
+      thinkingDefault: "high",
+      tools: { allow: ["read"] },
+    });
+    config.agents!.defaults = { skills: ["inherited-skill"] };
+    await mkdir(join(workspace, "brain"));
+    await writeFile(join(workspace, "brain", "agent-identity.md"), "# Existing identity\n");
+    const params = {
+      agentId: "worker",
+      config,
+      retainAgentConfig: true,
+      workspaceFiles: ["brain/agent-identity.md"],
+      options: { env },
+    };
+    const migration = await buildClawMigrationPlan(params);
+    expect(migration.plan.agent).toEqual({ id: "worker" });
+    expect(migration.profile).toBeUndefined();
+    expect(migration.plan.retained).toContain("agent configuration");
+    expect(migration.addPlan.actions.some((action) => action.kind === "agent")).toBe(false);
+    const changed = structuredClone(config);
+    changed.agents!.defaults = { skills: ["changed"] };
+    expect(
+      (await buildClawMigrationPlan({ ...params, config: changed })).plan.planIntegrity,
+    ).not.toBe(migration.plan.planIntegrity);
+    await expect(
+      applyClawMigrationPlan({ migration, config: changed, options: { env } }),
+    ).rejects.toMatchObject({ code: "migration_changed" });
+    await applyClawMigrationPlan({ migration, config, options: { env } });
+    expect(readClawInstallRecord("worker", { env })).toMatchObject({
+      agentOrigin: "adopted",
+      agentOwnedPaths: [],
+    });
+    expect(migration.ownershipFiles.map((file) => file.path)).toEqual(["brain/agent-identity.md"]);
+    expect(await readFile(join(workspace, "brain", "agent-identity.md"), "utf8")).toBe(
+      "# Existing identity\n",
+    );
+  });
+
+  it.each([
+    ["../outside.md", "workspace_file_invalid"],
+    ["BOOTSTRAP.md", "workspace_file_invalid"],
+    ["skills/example/SKILL.md", "workspace_file_invalid"],
+    ["missing.md", "workspace_file_missing"],
+  ])("rejects an invalid explicit workspace selection %s", async (path, code) => {
+    const { config, env } = await fixture();
+    await expect(
+      buildClawMigrationPlan({
+        agentId: "worker",
+        config,
+        workspaceFiles: [path],
+        options: { env },
+      }),
+    ).rejects.toMatchObject({ code });
+  });
+
   it("builds a stable read-only plan without creating a package or state database", async () => {
     const { workspace, env, build } = await fixture({
       name: "Existing worker",

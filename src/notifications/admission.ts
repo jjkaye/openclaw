@@ -1,5 +1,6 @@
 import { NOTIFICATION_RECEIPT_RESOLVED_RETENTION_MS } from "../infra/delivery-queue-sqlite.types.js";
-import { notificationKey, notificationOwnerKey, type NotificationProposal } from "./proposal.js";
+import type { NotificationProposal } from "./proposal.js";
+import { notificationKey, notificationOwnerKey } from "./receipt-keys.js";
 import { notificationLocalDate, type NotificationPreparationCandidate } from "./receipt-policy.js";
 import type { NotificationResolveContext, NotificationSourceState } from "./source-types.js";
 

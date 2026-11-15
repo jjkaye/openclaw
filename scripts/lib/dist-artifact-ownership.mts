@@ -23,6 +23,6 @@ if (isDirectRunUrl(process.argv[1], import.meta.url)) {
   // Complete this module's evaluation before importing commands that import it back.
   void runOwnedDistArtifactEntry(script!, args).catch((error: unknown) => {
     console.error(error);
-    process.exitCode = 1;
+    process.exitCode ||= 1;
   });
 }

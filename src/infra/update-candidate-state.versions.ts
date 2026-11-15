@@ -1,11 +1,21 @@
 import type { DatabaseSync } from "node:sqlite";
+import { z } from "zod";
 import type { OpenClawConfigWithLegacyRoster } from "../config/legacy.roster.js";
 import { resolveConfiguredAgentDatabaseTargets } from "../config/sessions/targets.js";
 import { createAgentDatabaseDeletionClassifier } from "../state/agent-deletion-discovery.js";
 import { readRetainedAgentDeletionsFromDatabase } from "../state/agent-deletion-journal.read.js";
 import { readRegisteredAgentDatabaseRows } from "../state/openclaw-agent-db-registry.read.js";
 import type { StateDatabaseDiscovery } from "./update-candidate-paths.js";
-import type { UpdateStateSchemaVersion } from "./update-candidate-state.js";
+
+export const UpdateStateSchemaVersionsSchema = z.array(
+  z.object({
+    path: z.string(),
+    userVersion: z.number().nullable(),
+    contentVersion: z.number().optional(),
+    migrationDisposition: z.literal("retained").optional(),
+  }),
+);
+export type UpdateStateSchemaVersion = z.infer<typeof UpdateStateSchemaVersionsSchema>[number];
 
 /** Released updaters compare exact response paths, so every raw alias is published. */
 export function publishStateDatabaseVersions(

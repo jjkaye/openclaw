@@ -1,5 +1,5 @@
 --- telegram-direct-codex-message-tool.md	sha256=21e5c0a4c2d2c032b34e1a2633bc506d773e0734e820a9f6df39f25eacf41406
-+++ telegram-heartbeat-codex-tool.md	sha256=bd2827f424db1600df385b6ce046011bb57cd958b9d9f4fcbee424dc1d18b0f7
++++ telegram-heartbeat-codex-tool.md	sha256=5a277a9faa302fc46d2bfd44a3a4a29362dafd353b7950c1d91e113fee9aeca3
 @@ -1,1 +1,1 @@
 -# Telegram Direct Codex Message Tool Turn
 +# Telegram Direct Codex Heartbeat Tool Turn
@@ -13,78 +13,131 @@
 -  "trigger": "user"
 +  "toolSnapshot": "codex-dynamic-tools.heartbeat-turn.json",
 +  "trigger": "heartbeat"
-@@ -96,0 +97,1 @@
-+    "heartbeat_respond",
-@@ -136,1 +137,1 @@
+@@ -64,0 +65,1 @@
++    "agents.enabled": false,
+@@ -71,0 +73,2 @@
++    "features.multi_agent": false,
++    "features.multi_agent_v2": false,
+@@ -84,1 +86,0 @@
+-    "sessions_spawn",
+@@ -97,1 +99,1 @@
+-    "sessions_yield"
++    "heartbeat_respond"
+@@ -114,0 +117,1 @@
++    "agents.enabled": false,
+@@ -118,0 +122,2 @@
++    "features.multi_agent": false,
++    "features.multi_agent_v2": false,
+@@ -136,1 +141,1 @@
 -  "threadId": "thread-telegram-direct-codex-message-tool"
 +  "threadId": "thread-telegram-heartbeat-codex-tool"
-@@ -149,4 +149,0 @@
+@@ -149,4 +153,0 @@
 -    "openclaw_current_sender": {
 -      "kind": "untrusted",
 -      "value": "{\"sender\":{\"id\":\"1000001\",\"name\":\"Pash\",\"username\":\"pash\"}}"
 -    },
-@@ -186,2 +183,2 @@
+@@ -186,2 +187,2 @@
 -  "threadId": "thread-telegram-direct-codex-message-tool",
 -  "turnTrigger": "user"
 +  "threadId": "thread-telegram-heartbeat-codex-tool",
 +  "turnTrigger": "heartbeat"
-@@ -226,1 +223,1 @@
+@@ -226,1 +227,1 @@
 -    "dynamicToolsFrom": "codex-dynamic-tools.telegram-direct.json",
 +    "dynamicToolsFrom": "codex-dynamic-tools.heartbeat-turn.json",
-@@ -239,2 +236,2 @@
+@@ -239,2 +240,2 @@
 -    "chars": 1348,
 -    "roughTokens": 337
 +    "chars": 1218,
 +    "roughTokens": 305
-@@ -259,2 +256,2 @@
+@@ -259,2 +260,2 @@
 -    "chars": 72943,
 -    "roughTokens": 18236
-+    "chars": 74436,
-+    "roughTokens": 18609
-@@ -271,2 +268,2 @@
++    "chars": 62243,
++    "roughTokens": 15561
+@@ -263,2 +264,2 @@
+-    "chars": 3194,
+-    "roughTokens": 799
++    "chars": 3074,
++    "roughTokens": 769
+@@ -271,2 +272,2 @@
 -    "chars": 27580,
 -    "roughTokens": 6895
-+    "chars": 27917,
-+    "roughTokens": 6980
-@@ -275,2 +272,2 @@
++    "chars": 27797,
++    "roughTokens": 6950
+@@ -275,2 +276,2 @@
 -    "chars": 100525,
 -    "roughTokens": 25132
-+    "chars": 102355,
-+    "roughTokens": 25589
-@@ -279,2 +276,2 @@
++    "chars": 90042,
++    "roughTokens": 22511
+@@ -279,2 +280,2 @@
 -    "chars": 879,
 -    "roughTokens": 220
 +    "chars": 1346,
 +    "roughTokens": 337
-@@ -528,6 +524,0 @@
+@@ -484,0 +486,2 @@
++Finish this heartbeat and record its monitoring outcome inline. Do not spawn agents, yield, wait for background completion, or transfer this heartbeat's outcome to another run. When the caller has already authorized and verified an existing ordinary execution owner and `sessions_send` is available, submit only the bounded assignment with `timeoutSeconds: 0`, record acceptance without claiming start or completion, and finish with `heartbeat_respond`. Verify returned work in a later ordinary result turn or the next authorized wake. Tool availability alone grants no authority.
++
+@@ -489,4 +491,0 @@
+-Use Codex native `spawn_agent` for Codex subagents. `spawn_agent` and the other native collaboration tools may be deferred. For follow-up work on an existing native child, use the native collaboration tool that starts or queues a new turn. Use OpenClaw `sessions_spawn` only for OpenClaw or ACP delegation, never as a substitute for `spawn_agent` on internal legwork.
+-
+-When a native child's result belongs in a later turn, end the current turn with `openclaw_direct.sessions_yield`; the completion arrives as the next model-visible input. Use native `wait_agent` only for an intentional same-turn wait when the immediate next step is blocked on the child. Never loop-poll for native child completion.
+-
+@@ -528,6 +526,0 @@
 -### User: OpenClaw Additional Context (openclaw_current_sender)
 -
 -```text
 -<external_openclaw_current_sender>{"sender":{"id":"1000001","name":"Pash","username":"pash"}}</external_openclaw_current_sender>
 -```
 -
-@@ -557,1 +547,0 @@
+@@ -557,1 +549,0 @@
 -[OpenClaw conversation info: sender={"id":"1000001","name":"Pash","username":"pash"}]
-@@ -576,1 +566,1 @@
+@@ -576,1 +568,1 @@
 -{"chat_id":"user:1000001","message_id":"tg-msg-0001","sender":{"id":"1000001","name":"Pash","username":"pash"}}
 +{"chat_id":"user:1000001","message_id":"heartbeat-0001","sender":{"id":"1000001","name":"Pash","username":"pash"}}
-@@ -579,1 +569,1 @@
+@@ -579,1 +571,1 @@
 -Can you check whether the nightly build finished and tell me what happened?
 +Follow the heartbeat monitor scratch context when provided. Recurring tasks are automations; create or change their schedules with the automations tool, not heartbeat scratch. Do not infer or repeat old tasks from prior chats. Use heartbeat_respond to report the wake outcome. Set notify=false when nothing needs the user's attention. Set notify=true with notificationText only when the user should be interrupted. If the heartbeat_respond tool is not available in this run, reply NO_REPLY when nothing needs the user's attention; when the user should be interrupted, reply with only the alert text instead of a prose report.
-@@ -584,1 +574,1 @@
+@@ -584,1 +576,1 @@
 -Full JSON: `codex-dynamic-tools.telegram-direct.json`
 +Full tool overrides: `codex-dynamic-tools.heartbeat-turn.json` (base: `codex-dynamic-tools.telegram-direct.json`)
-@@ -604,0 +595,1 @@
-+  "heartbeat_respond",
-@@ -755,0 +747,39 @@
+@@ -592,1 +583,0 @@
+-  "sessions_spawn",
+@@ -605,1 +596,1 @@
+-  "sessions_yield"
++  "heartbeat_respond"
+@@ -755,0 +747,63 @@
 +  },
 +  {
-+    "description": "Accept heartbeat result for post-turn handling. `notify=false` no visible send. `notify=true` needs concise notificationText. Scratch is monitor prose only.",
++    "description": "Accept heartbeat result for post-turn handling. `notify=false` no visible send. `notify=true` needs concise notificationText. Include notification for task-based asks or results, using the current source reference. Scratch is monitor prose only.",
 +    "inputSchema": {
 +      "additionalProperties": false,
 +      "properties": {
 +        "nextCheck": {
 +          "type": "string"
++        },
++        "notification": {
++          "additionalProperties": false,
++          "description": "Current notification reference returned by the authorized task source.",
++          "properties": {
++            "expectedRevision": {
++              "type": "string"
++            },
++            "ownerId": {
++              "type": "string"
++            },
++            "purpose": {
++              "enum": ["decision", "result"],
++              "type": "string"
++            },
++            "sourceId": {
++              "type": "string"
++            },
++            "topicId": {
++              "type": "string"
++            }
++          },
++          "required": ["sourceId", "ownerId", "topicId", "purpose", "expectedRevision"],
++          "type": "object"
 +        },
 +        "notificationText": {
 +          "type": "string"

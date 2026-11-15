@@ -169,9 +169,9 @@ export async function runNodeStep(
     stdoutWriter.flush();
     stderrWriter.flush();
     activeNodeSteps.delete(command);
-    // The last sibling exits only after all managed cancellation has joined.
+    // Let artifact ownership unwind after the last managed cancellation joins.
     if (nodeStepParentSignal && activeNodeSteps.size === 0) {
-      process.exit(signalExitCode(nodeStepParentSignal));
+      process.exitCode = signalExitCode(nodeStepParentSignal);
     }
   }
 }
@@ -241,12 +241,65 @@ export async function runNodeSteps(steps: NodeStep[], env: NodeJS.ProcessEnv = p
   }
 }
 
+/** Discovery owns a real compiler child, so cancellation must join its entire group. */
+export async function runBoundaryDiscovery(extensionIds: string[], preparedSdk = false) {
+  let output = "";
+  let outputExceededLimit = false;
+  await runNodeStep(
+    "extension boundary discovery",
+    [
+      resolve(repoRoot, "scripts/lib/extension-boundary-projects.mts"),
+      JSON.stringify(extensionIds),
+      ...(preparedSdk ? ["--prepared-sdk"] : []),
+    ],
+    420_000,
+    {
+      onStdoutLine(line) {
+        if (output.length + line.length > 1024 * 1024) {
+          outputExceededLimit = true;
+        } else if (!outputExceededLimit) {
+          output += line;
+        }
+        return false;
+      },
+    },
+  );
+  if (outputExceededLimit) {
+    throw new Error("Extension boundary discovery output exceeded its limit");
+  }
+  const preparation: unknown = JSON.parse(output);
+  if (
+    !preparation ||
+    typeof preparation !== "object" ||
+    !("sdkRoots" in preparation) ||
+    !("pluginIds" in preparation) ||
+    !Array.isArray(preparation.sdkRoots) ||
+    !Array.isArray(preparation.pluginIds) ||
+    ![...preparation.sdkRoots, ...preparation.pluginIds].every((value) => typeof value === "string")
+  ) {
+    throw new Error("Invalid extension boundary discovery result");
+  }
+  return preparation as Awaited<ReturnType<typeof resolveExtensionBoundaryPreparation>>;
+}
+
 async function prepareExtensionPackageBoundaryArtifacts(argv: string[] = process.argv.slice(2)) {
+  const preparationStartedAt = performance.now();
+  const startPhase = (label: string) => {
+    const startedAt = performance.now();
+    process.stdout.write(
+      `[boundary preparation] ${label} started; elapsed=${Math.round(startedAt - preparationStartedAt)}ms\n`,
+    );
+    return () => {
+      const finishedAt = performance.now();
+      process.stdout.write(
+        `[boundary preparation] ${label} completed; duration=${Math.round(finishedAt - startedAt)}ms; elapsed=${Math.round(finishedAt - preparationStartedAt)}ms\n`,
+      );
+    };
+  };
   const mode = parseMode(argv);
   await ensureKyselyTypes(repoRoot);
   const selectedArgument = argv.find((arg) => arg.startsWith("--extensions="));
   let selected: string[] | undefined;
-  let discoverPreparation: typeof resolveExtensionBoundaryPreparation | undefined;
   let preparation: Awaited<ReturnType<typeof resolveExtensionBoundaryPreparation>> | undefined;
   if (selectedArgument) {
     const requested: unknown = JSON.parse(selectedArgument.slice("--extensions=".length));
@@ -259,9 +312,9 @@ async function prepareExtensionPackageBoundaryArtifacts(argv: string[] = process
       throw new Error("Invalid selected extension preparation request");
     }
     selected = requested;
-    ({ resolveExtensionBoundaryPreparation: discoverPreparation } =
-      await import("./lib/extension-boundary-projects.mts"));
-    preparation = await discoverPreparation(repoRoot, selected);
+    const finishDiscovery = startPhase("initial discovery");
+    preparation = await runBoundaryDiscovery(selected);
+    finishDiscovery();
     process.stdout.write(
       `selected preparation: ${preparation.sdkRoots.length} SDK roots; plugin producers: ${preparation.pluginIds.join(", ") || "none"}\n`,
     );
@@ -310,6 +363,8 @@ async function prepareExtensionPackageBoundaryArtifacts(argv: string[] = process
     if (!batch.length) {
       return;
     }
+    const batchLabel = batch.map((unit) => unit.id).join(",");
+    const finishInputs = startPhase(`${batchLabel} input checks`);
     // Upstream pruning changes consumer topology; snapshot after the preceding batch's cleanup.
     const before = new BoundaryInputSnapshot(repoRoot);
     const pending = batch
@@ -349,6 +404,8 @@ async function prepareExtensionPackageBoundaryArtifacts(argv: string[] = process
         return Object.assign(unit, { recordPath, inputReceipt, args, outputs, startedAt: 0 });
       })
       .filter((unit) => unit !== null);
+    finishInputs();
+    const finishCompile = startPhase(`${batchLabel} compiler`);
     await runNodeSteps(
       pending.map((unit) => {
         unit.startedAt = Date.now();
@@ -370,9 +427,11 @@ async function prepareExtensionPackageBoundaryArtifacts(argv: string[] = process
         };
       }),
     );
+    finishCompile();
     if (!pending.length) {
       return;
     }
+    const finishRecords = startPhase(`${batchLabel} record validation`);
     const after = new BoundaryInputSnapshot(repoRoot);
     // Join and validate every owner before publishing any success in this batch.
     const completed = pending.map((unit) => {
@@ -394,6 +453,8 @@ async function prepareExtensionPackageBoundaryArtifacts(argv: string[] = process
       );
       return Object.assign(unit, { record });
     });
+    finishRecords();
+    const finishPublication = startPhase(`${batchLabel} publication cleanup`);
     for (const unit of completed) {
       // Surviving files are cleanup candidates, never evidence of successful emit.
       for (const file of listCacheFiles(
@@ -409,6 +470,7 @@ async function prepareExtensionPackageBoundaryArtifacts(argv: string[] = process
       writeArtifactRecord(unit.recordPath, unit.record);
       process.stdout.write(`[${unit.id} boundary dts] emitted ${unit.outputs.size} files\n`);
     }
+    finishPublication();
   };
   if (!preparation) {
     for (const batch of batches) {
@@ -421,9 +483,9 @@ async function prepareExtensionPackageBoundaryArtifacts(argv: string[] = process
     await prepareBatch([sdkUnit]);
     // Only admitted SDK output may reveal declaration-only producer edges. Expand
     // their SDK inputs before compiling any producer or selected package.
-    const discovered = await discoverPreparation!(repoRoot, selected!, {
-      preparedSdk: true,
-    });
+    const finishDiscovery = startPhase("prepared SDK discovery");
+    const discovered = await runBoundaryDiscovery(selected!, true);
+    finishDiscovery();
     if (sharedSdk) {
       if (discovered.sdkRoots.length) {
         throw new Error(

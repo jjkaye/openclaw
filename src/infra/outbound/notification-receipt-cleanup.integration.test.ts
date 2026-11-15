@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { notificationOwnerKey } from "../../notifications/proposal.js";
 import { reconcileNotificationReceiptResolution } from "../../notifications/receipt-cleanup.js";
+import { notificationOwnerKey } from "../../notifications/receipt-keys.js";
 import type { NotificationReceiptState } from "../../notifications/source-types.js";
 import { createPluginRegistry } from "../../plugins/registry.js";
 import { resetPluginRuntimeStateForTest, setActivePluginRegistry } from "../../plugins/runtime.js";

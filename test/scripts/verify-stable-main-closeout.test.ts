@@ -654,6 +654,7 @@ process.stdout.write(JSON.stringify([
         ...process.env,
         PATH: `${bin}:${process.env.PATH}`,
         WITHDRAWAL_LOOKUPS: lookups,
+        GITHUB_REPOSITORY: "openclaw/openclaw",
       });
 
     const initial = run("allowed");
