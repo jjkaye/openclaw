@@ -242,6 +242,19 @@ export async function runNodeSteps(steps: NodeStep[], env: NodeJS.ProcessEnv = p
 }
 
 async function prepareExtensionPackageBoundaryArtifacts(argv: string[] = process.argv.slice(2)) {
+  const preparationStartedAt = performance.now();
+  const startPhase = (label: string) => {
+    const startedAt = performance.now();
+    process.stdout.write(
+      `[boundary preparation] ${label} started; elapsed=${Math.round(startedAt - preparationStartedAt)}ms\n`,
+    );
+    return () => {
+      const finishedAt = performance.now();
+      process.stdout.write(
+        `[boundary preparation] ${label} completed; duration=${Math.round(finishedAt - startedAt)}ms; elapsed=${Math.round(finishedAt - preparationStartedAt)}ms\n`,
+      );
+    };
+  };
   const mode = parseMode(argv);
   await ensureKyselyTypes(repoRoot);
   const selectedArgument = argv.find((arg) => arg.startsWith("--extensions="));
@@ -261,7 +274,9 @@ async function prepareExtensionPackageBoundaryArtifacts(argv: string[] = process
     selected = requested;
     ({ resolveExtensionBoundaryPreparation: discoverPreparation } =
       await import("./lib/extension-boundary-projects.mts"));
+    const finishDiscovery = startPhase("initial discovery");
     preparation = await discoverPreparation(repoRoot, selected);
+    finishDiscovery();
     process.stdout.write(
       `selected preparation: ${preparation.sdkRoots.length} SDK roots; plugin producers: ${preparation.pluginIds.join(", ") || "none"}\n`,
     );
@@ -310,6 +325,8 @@ async function prepareExtensionPackageBoundaryArtifacts(argv: string[] = process
     if (!batch.length) {
       return;
     }
+    const batchLabel = batch.map((unit) => unit.id).join(",");
+    const finishInputs = startPhase(`${batchLabel} input checks`);
     // Upstream pruning changes consumer topology; snapshot after the preceding batch's cleanup.
     const before = new BoundaryInputSnapshot(repoRoot);
     const pending = batch
@@ -349,6 +366,8 @@ async function prepareExtensionPackageBoundaryArtifacts(argv: string[] = process
         return Object.assign(unit, { recordPath, inputReceipt, args, outputs, startedAt: 0 });
       })
       .filter((unit) => unit !== null);
+    finishInputs();
+    const finishCompile = startPhase(`${batchLabel} compiler`);
     await runNodeSteps(
       pending.map((unit) => {
         unit.startedAt = Date.now();
@@ -370,9 +389,11 @@ async function prepareExtensionPackageBoundaryArtifacts(argv: string[] = process
         };
       }),
     );
+    finishCompile();
     if (!pending.length) {
       return;
     }
+    const finishRecords = startPhase(`${batchLabel} record validation`);
     const after = new BoundaryInputSnapshot(repoRoot);
     // Join and validate every owner before publishing any success in this batch.
     const completed = pending.map((unit) => {
@@ -394,6 +415,8 @@ async function prepareExtensionPackageBoundaryArtifacts(argv: string[] = process
       );
       return Object.assign(unit, { record });
     });
+    finishRecords();
+    const finishPublication = startPhase(`${batchLabel} publication cleanup`);
     for (const unit of completed) {
       // Surviving files are cleanup candidates, never evidence of successful emit.
       for (const file of listCacheFiles(
@@ -409,6 +432,7 @@ async function prepareExtensionPackageBoundaryArtifacts(argv: string[] = process
       writeArtifactRecord(unit.recordPath, unit.record);
       process.stdout.write(`[${unit.id} boundary dts] emitted ${unit.outputs.size} files\n`);
     }
+    finishPublication();
   };
   if (!preparation) {
     for (const batch of batches) {
@@ -421,9 +445,11 @@ async function prepareExtensionPackageBoundaryArtifacts(argv: string[] = process
     await prepareBatch([sdkUnit]);
     // Only admitted SDK output may reveal declaration-only producer edges. Expand
     // their SDK inputs before compiling any producer or selected package.
+    const finishDiscovery = startPhase("prepared SDK discovery");
     const discovered = await discoverPreparation!(repoRoot, selected!, {
       preparedSdk: true,
     });
+    finishDiscovery();
     if (sharedSdk) {
       if (discovered.sdkRoots.length) {
         throw new Error(
