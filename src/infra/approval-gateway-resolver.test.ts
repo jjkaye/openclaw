@@ -275,6 +275,39 @@ describe("resolveApprovalOverGateway", () => {
     expect(scopedRequest).not.toHaveBeenCalled();
   });
 
+  it("passes matched native conversation only through the explicit account runtime", async () => {
+    const request = vi.fn(async () => ({ applied: true, approval: recordedApproval }));
+    const input = {
+      cfg: {} as never,
+      approvalId: "plugin:household",
+      approvalKind: "plugin" as const,
+      decision: "allow-once" as const,
+      channel: "imessage",
+      accountId: "default",
+      senderId: "owner",
+      conversationId: "chat_id:42",
+    };
+    await resolveApprovalOverGateway({ ...input, gatewayRuntime: { request } });
+    expect(request).toHaveBeenCalledWith(
+      "approval.resolve",
+      {
+        id: "plugin:household",
+        kind: "plugin",
+        decision: "allow-once",
+        reviewer: { channel: "imessage", accountId: "default", senderId: "owner" },
+      },
+      { clientDisplayName: "iMessage approval (owner)", conversationId: "chat_id:42" },
+    );
+    await resolveApprovalOverGateway(input);
+    expect(hoisted.clientRequest).toHaveBeenCalledWith("approval.resolve", {
+      id: "plugin:household",
+      kind: "plugin",
+      decision: "allow-once",
+      reviewer: { channel: "imessage", accountId: "default", senderId: "owner" },
+    });
+    expect(JSON.stringify(hoisted.clientRequest.mock.calls)).not.toContain("conversationId");
+  });
+
   it("preserves protocol-valid boundary whitespace in canonical approval ids", async () => {
     const approvalId = "\uFEFF";
 

@@ -34,6 +34,7 @@ import {
   readRepositoryGitHubPublicationInDatabase,
 } from "../gateway/github-repository-publication-store.js";
 import { readPlacementGrantRows } from "../gateway/operator-approval-placement-grants.read.js";
+import { readPluginApprovalReceiptsInDatabase } from "../gateway/operator-approval-plugin-receipts.worker.js";
 import {
   listCronStandingGrantsInDatabase,
   lookupCronStandingGrantInDatabase,
@@ -427,6 +428,12 @@ serveOwnedWorkerTasks(
               return {
                 type: command.type,
                 history: listTerminalOperatorApprovalsInDatabase(command.input, db),
+              };
+            }
+            if (command.type === "operatorApprovals.pluginReceipts") {
+              return {
+                type: command.type,
+                result: readPluginApprovalReceiptsInDatabase(command.input, db),
               };
             }
             if (command.type === "operatorApprovals.validateCronGrant") {

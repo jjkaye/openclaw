@@ -10,6 +10,7 @@ import type {
   GatewayApprovalEventSubscriber,
   GatewayApprovalRequest,
   GatewayApprovalResolved,
+  GatewayNativeApprovalRequestOptions,
 } from "../infra/approval-gateway-runtime.types.js";
 import { createApprovalNativeRouteCoordinator } from "../infra/approval-native-route-coordinator.js";
 import type { ChannelApprovalKind } from "../infra/approval-types.js";
@@ -21,7 +22,10 @@ import type {
   AgentTurnStartOwner,
   InternalAgentTurnPrincipalOptions,
 } from "./agent-turn/internal-facade.types.js";
-import { retainInternalApprovalCommitGuard } from "./internal-approval-authority.js";
+import {
+  isInternalApprovalCommitGuard,
+  retainInternalApprovalCommitGuard,
+} from "./internal-approval-authority.js";
 import {
   resolveLeastPrivilegeOperatorScopesForMethod,
   ADMIN_SCOPE,
@@ -111,6 +115,7 @@ export function createGatewayInstanceRuntime(
     timeoutMs?: number;
     signal?: AbortSignal;
     assertCurrent?: () => void;
+    approvalCommitGuard?: () => void;
   }): Promise<T> => {
     assertDispatchAvailable(params.method);
     if (!params.allowedMethods.has(params.method)) {
@@ -134,7 +139,10 @@ export function createGatewayInstanceRuntime(
         requestIdPrefix: "gateway-internal",
         timeoutMs: params.timeoutMs,
         signal: params.signal,
-        sessionMutationCommitGuard: retainInternalApprovalCommitGuard(assertCurrent),
+        sessionMutationCommitGuard: retainInternalApprovalCommitGuard(
+          assertCurrent,
+          params.approvalCommitGuard,
+        ),
       }),
     );
     assertCurrent();
@@ -401,9 +409,14 @@ export function createGatewayInstanceRuntime(
       request: async <T>(
         method: GatewayNativeApprovalMethod,
         payload: Record<string, unknown>,
-        requestOptions?: { clientDisplayName?: string },
-      ) =>
-        await dispatch<T>({
+        requestOptions?: GatewayNativeApprovalRequestOptions,
+      ) => {
+        const commitGuard = requestOptions?.commitGuard;
+        const signal = requestOptions?.signal;
+        if (commitGuard !== undefined && !isInternalApprovalCommitGuard(commitGuard)) {
+          throw new Error("native approval requires an internal account guard");
+        }
+        return await dispatch<T>({
           allowedMethods: approvalMethods,
           client: requestOptions?.clientDisplayName
             ? {
@@ -420,7 +433,14 @@ export function createGatewayInstanceRuntime(
           method,
           payload,
           timeoutMs: DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS,
-        }),
+          signal,
+          approvalCommitGuard: commitGuard,
+          assertCurrent: () => {
+            signal?.throwIfAborted();
+            commitGuard?.();
+          },
+        });
+      },
       requestRoute: async <T>(method: "send", payload: Record<string, unknown>) =>
         await dispatch<T>({
           allowedMethods: approvalRouteMethods,

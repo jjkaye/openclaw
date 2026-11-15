@@ -13,6 +13,7 @@ import {
   describeNativePluginApprovalClientSetup,
   resolveApprovalInitiatingSurfaceState,
 } from "../infra/exec-approval-surface.js";
+import { registerPluginApprovalBinding } from "../infra/plugin-approval-binding.js";
 import { resolveCanonicalPluginApprovalRequestAllowedDecisions } from "../infra/plugin-approval-canonical-decisions.js";
 import {
   DEFAULT_PLUGIN_APPROVAL_TIMEOUT_MS,
@@ -20,11 +21,13 @@ import {
 } from "../infra/plugin-approvals.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { cloneHookIsolationValue } from "../plugins/hook-isolation.js";
+import { getPluginValueInstance } from "../plugins/plugin-instance-scope.js";
 import {
   PluginApprovalResolutions,
   type PluginApprovalResolution,
   type PluginHookBeforeToolCallResult,
 } from "../plugins/types.js";
+import { isCronSessionKey, isSubagentSessionKey } from "../routing/session-key.js";
 import { isPlainObject } from "../utils.js";
 import { resolveToolErrorDiagnostic } from "./agent-tools.before-tool-call.diagnostics.js";
 import type {
@@ -35,7 +38,11 @@ import type {
   HookOutcome,
 } from "./agent-tools.before-tool-call.types.js";
 import { registerActiveEmbeddedRunHumanInputWaitForRun } from "./embedded-agent-runner/run-state.js";
-import { withGatewayToolApprovalOwner } from "./tools/gateway-caller-context.js";
+import {
+  captureGatewayToolCallerAssertion,
+  getGatewayToolCallerIdentity,
+  withGatewayToolApprovalOwner,
+} from "./tools/gateway-caller-context.js";
 import { callGatewayTool } from "./tools/gateway.js";
 
 type PluginApprovalRequest = NonNullable<PluginHookBeforeToolCallResult["requireApproval"]>;
@@ -261,7 +268,54 @@ async function requestPluginToolApprovalDecision(
       : undefined;
   };
   let gatewayApprovalPhase: "none" | "request" | "wait" = "none";
+  let receiptHandoff: ReturnType<typeof registerPluginApprovalBinding> | undefined;
   try {
+    if (approval.receiptBinding) {
+      const binding = approval.receiptBinding;
+      const plugin = getPluginValueInstance(binding);
+      const caller = getGatewayToolCallerIdentity();
+      const gatewayContext = caller?.gatewayContextResolver?.();
+      const assertCallerCurrent = captureGatewayToolCallerAssertion();
+      if (
+        !plugin ||
+        plugin.pluginId !== approval.pluginId ||
+        !caller?.approvalAuthority ||
+        !assertCallerCurrent ||
+        !gatewayContext ||
+        gatewayContext.localEmbedded === true ||
+        isEmbeddedMode() ||
+        !params.toolCallId ||
+        caller.agentId !== params.ctx?.agentId ||
+        caller.sessionKey !== params.ctx?.sessionKey ||
+        isCronSessionKey(caller.sessionKey) ||
+        isSubagentSessionKey(caller.sessionKey)
+      ) {
+        throw new Error("Bound plugin approval requires its current native host and plugin owner");
+      }
+      const assertCurrent = () => {
+        params.signal?.throwIfAborted();
+        assertCallerCurrent();
+        if (
+          !plugin.acceptingCalls ||
+          plugin.owner?.revoked ||
+          plugin.lifecycle.signal.aborted ||
+          caller.gatewayContextResolver?.() !== gatewayContext ||
+          Date.now() >= binding.scope.validUntilMs
+        ) {
+          throw new Error("Bound plugin approval owner or scope is no longer active");
+        }
+      };
+      receiptHandoff = registerPluginApprovalBinding({
+        authority: caller.approvalAuthority,
+        agentId: caller.agentId,
+        sessionKey: caller.sessionKey,
+        pluginId: plugin.pluginId,
+        toolCallId: params.toolCallId,
+        scope: binding.scope,
+        intent: binding.intent,
+        assertCurrent,
+      });
+    }
     const requestIdentity = {
       toolName: params.toolName,
       toolCallId: params.toolCallId,
@@ -345,6 +399,7 @@ async function requestPluginToolApprovalDecision(
           { expectFinal: false, signal: params.signal },
         ),
     );
+    receiptHandoff?.assertConsumed();
     gatewayApprovalPhase = "none";
     const id = requestResult?.id;
     if (!id) {
@@ -390,6 +445,7 @@ async function requestPluginToolApprovalDecision(
       // misrouted reply must never release a different tool gate.
       decision = waitResult?.id === id ? waitResult.decision : undefined;
     }
+    receiptHandoff?.assertConsumed();
     const outcome = resolveDecision(decision);
     if (outcome) {
       return outcome;
@@ -441,6 +497,8 @@ async function requestPluginToolApprovalDecision(
       reason,
       resolveToolErrorDiagnostic(err, signal).terminalReason,
     );
+  } finally {
+    receiptHandoff?.release();
   }
 }
 

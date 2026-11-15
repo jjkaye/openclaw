@@ -131,6 +131,7 @@ export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/operator-approval-standing-grants.test.ts",
   "src/gateway/operator-approval-store.execution-identity.test.ts",
   "src/gateway/operator-approval-store.test.ts",
+  "src/gateway/operator-approval-plugin-receipts.test.ts",
   "src/gateway/operator-approval-store.worker.test.ts",
   "src/gateway/operator-run-authority.worker.test.ts",
   "src/gateway/operator-run-recovery.test.ts",

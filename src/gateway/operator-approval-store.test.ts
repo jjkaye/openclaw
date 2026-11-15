@@ -1,13 +1,8 @@
 // Persistent operator approval store tests cover terminal CAS, expiry, replay, and recovery.
 import { DatabaseSync } from "node:sqlite";
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import { describe, expect, it, vi } from "vitest";
 import { buildApprovalResolutionRef } from "../infra/approval-resolution-ref.js";
-import {
-  executeSqliteQuerySync,
-  executeSqliteQueryTakeFirstSync,
-  getNodeSqliteKysely,
-} from "../infra/kysely-sync.js";
+import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import { withSqliteWriteAdmissionService } from "../infra/sqlite-transaction.js";
 import * as workerAdmission from "../infra/sqlite-worker-operation-admission.js";
 import type { DB as OpenClawStateKyselyDatabase } from "../state/openclaw-state-db.generated.js";
@@ -16,7 +11,6 @@ import {
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
   runOpenClawStateWriteTransaction,
-  type OpenClawStateDatabaseOptions,
 } from "../state/openclaw-state-db.js";
 import {
   closeOrphanedOperatorApprovals,
@@ -32,106 +26,21 @@ import {
   resolveOperatorApproval,
 } from "./operator-approval-store.js";
 import { operatorApprovalOperations } from "./operator-approval-store.operations.js";
+import { createOperatorApprovalStoreFixture } from "./operator-approval-store.test-support.js";
 
 type OperatorApprovalDatabase = Pick<OpenClawStateKyselyDatabase, "operator_approvals">;
 type NewOperatorApproval = Parameters<typeof insertOperatorApproval>[0]["approval"];
 const OPERATOR_APPROVAL_TERMINAL_RETENTION_MS = 30 * 24 * 60 * 60_000;
 
-async function getOperatorApproval(params: Parameters<typeof getOperatorApprovalDetailed>[0]) {
-  const result = await getOperatorApprovalDetailed(params);
-  return result.outcome === "found" ? result.record : null;
-}
-
-const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
-  afterAll(async () => {
-    await closeOpenClawStateDatabaseAsync();
-    closeOpenClawStateDatabaseForTest();
-    cleanup();
-  }),
-);
-let suiteDatabaseOptions: OpenClawStateDatabaseOptions | undefined;
-
-function createDatabaseOptions(): OpenClawStateDatabaseOptions {
-  const stateDir = tempDirs.make("openclaw-operator-approval-");
-  return { env: { ...process.env, OPENCLAW_STATE_DIR: stateDir } };
-}
-
-function getSuiteDatabaseOptions(): OpenClawStateDatabaseOptions {
-  return (suiteDatabaseOptions ??= createDatabaseOptions());
-}
-
-function approval(id: string, overrides: Partial<NewOperatorApproval> = {}): NewOperatorApproval {
-  const kind = overrides.kind ?? overrides.presentation?.kind ?? "exec";
-  const presentation: NewOperatorApproval["presentation"] =
-    overrides.presentation ??
-    (kind === "exec"
-      ? {
-          kind: "exec" as const,
-          commandText: `echo ${id}`,
-          commandPreview: `echo ${id}`,
-          warningText: null,
-          host: "gateway",
-          nodeId: null,
-          agentId: "main",
-          allowedDecisions: ["allow-once", "allow-always", "deny"],
-        }
-      : {
-          kind: "plugin" as const,
-          title: "Approve plugin action",
-          description: `Allow the plugin action for ${id}.`,
-          severity: "warning" as const,
-          pluginId: "test-plugin",
-          toolName: "test-tool",
-          agentId: "main",
-          allowedDecisions: ["allow-once", "allow-always", "deny"],
-        });
-  return {
-    id,
-    kind,
-    presentation,
-    requester: {
-      deviceId: "request-device",
-      clientId: "request-client",
-      deviceTokenAuth: true,
-    },
-    reviewerDeviceIds: ["reviewer-b", "reviewer-a", "reviewer-b"],
-    source: {
-      agentId: "main",
-      sessionKey: "agent:main:child",
-      sessionId: "session-1",
-      runId: "run-1",
-      toolCallId: "tool-call-1",
-      toolName: "exec",
-    },
-    audienceSessionKeys: ["agent:main:child", "agent:main:parent"],
-    runtimeEpoch: "runtime-a",
-    createdAtMs: 1_000,
-    expiresAtMs: 10_000,
-    ...overrides,
-  };
-}
-
-function rawApprovalRow(options: OpenClawStateDatabaseOptions, id: string) {
-  const database = openOpenClawStateDatabase(options);
-  const stateDb = getNodeSqliteKysely<OperatorApprovalDatabase>(database.db);
-  return executeSqliteQueryTakeFirstSync(
-    database.db,
-    stateDb.selectFrom("operator_approvals").selectAll().where("approval_id", "=", id),
-  );
-}
+const {
+  approval,
+  getOperatorApproval,
+  getSuiteDatabaseOptions,
+  createDatabaseOptions,
+  rawApprovalRow,
+} = createOperatorApprovalStoreFixture();
 
 describe("operator approval store", () => {
-  beforeEach(() => {
-    if (!suiteDatabaseOptions) {
-      return;
-    }
-    // Completed cases leave workers reusable; only their approval rows are isolated.
-    runOpenClawStateWriteTransaction((database) => {
-      const stateDb = getNodeSqliteKysely<OperatorApprovalDatabase>(database.db);
-      executeSqliteQuerySync(database.db, stateDb.deleteFrom("operator_approvals"));
-    }, suiteDatabaseOptions);
-  });
-
   it("lists terminal history newest-first with kind filtering and keyset pagination", async () => {
     const databaseOptions = getSuiteDatabaseOptions();
     const entries: NewOperatorApproval[] = [

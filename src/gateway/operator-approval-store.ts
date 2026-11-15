@@ -44,6 +44,8 @@ import type {
   ListTerminalOperatorApprovalsInput,
   ListTerminalOperatorApprovalsResult,
   OperatorApprovalStoreGuard,
+  ReadPluginApprovalReceiptsInput,
+  ReadPluginApprovalReceiptsResult,
 } from "./operator-approval-store.types.js";
 import type { OperatorApprovalWorkerOperations } from "./operator-approval-store.worker-contract.js";
 
@@ -310,6 +312,18 @@ export async function listTerminalOperatorApprovals(
     { type: "operatorApprovals.history", input },
     { databaseOptions, assertCurrent, guard },
     (result) => (result.type === "operatorApprovals.history" ? result.history : undefined),
+  );
+}
+
+/** Internal storage seam; the plugin-facing owner binds identity and live authority. */
+export function readPluginApprovalReceipts(
+  params: ReadPluginApprovalReceiptsInput & Options,
+): Promise<ReadPluginApprovalReceiptsResult> {
+  const { databaseOptions, assertCurrent, guard, ...input } = params;
+  return readApprovalStore(
+    { type: "operatorApprovals.pluginReceipts", input },
+    { databaseOptions, assertCurrent, guard },
+    (result) => (result.type === "operatorApprovals.pluginReceipts" ? result.result : undefined),
   );
 }
 

@@ -639,6 +639,47 @@ Check these in order:
 4. `package.json` has `openclaw.extensions: ["./dist/index.js"]`.
 5. Installation reported successful runtime application; after source edits or a repaired activation failure, run `openclaw plugins reload <plugin-id>`.
 
+### Private approval receipts
+
+A managed `before_tool_call` hook can include
+`requireApproval.receiptBinding: { scope, intent }`, where `scope` contains the
+protected generation, digest, `validFromMs` and `validUntilMs`, and `intent` is
+`approve` or `revoke`. The host snapshots this value under the registered
+plugin instance and binds it to the current native tool call. This private value
+is separate from the reviewer-facing `requireApproval.scope`; it is never sent
+as a public RPC field. Copied or unowned bindings, closed owners and unsupported
+routes block the tool. An allowed result requires the original owner to remain
+current through the approval wait. `onResolution` remains a notification, not a
+persistence or effect-authority callback.
+
+The built-in iMessage poll and tapback paths retain the verified sender and
+matched provider conversation through their account-owned capability. The host
+checks the exact canonical approval ID, kind, decision and reviewer again at the
+terminal write, under the original account and Gateway lifetimes and current
+approver policy. The first terminal decision retains its actor. Public RPC
+reviewer labels and routes without a matched native conversation leave the actor
+absent; consumer policies must treat those records as incomplete assent.
+
+Version 2 tool factories receive `context.approvalReceipts`. Its `read(scope)`
+method reads canonical native assent facts for the registered plugin, current
+agent and original admitted session. Pass the protected plan generation, digest,
+`validFromMs` and `validUntilMs`; there are no plugin, agent, session or clock
+selectors. A fresh invocation can read the same still-valid scope after restart
+using its fresh host authority.
+
+The result is either a complete bounded receipt set or a held reason. Treat held,
+missing and uncertain facts as incomplete assent. The facts do not authorize an
+effect: recheck current plan and policy, required distinct actors, revocations and
+`assertInvocationCurrent` before each dispatch. Keep actor and binding details
+inside plugin policy code rather than returning them as model-facing history.
+
+This capability requires a current host-local Gateway and is unavailable for
+remote or embedded routes, outside an admitted invocation, and for cron or
+subagent sessions. Scheduled delivery metadata does not grant access to an
+original household conversation. Retained readers fail when their plugin or
+invocation authority closes. Legacy approvals without native provenance confer
+no assent through this API.
+
 ## See also
 
 - [Building plugins](/plugins/building-plugins)

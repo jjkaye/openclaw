@@ -22,6 +22,7 @@ import type { OpenClawStateDatabaseOptions } from "../../state/openclaw-state-db
 import { prepareApprovalChannelCustody } from "../approval-channel-custody.js";
 import { normalizeControlUiBasePath } from "../control-ui-shared.js";
 import type { ExecApprovalManager, ExecApprovalRecord } from "../exec-approval-manager.js";
+import { readNativeChannelApprovalActor } from "../internal-approval-authority.js";
 import { canAccessOperatorApproval } from "../operator-approval-authorization.js";
 import { projectOperatorApprovalSnapshot } from "../operator-approval-snapshot.js";
 import {
@@ -30,7 +31,10 @@ import {
   type OperatorApprovalRecord,
   type OperatorApprovalResolver,
 } from "../operator-approval-store.js";
-import type { OperatorApprovalStoreGuard } from "../operator-approval-store.types.js";
+import type {
+  OperatorApprovalStoreGuard,
+  PluginApprovalActor,
+} from "../operator-approval-store.types.js";
 import {
   publishAppliedApprovalResolution,
   type ExecApprovalIosPushDelivery,
@@ -138,6 +142,7 @@ async function applyApprovalDecision<TPayload>(params: {
   resolver: OperatorApprovalResolver;
   localResolvedBy: string | null;
   grantExpiresAtMs?: number;
+  verifiedPluginActor?: PluginApprovalActor;
   guard: OperatorApprovalStoreGuard;
 }): Promise<ApplyApprovalDecisionResult<TPayload>> {
   const result = params.forceMalformedDeny
@@ -160,6 +165,7 @@ async function applyApprovalDecision<TPayload>(params: {
         "operator",
         {
           guard: params.guard,
+          verifiedPluginActor: params.verifiedPluginActor,
           ...(params.grantExpiresAtMs !== undefined
             ? { grantExpiresAtMs: params.grantExpiresAtMs }
             : {}),
@@ -379,8 +385,18 @@ export function createApprovalHandlers(
           ));
       const kindMatches = resolveParams?.kind === record.presentation.kind;
       const forceMalformedDeny = !validParams || !kindMatches || !decisionAllowed;
+      const readNativeActor = () =>
+        record.pluginBinding && !forceMalformedDeny
+          ? readNativeChannelApprovalActor(options.sessionMutationCommitGuard, {
+              id: record.id,
+              kind: record.kind,
+              decision: requestedDecision,
+              reviewer: resolveParams?.reviewer,
+            })
+          : undefined;
       const assertCurrent = () => {
         approvalGuard.assertCurrent();
+        readNativeActor();
         const currentCfg = context.getRuntimeConfig();
         const currentCustody = resolveParams?.reviewer
           ? prepareApprovalChannelCustody({
@@ -416,6 +432,7 @@ export function createApprovalHandlers(
           forceMalformedDeny,
           resolver,
           localResolvedBy,
+          verifiedPluginActor: readNativeActor(),
           guard: { family: approvalGuard.family, assertCurrent },
           manager:
             record.kind === "exec"

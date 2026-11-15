@@ -1,7 +1,6 @@
 /**
  * Server channel lifecycle tests.
  */
-import { getEventListeners } from "node:events";
 import fs from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import path from "node:path";
@@ -50,6 +49,7 @@ import {
   createTransportActivityStatusPatch,
 } from "./channel-status-patches.js";
 import { restartRunningChannelAccounts } from "./channel-thaw-restart.js";
+import { registerChannelApprovalRuntimeTests } from "./server-channels.approval-runtime.test-support.js";
 import { createChannelManager, type ChannelManager } from "./server-channels.js";
 import { registerChannelAutostartRecoveryTests } from "./server-channels.recovery.test-support.js";
 import {
@@ -109,9 +109,6 @@ vi.mock("../infra/backoff.js", async (importOriginal) => {
 vi.mock("../infra/approval-handler-bootstrap.js", () => ({
   startChannelApprovalHandlerBootstrap: hoisted.startChannelApprovalHandlerBootstrap,
 }));
-
-const CHANNEL_APPROVAL_GATEWAY_RUNTIME_CONTEXT_CAPABILITY = "approval.gateway";
-type ApprovalGatewayRequestRuntime = Pick<GatewayNativeApprovalRuntime, "request">;
 
 const createdManagers: Array<{ manager: ChannelManager; channelIds: ChannelId[] }> = [];
 const channelTempDirs = useAutoCleanupTempDirTracker(afterEach);
@@ -2740,58 +2737,10 @@ describe("server-channels auto restart", () => {
     },
   );
 
-  it("injects a narrow Gateway approval resolver into the channel task runtime", async () => {
-    const request = vi.fn(async () => ({ applied: true, approval: {} }));
-    const { promise: accountStartReady, resolve: releaseAccountStart } = createDeferred();
-    const nativeApprovalRuntime = {
-      current: undefined as GatewayNativeApprovalRuntime | undefined,
-    };
-    let observerCount: number | undefined;
-    const startAccount = vi.fn(async (ctx: ChannelGatewayContext<TestAccount>) => {
-      observerCount = getEventListeners(ctx.abortSignal, "abort").length;
-      const stopped = waitForAbort(ctx.abortSignal);
-      const approvalRuntime =
-        ctx.channelRuntime?.runtimeContexts.get<ApprovalGatewayRequestRuntime>({
-          channelId: "discord",
-          accountId: DEFAULT_ACCOUNT_ID,
-          capability: CHANNEL_APPROVAL_GATEWAY_RUNTIME_CONTEXT_CAPABILITY,
-        });
-      await approvalRuntime?.request(
-        "approval.resolve",
-        { id: "approval-1", kind: "exec", decision: "deny" },
-        { clientDisplayName: "Discord approval" },
-      );
-      await expect(approvalRuntime?.request("config.get" as never, {})).rejects.toThrow(
-        "channel approval runtime cannot dispatch config.get",
-      );
-      await stopped;
-    });
-    installTestRegistry(createTestPlugin({ startAccount }));
-    const manager = createManager({
-      channelRuntime: createRuntimeChannel(),
-      deferStartupAccountStartsUntil: accountStartReady,
-      getNativeApprovalRuntime: () => nativeApprovalRuntime.current,
-    });
-
-    await manager.startChannels();
-    expect(startAccount).not.toHaveBeenCalled();
-    nativeApprovalRuntime.current = { request } as unknown as GatewayNativeApprovalRuntime;
-    releaseAccountStart();
-    await flushMicrotasks();
-
-    // Scheduler retirement and approval disposal remain; the deferred-start waiter is gone.
-    expect(observerCount).toBe(2);
-    expect(request).toHaveBeenCalledWith(
-      "approval.resolve",
-      { id: "approval-1", kind: "exec", decision: "deny" },
-      { clientDisplayName: "Discord approval" },
-    );
-    const context = startAccount.mock.calls[0]?.[0];
-    if (!context) {
-      throw new Error("Expected the approval account to start");
-    }
-    await manager.stopChannel("discord", DEFAULT_ACCOUNT_ID);
-    expect(getEventListeners(context.abortSignal, "abort")).toHaveLength(0);
+  registerChannelApprovalRuntimeTests({
+    createManager,
+    installTestRegistry,
+    firstStartAccountContext,
   });
 
   it("keeps auto-restart running when scoped runtime cleanup throws", async () => {

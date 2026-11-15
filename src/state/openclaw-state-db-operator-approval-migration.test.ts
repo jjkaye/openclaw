@@ -20,6 +20,7 @@ function canonicalOperatorApprovalCreateSql(): string {
 
 function legacyTwoKindCreateSql(): string {
   return canonicalOperatorApprovalCreateSql()
+    .replace("\n  plugin_binding_json TEXT,", "")
     .replace(/\) STRICT;$/u, ");")
     .replace(/'exec',\s*'plugin',\s*'system-agent'/, "'exec', 'plugin'");
 }

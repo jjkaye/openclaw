@@ -446,6 +446,7 @@ export function isReadRequest(input: unknown): input is OpenClawStateReadRequest
           typeof input.command.input.includeRunId === "string")) ||
       ((input.command.type === "operatorApprovals.placementGrant" ||
         input.command.type === "operatorApprovals.history" ||
+        input.command.type === "operatorApprovals.pluginReceipts" ||
         input.command.type === "operatorApprovals.listCronGrants" ||
         input.command.type === "operatorApprovals.validateCronGrant") &&
         isRecord(input.command.input)) ||

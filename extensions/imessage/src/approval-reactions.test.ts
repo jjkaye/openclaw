@@ -396,6 +396,39 @@ describe("iMessage approval reactions", () => {
     );
   });
 
+  it("passes only the matched native group tapback conversation to the account runtime", async () => {
+    await registerIMessageApprovalReactionTarget({
+      approvalId: "plugin:household-tapback",
+      approvalKind: "plugin",
+      conversation: { chatId: 42 },
+      messageId: "household-prompt",
+    });
+    const gatewayRuntime = { request: vi.fn() } as never;
+    const message = buildTapbackReactionPayload({
+      sender: "+15551230000",
+      is_group: true,
+      chat_id: 42,
+      reacted_to_guid: "household-prompt",
+    });
+    await expect(resolveReaction({ ...message, chat_id: 43 }, { gatewayRuntime })).resolves.toBe(
+      false,
+    );
+    expect(resolverMocks.resolveApprovalOverGateway).not.toHaveBeenCalled();
+    await expect(resolveReaction(message, { gatewayRuntime })).resolves.toBe(true);
+    expect(resolverMocks.resolveApprovalOverGateway).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approvalId: "plugin:household-tapback",
+        approvalKind: "plugin",
+        decision: "allow-once",
+        channel: "imessage",
+        accountId: "default",
+        senderId: "+15551230000",
+        conversationId: "chat_id:42",
+        gatewayRuntime,
+      }),
+    );
+  });
+
   it("ignores removed tapbacks for approval reactions", async () => {
     await registerIMessageApprovalReactionTarget({ approvalId: "exec-1" });
 

@@ -14,6 +14,7 @@ import { getActiveGatewayRootWorkCount } from "../process/gateway-work-admission
 import { trackAsyncWork } from "../shared/async-work-scope.js";
 import { createTestRegistry } from "../test-utils/channel-plugins.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
+import { retainInternalApprovalCommitGuard } from "./internal-approval-authority.js";
 import { APPROVALS_SCOPE, WRITE_SCOPE } from "./method-scopes.js";
 import { createGatewayMethodRegistry } from "./methods/registry.js";
 import { createGatewayInstanceRuntime } from "./server-instance-runtime.js";
@@ -381,6 +382,107 @@ describe("createGatewayInstanceRuntime", () => {
       ),
     ).resolves.toEqual({ displayName: "Telegram approval (owner)" });
     runtime.close();
+  });
+
+  it("rejects an unbranded native approval commit guard before dispatch", async () => {
+    const handler = vi.fn<NonNullable<GatewayRequestHandlers["approval.resolve"]>>(({ respond }) =>
+      respond(true, { applied: true }),
+    );
+    const context = createContext();
+    const runtime = createGatewayInstanceRuntime({
+      getContext: () => context,
+      getMethodRegistry: () => createRegistry({ "approval.resolve": handler }),
+      isDispatchAvailable: () => true,
+    });
+    try {
+      await expect(
+        runtime.nativeApprovals.request(
+          "approval.resolve",
+          { id: "plugin:1", kind: "plugin", decision: "allow-once" },
+          { clientDisplayName: "untrusted", commitGuard: () => {} },
+        ),
+      ).rejects.toThrow();
+      expect(handler).not.toHaveBeenCalled();
+    } finally {
+      runtime.close();
+    }
+  });
+
+  it.each([false, true])(
+    "retains the native approval account guard through the final effect boundary (options mutated=%s)",
+    async (mutateOptions) => {
+      let active = true;
+      let effects = 0;
+      const started = createDeferred<void>();
+      const resume = createDeferred<void>();
+      const context = createContext();
+      const runtime = createGatewayInstanceRuntime({
+        getContext: () => context,
+        getMethodRegistry: () =>
+          createRegistry({
+            "approval.resolve": async ({ sessionMutationCommitGuard, respond }) => {
+              started.resolve();
+              await resume.promise;
+              sessionMutationCommitGuard?.();
+              effects += 1;
+              respond(true, { applied: true });
+            },
+          }),
+        isDispatchAvailable: () => true,
+      });
+      const requestOptions = {
+        commitGuard: retainInternalApprovalCommitGuard(() => {
+          if (!active) throw new Error("native approval account retired");
+        }),
+      };
+      const pending = runtime.nativeApprovals.request(
+        "approval.resolve",
+        { id: "plugin:1", kind: "plugin", decision: "allow-once" },
+        requestOptions,
+      );
+      const outcome = pending.then(
+        (value) => ({ value }),
+        (error) => ({ error }),
+      );
+      try {
+        await started.promise;
+        if (mutateOptions) requestOptions.commitGuard = () => {};
+        active = false;
+        resume.resolve();
+        expect(await outcome).toHaveProperty("error");
+        expect(effects).toBe(0);
+      } finally {
+        resume.resolve();
+        await outcome;
+        runtime.close();
+      }
+    },
+  );
+
+  it("refuses an aborted native approval account before dispatch", async () => {
+    const handler = vi.fn<NonNullable<GatewayRequestHandlers["approval.resolve"]>>(({ respond }) =>
+      respond(true, { applied: true }),
+    );
+    const context = createContext();
+    const abort = new AbortController();
+    abort.abort(new Error("account stopped"));
+    const runtime = createGatewayInstanceRuntime({
+      getContext: () => context,
+      getMethodRegistry: () => createRegistry({ "approval.resolve": handler }),
+      isDispatchAvailable: () => true,
+    });
+    try {
+      await expect(
+        runtime.nativeApprovals.request(
+          "approval.resolve",
+          { id: "plugin:1", kind: "plugin", decision: "allow-once" },
+          { signal: abort.signal, commitGuard: retainInternalApprovalCommitGuard(() => {}) },
+        ),
+      ).rejects.toThrow();
+      expect(handler).not.toHaveBeenCalled();
+    } finally {
+      runtime.close();
+    }
   });
 
   it("preserves the Gateway client's approval request deadline", async () => {

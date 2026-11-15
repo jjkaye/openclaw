@@ -17,6 +17,7 @@ import {
   sanitizeExecApprovalWarningText,
 } from "../../infra/exec-approval-text-sanitize.js";
 import { takeMcpToolApprovalBinding } from "../../infra/mcp-tool-approval-binding.js";
+import { takePluginApprovalBinding } from "../../infra/plugin-approval-binding.js";
 import { resolveCanonicalPluginApprovalRequestAllowedDecisions } from "../../infra/plugin-approval-canonical-decisions.js";
 import type {
   PluginApprovalRequestPayload,
@@ -190,6 +191,19 @@ export function createPluginApprovalHandlers(
       const record = manager.create(request, timeoutMs, `plugin:${randomUUID()}`);
       if (trustedAgentRuntime) {
         record.agentRuntimeDelegatedAuthority = trustedAgentRuntime.delegatedAuthority;
+        if (request.sessionKey && request.pluginId && request.toolCallId) {
+          const receipt = takePluginApprovalBinding({
+            authority: trustedAgentRuntime.delegatedAuthority,
+            agentId: trustedAgentRuntime.agentId,
+            sessionKey: request.sessionKey,
+            pluginId: request.pluginId,
+            toolCallId: request.toolCallId,
+          });
+          if (receipt) {
+            record.pluginBinding = receipt.binding;
+            record.approvalAuthority = receipt.assertCurrent;
+          }
+        }
         if (request.mcpTool && request.toolCallId) {
           record.mcpToolApprovalActive = takeMcpToolApprovalBinding({
             authority: trustedAgentRuntime.delegatedAuthority,

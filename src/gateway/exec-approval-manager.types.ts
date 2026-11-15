@@ -17,7 +17,11 @@ import type {
   OperatorApprovalTerminalReason,
   ResolveOperatorApprovalResult,
 } from "./operator-approval-store.js";
-import type { OperatorApprovalStoreGuard } from "./operator-approval-store.types.js";
+import type {
+  OperatorApprovalStoreGuard,
+  PluginApprovalBinding,
+  PluginApprovalActor,
+} from "./operator-approval-store.types.js";
 
 export type ExecApprovalReadAuthority = {
   assertCurrent: () => void;
@@ -25,6 +29,7 @@ export type ExecApprovalReadAuthority = {
 };
 
 export type ExecApprovalResolveOptions = {
+  verifiedPluginActor?: PluginApprovalActor;
   /** Explicit grant expiry override; undefined defers to the configured default. */
   grantExpiresAtMs?: number | null;
   assertCurrent?: () => void;
@@ -62,6 +67,8 @@ export type ExecApprovalRecord<TPayload = ExecApprovalRequestPayload> = {
   agentRuntimeDelegatedAuthority?: AgentRuntimeDelegatedAuthority;
   /** Closure-bound authority for approvals created by in-process delegated tools. */
   approvalAuthority?: () => boolean | void;
+  /** Native host binding; excluded from reviewer presentation and public responses. */
+  pluginBinding?: Omit<PluginApprovalBinding, "actor"> & { actor: null };
   approvalSignals?: readonly AbortSignal[];
   /** Process-local persistence proof; never serialized with approval presentation. */
   mcpToolApprovalActive?: () => boolean;

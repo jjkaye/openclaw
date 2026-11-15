@@ -25,6 +25,7 @@ export function captureCommand(command: OpenClawStateReadCommand): OpenClawState
     command.type === "sessionUpstream.read" ||
     command.type === "operatorApprovals.placementGrant" ||
     command.type === "operatorApprovals.history" ||
+    command.type === "operatorApprovals.pluginReceipts" ||
     command.type === "diagnostic.latest" ||
     command.type === "diagnostic.configAuditFacts" ||
     command.type === "operatorApprovals.listCronGrants" ||
@@ -406,6 +407,7 @@ function commandBytes(command: OpenClawStateReadRequest["command"]): number {
   }
   if (
     command.type === "operatorApprovals.validateCronGrant" ||
+    command.type === "operatorApprovals.pluginReceipts" ||
     command.type === "operatorApprovals.placementGrant"
   ) {
     return bytes + Buffer.byteLength(JSON.stringify(command.input), "utf8");

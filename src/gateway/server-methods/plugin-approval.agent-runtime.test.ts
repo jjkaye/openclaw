@@ -1,4 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  claimAgentRunDelegatedAuthority,
+  releaseAgentRunDelegatedAuthority,
+  validateAgentRunDelegatedAuthority,
+} from "../../infra/agent-run-registry.js";
+import { registerPluginApprovalBinding } from "../../infra/plugin-approval-binding.js";
 import type { PluginApprovalRequestPayload } from "../../infra/plugin-approvals.js";
 import { openOpenClawStateDatabase } from "../../state/openclaw-state-db.js";
 import type { AgentRuntimeIdentity } from "../agent-runtime-identity-token.js";
@@ -7,6 +13,7 @@ import {
   createPreparedTestApprovalManager,
   createTestApprovalFixture,
 } from "../exec-approval-manager.test-support.js";
+import { getOperatorApprovalDetailed } from "../operator-approval-store.js";
 import { waitForApprovalRequested } from "./approval-request.test-support.js";
 import { createPluginApprovalHandlers } from "./plugin-approval.js";
 import type { GatewayRequestHandlerOptions } from "./types.js";
@@ -77,6 +84,95 @@ afterEach(() => {
 });
 
 describe("plugin approval signed agent runtime", () => {
+  for (const trusted of [true, false]) {
+    it(`persists private scope only from the native handoff (trusted=${trusted})`, async (testContext) => {
+      const fixture = await createPreparedTestApprovalManager<PluginApprovalRequestPayload>(
+        testContext,
+        {
+          approvalKind: "plugin",
+          validateAgentRuntimeDelegatedAuthority: validateAgentRunDelegatedAuthority,
+        },
+      );
+      const authority = claimAgentRunDelegatedAuthority({
+        instanceId: `plugin-assent-${trusted}`,
+        runId: `plugin-assent-${trusted}`,
+      });
+      const now = Date.now();
+      const scope = {
+        generation: "week-preview-1",
+        digest: "a".repeat(64),
+        validFromMs: now - 1_000,
+        validUntilMs: now + 60_000,
+      };
+      const binding = registerPluginApprovalBinding({
+        authority,
+        agentId: "main",
+        sessionKey: "agent:main:session-1",
+        pluginId: "household",
+        toolCallId: "plan-call",
+        scope,
+        intent: "approve",
+        assertCurrent: () => {},
+      });
+      try {
+        await fixture.run(async () => {
+          const opts = requestOptions({
+            request: {
+              pluginId: "household",
+              agentId: "main",
+              sessionKey: "agent:main:session-1",
+              toolCallId: "plan-call",
+              title: "Approve this exact plan",
+              description: "Synthetic plan",
+              twoPhase: true,
+            },
+            identity: {
+              ...identityWithoutExecution(),
+              operationalRunInstance: authority.operationalRunInstance,
+              delegatedAuthority: { ...authority, kind: "local" },
+              approvalOwnerPluginId: "household",
+            },
+            validateAuthority: () => validateAgentRunDelegatedAuthority(authority),
+          });
+          if (!trusted && opts.client) delete opts.client.internal;
+          const { pending, payload } = await waitForApprovalRequested(
+            opts.context,
+            "plugin.approval.requested",
+            () => fixture.track(Promise.resolve(requestHandler(fixture.manager)(opts))),
+          );
+          const record = (await fixture.manager.listPendingRecords())[0]!;
+          expect(record).toBeDefined();
+          const stored = await getOperatorApprovalDetailed({
+            id: record.id,
+            databaseOptions: fixture.databaseOptions,
+          });
+          expect(stored.outcome).toBe("found");
+          if (stored.outcome !== "found") throw new Error("Expected canonical approval record");
+          if (trusted) {
+            expect(stored.record.pluginBinding).toEqual({
+              version: 1,
+              pluginId: "household",
+              scope,
+              intent: "approve",
+              actor: null,
+            });
+            binding.assertConsumed();
+          } else {
+            expect(stored.record.pluginBinding).toBeUndefined();
+            expect(() => binding.assertConsumed()).toThrow(/handoff/u);
+          }
+          expect(JSON.stringify(payload)).not.toContain(scope.digest);
+          expect(JSON.stringify(payload)).not.toContain("pluginBinding");
+          await fixture.manager.resolve(record.id, "deny");
+          await pending;
+        });
+      } finally {
+        binding.release();
+        releaseAgentRunDelegatedAuthority(authority);
+      }
+    });
+  }
+
   it("rejects closed authority before creating a plugin approval", async (testContext) => {
     const fixture = createTestApprovalFixture<PluginApprovalRequestPayload>(testContext, {
       approvalKind: "plugin",

@@ -14,6 +14,7 @@ import {
   getNodeSqliteKysely,
 } from "../infra/kysely-sync.js";
 import type { OpenClawStateDatabase } from "../state/openclaw-state-db-contract.js";
+import { decodePluginApprovalBinding } from "./operator-approval-plugin-binding.js";
 import { operatorApprovalTerminalFields } from "./operator-approval-store.fields.js";
 import type {
   NewOperatorApproval,
@@ -56,6 +57,7 @@ export function getOperatorApprovalResolutionKey(record: OperatorApprovalRecord)
     record.terminalReason,
     record.resolver?.kind ?? null,
     record.resolver?.id ?? null,
+    record.pluginBinding ?? null,
   ]);
 }
 
@@ -254,7 +256,29 @@ export function decodeOperatorApprovalRow(row: OperatorApprovalRow): OperatorApp
   const decision = row.decision;
   const terminalReason = row.terminal_reason;
   const resolverKind = row.resolver_kind;
+  const pluginBinding =
+    row.plugin_binding_json == null
+      ? undefined
+      : decodePluginApprovalBinding(
+          row.plugin_binding_json,
+          OPERATOR_APPROVAL_TERMINAL_RETENTION_MS,
+        );
   if (
+    pluginBinding === null ||
+    (pluginBinding !== undefined &&
+      (kind !== "plugin" ||
+        presentation?.kind !== "plugin" ||
+        presentation.pluginId !== pluginBinding.pluginId ||
+        !row.source_agent_id?.trim() ||
+        !row.source_session_key?.trim() ||
+        row.created_at_ms < pluginBinding.scope.validFromMs ||
+        row.created_at_ms > pluginBinding.scope.validUntilMs ||
+        (pluginBinding.actor !== null &&
+          ((status !== "allowed" && status !== "denied") ||
+            terminalReason !== "user" ||
+            resolverKind !== "channel" ||
+            row.resolver_id !==
+              `${pluginBinding.actor.channel}:${pluginBinding.actor.accountId}`)))) ||
     !presentation ||
     !isWellFormedApprovalId(row.approval_id) ||
     !isApprovalResolutionRef(row.resolution_ref) ||
@@ -350,6 +374,7 @@ export function decodeOperatorApprovalRow(row: OperatorApprovalRow): OperatorApp
           },
     consumedAtMs: row.consumed_at_ms,
     consumedBy: row.consumed_by,
+    ...(pluginBinding ? { pluginBinding } : {}),
   };
 }
 
@@ -463,6 +488,7 @@ export function inputMatchesExistingRow(
     presentationJson: string;
     reviewerDeviceIdsJson: string;
     audienceSessionKeysJson: string;
+    pluginBindingJson: string | null;
   },
 ): boolean {
   const source = input.source ?? {};
@@ -470,6 +496,7 @@ export function inputMatchesExistingRow(
     row.status === "pending" &&
     row.kind === input.kind &&
     row.presentation_json === serialized.presentationJson &&
+    (row.plugin_binding_json ?? null) === serialized.pluginBindingJson &&
     row.requested_by_device_id === normalizeNullableString(input.requester?.deviceId) &&
     row.requested_by_client_id === normalizeNullableString(input.requester?.clientId) &&
     row.requested_by_device_token_auth === (input.requester?.deviceTokenAuth === true ? 1 : 0) &&

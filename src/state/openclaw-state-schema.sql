@@ -372,6 +372,7 @@ CREATE TABLE IF NOT EXISTS operator_approvals (
   kind TEXT NOT NULL CHECK (kind IN ('exec', 'plugin', 'system-agent')),
   status TEXT NOT NULL CHECK (status IN ('pending', 'allowed', 'denied', 'expired', 'cancelled')),
   presentation_json TEXT NOT NULL,
+  plugin_binding_json TEXT,
   requested_by_device_id TEXT,
   requested_by_client_id TEXT,
   requested_by_device_token_auth INTEGER NOT NULL DEFAULT 0,

@@ -481,6 +481,7 @@ export async function handleIMessageApprovalReaction(params: {
       channel: "imessage",
       accountId: params.accountId,
       senderId: event.actorHandle,
+      conversationId: normalizeConversationKey(event.conversation),
       gatewayUrl: params.gatewayUrl,
       ...(params.gatewayRuntime ? { gatewayRuntime: params.gatewayRuntime } : {}),
     },

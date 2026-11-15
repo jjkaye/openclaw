@@ -58,6 +58,8 @@ import type {
 import type {
   ListTerminalOperatorApprovalsInput,
   ListTerminalOperatorApprovalsResult,
+  ReadPluginApprovalReceiptsInput,
+  ReadPluginApprovalReceiptsResult,
 } from "../gateway/operator-approval-store.types.js";
 import type {
   SessionGroupCatalogSnapshot,
@@ -198,6 +200,7 @@ export type OpenClawStateReadCommand =
       type: "operatorApprovals.history";
       input: ListTerminalOperatorApprovalsInput;
     }
+  | { type: "operatorApprovals.pluginReceipts"; input: ReadPluginApprovalReceiptsInput }
   | { type: "operatorApprovals.listCronGrants"; input: { limit?: number } }
   | { type: "operatorApprovals.validateCronGrant"; input: CronStandingGrantLookupInput }
   | { type: "operatorApprovals.placementGrant"; input: PlacementGrantReadInput }
@@ -366,6 +369,7 @@ export type OpenClawStateReadResult =
       type: "operatorApprovals.history";
       history: ListTerminalOperatorApprovalsResult;
     }
+  | { type: "operatorApprovals.pluginReceipts"; result: ReadPluginApprovalReceiptsResult }
   | { type: "operatorApprovals.listCronGrants"; grants: CronStandingGrantListing[] }
   | { type: "operatorApprovals.validateCronGrant"; result: ConsumeCronStandingGrantResult }
   | { type: "operatorApprovals.placementGrant"; rows: PlacementGrantRows }
