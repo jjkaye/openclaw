@@ -104,7 +104,10 @@ function installDiscoveryFixture(root: string) {
     ["prepare-extension-package-boundary-artifacts.mts", "run-tsgo.mts", "check-file-utils.ts"],
     { dependencies: ["@openclaw/fs-safe"] },
   );
-  for (const file of ["src/shared/non-packaged-plugin-dirs.ts", "src/plugins/package-entrypoints.ts"]) {
+  for (const file of [
+    "src/shared/non-packaged-plugin-dirs.ts",
+    "src/plugins/package-entrypoints.ts",
+  ]) {
     write(root, file, fs.readFileSync(path.join(sourceRoot, file), "utf8"));
   }
   write(
@@ -118,7 +121,9 @@ function installDiscoveryFixture(root: string) {
         noLib: true,
         paths: {
           "openclaw/plugin-sdk/*": ["./packages/plugin-sdk/dist/src/plugin-sdk/*.d.ts"],
-          "openclaw/plugin-discord": ["./.artifacts/extension-package-boundary/plugins/discord/api.d.ts"],
+          "openclaw/plugin-discord": [
+            "./.artifacts/extension-package-boundary/plugins/discord/api.d.ts",
+          ],
           "openclaw/plugin-memory": [
             "./.artifacts/extension-package-boundary/plugins/memory-core/api.d.ts",
           ],
@@ -138,7 +143,11 @@ function installDiscoveryFixture(root: string) {
       `extensions/${id}/tsconfig.json`,
       JSON.stringify({ extends: "../../tsconfig.json", files: ["index.ts"], include: [] }),
     );
-    write(root, `extensions/${id}/index.ts`, 'export type { Shared } from "openclaw/plugin-sdk/core";');
+    write(
+      root,
+      `extensions/${id}/index.ts`,
+      'export type { Shared } from "openclaw/plugin-sdk/core";',
+    );
   }
   write(root, "src/plugin-sdk/core.ts", "export interface Shared { x: string }");
   write(
@@ -719,7 +728,9 @@ describe.skipIf(process.platform === "win32")("dist artifact ownership", () => {
     }, signal);
   });
 
-  it("keeps discovery graphs isolated while reusing one native compiler per pass", async ({ signal }) => {
+  it("keeps discovery graphs isolated while reusing one native compiler per pass", async ({
+    signal,
+  }) => {
     await withProcesses(async ({ start }) => {
       const root = createCheckout();
       const observer = installDiscoveryFixture(root);
@@ -752,7 +763,9 @@ describe.skipIf(process.platform === "win32")("dist artifact ownership", () => {
     }, signal);
   });
 
-  it("joins the real discovery compiler before releasing signaled artifact ownership", async ({ signal }) => {
+  it("joins the real discovery compiler before releasing signaled artifact ownership", async ({
+    signal,
+  }) => {
     await withProcesses(async ({ start }) => {
       const root = createCheckout();
       const observer = installDiscoveryFixture(root);

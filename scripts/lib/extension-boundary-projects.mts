@@ -7,6 +7,7 @@ import {
 import { collectFilesSync } from "../check-file-utils.ts";
 import { portableRelativePath } from "./build-artifact-cache.mts";
 import { collectBundledPluginBuildEntries } from "./bundled-plugin-build-entries.mjs";
+import { isDirectRunUrl } from "./direct-run.mjs";
 import {
   BOUNDARY_CACHE_ROOT,
   BOUNDARY_PLUGIN_UNITS,
@@ -15,7 +16,6 @@ import {
 } from "./extension-boundary-inputs.mts";
 import { createDeclarationInputBoundary } from "./local-check-runtime.mts";
 import { readNativeTypeScriptConfig } from "./native-typescript-config.mts";
-import { isDirectRunUrl } from "./direct-run.mjs";
 import { isRecord } from "./record-shared.mjs";
 
 function exportTargets(value: unknown): string[] {
@@ -198,9 +198,7 @@ export async function resolveExtensionBoundaryPreparation(
     cwd: boundary.root,
     fs: {
       fileExists(file) {
-        return owned(file)
-          ? currentSdkDeclaration(file) || declaration(file) !== null
-          : undefined;
+        return owned(file) ? currentSdkDeclaration(file) || declaration(file) !== null : undefined;
       },
       readFile(file) {
         // The first pass never consumes cache contents. A later pass follows only
@@ -231,10 +229,7 @@ export async function resolveExtensionBoundaryPreparation(
           return { files: [], directories: [...producerIds] };
         }
         const location = sourceLocation(directory);
-        if (
-          !location ||
-          !fs.statSync(location.source, { throwIfNoEntry: false })?.isDirectory()
-        ) {
+        if (!location || !fs.statSync(location.source, { throwIfNoEntry: false })?.isDirectory()) {
           return { files: [], directories: [] };
         }
         const entries = fs.readdirSync(location.source, { withFileTypes: true });
