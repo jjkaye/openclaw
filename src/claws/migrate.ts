@@ -94,6 +94,8 @@ type BuiltMigration = {
   profile?: ClawOpenClawProfile;
   packageFiles: Map<string, Buffer>;
   ownershipFiles: PersistedClawWorkspaceFile[];
+  retainAgentConfig?: boolean;
+  workspaceFiles?: readonly string[];
 };
 
 async function readOwnership(options: OpenClawStateDatabaseOptions, agentId: string) {
@@ -164,12 +166,22 @@ function summarizePackageFiles(packageFiles: Map<string, Buffer>) {
 function buildPlanIntegrity(
   addPlan: Awaited<ReturnType<typeof buildClawAddPlan>>,
   packageFiles: Map<string, Buffer>,
+  retainedConfigDigest?: string,
 ) {
   return digestClawValue({
     schemaVersion: CLAW_MIGRATION_PLAN_SCHEMA_VERSION,
     addPlan,
     packageFiles: summarizePackageFiles(packageFiles),
     retained: MIGRATION_RETAINED_PATHS,
+    ...(retainedConfigDigest ? { retainedConfigDigest } : {}),
+  });
+}
+
+function digestRetainedAgentConfig(config: OpenClawConfig, agentId: string): string {
+  return digestClawValue({
+    agent: listAgentEntries(config).filter((entry) => entry.id === agentId),
+    defaults: config.agents?.defaults,
+    tools: config.tools,
   });
 }
 
@@ -187,6 +199,10 @@ function adoptMigrationActions(plan: BuiltMigration["addPlan"]): void {
       },
     };
   });
+}
+
+function retainMigrationAgentConfig(plan: BuiltMigration["addPlan"]): void {
+  plan.actions = plan.actions.filter((action) => action.kind !== "agent");
 }
 
 function buildMigrationAddPlan(
@@ -224,6 +240,8 @@ function buildMigrationAddPlan(
 export async function buildClawMigrationPlan(params: {
   agentId: string;
   config: OpenClawConfig;
+  retainAgentConfig?: boolean;
+  workspaceFiles?: readonly string[];
   options?: OpenClawStateDatabaseOptions;
 }): Promise<BuiltMigration> {
   const options = params.options ?? {};
@@ -246,8 +264,12 @@ export async function buildClawMigrationPlan(params: {
     );
   }
   const agent = agents[0]!;
-  validateAgentConfigKeys(agent);
-  const migrationAgent = resolveMigrationAgentSettings(params.config, agent);
+  if (!params.retainAgentConfig) {
+    validateAgentConfigKeys(agent);
+  }
+  const migrationAgent = params.retainAgentConfig
+    ? { id: agentId }
+    : resolveMigrationAgentSettings(params.config, agent);
   const ownership = await readOwnership(options, agentId);
   if (ownership.install) {
     throw new ClawMigrationError(
@@ -321,7 +343,7 @@ export async function buildClawMigrationPlan(params: {
       "$.workspace",
     );
   }
-  const selectedFiles = await readSelectedWorkspaceFiles(workspace);
+  const selectedFiles = await readSelectedWorkspaceFiles(workspace, params.workspaceFiles);
   const selectedPaths = new Set<string>(selectedFiles.map((file) => file.name));
   const conflictingFile = ownership.allWorkspaceFiles.find(
     (file) =>
@@ -336,7 +358,7 @@ export async function buildClawMigrationPlan(params: {
       `$.workspace.${conflictingFile.path}`,
     );
   }
-  const avatar = agent.identity?.avatar?.trim();
+  const avatar = migrationAgent.identity?.avatar?.trim();
   const portableAvatar =
     avatar && isAvatarDataUrl(avatar) && isPortableClawAvatar(avatar) ? avatar : undefined;
   const projected = generatedPackage(agentId, {
@@ -393,7 +415,14 @@ export async function buildClawMigrationPlan(params: {
       }
     }
     adoptMigrationActions(addPlan);
-    const planIntegrity = buildPlanIntegrity(addPlan, projected.packageFiles);
+    if (params.retainAgentConfig) {
+      retainMigrationAgentConfig(addPlan);
+    }
+    const planIntegrity = buildPlanIntegrity(
+      addPlan,
+      projected.packageFiles,
+      params.retainAgentConfig ? digestRetainedAgentConfig(params.config, agentId) : undefined,
+    );
     addPlan.planIntegrity = planIntegrity;
     const plan: ClawMigrationPlan = {
       schemaVersion: CLAW_MIGRATION_PLAN_SCHEMA_VERSION,
@@ -412,7 +441,10 @@ export async function buildClawMigrationPlan(params: {
         byteLength: content.byteLength,
         digest,
       })),
-      retained: [...MIGRATION_RETAINED_PATHS],
+      retained: [
+        ...(params.retainAgentConfig ? ["agent configuration"] : []),
+        ...MIGRATION_RETAINED_PATHS,
+      ],
       planIntegrity,
       blockers: [],
     };
@@ -452,6 +484,8 @@ export async function buildClawMigrationPlan(params: {
       ...(loaded.openClawProfile ? { profile: loaded.openClawProfile } : {}),
       packageFiles: projected.packageFiles,
       ownershipFiles,
+      retainAgentConfig: params.retainAgentConfig,
+      workspaceFiles: params.workspaceFiles ? [...params.workspaceFiles] : undefined,
     };
   } finally {
     await rm(packagePreview, { recursive: true, force: true });
@@ -466,6 +500,8 @@ export async function applyClawMigrationPlan(params: {
 }): Promise<ClawMigrationResult> {
   const options = params.options ?? {};
   const root = params.migration.plan.packageRoot;
+  const readWorkspace = (workspace: string) =>
+    readSelectedWorkspaceFiles(workspace, params.migration.workspaceFiles);
   const currentWorkspace = await canonicalExistingWorkspace(
     resolveAgentWorkspaceDir(params.config, params.migration.plan.agentId, options.env),
   );
@@ -505,7 +541,7 @@ export async function applyClawMigrationPlan(params: {
     await assertWorkspaceSnapshotUnchanged(
       currentWorkspace,
       params.migration.ownershipFiles,
-      readSelectedWorkspaceFiles,
+      readWorkspace,
     );
     const read = await readClawManifestFile(root);
     if (!read.ok) {
@@ -535,7 +571,16 @@ export async function applyClawMigrationPlan(params: {
       }
     }
     adoptMigrationActions(finalPlan);
-    const finalIntegrity = buildPlanIntegrity(finalPlan, params.migration.packageFiles);
+    if (params.migration.retainAgentConfig) {
+      retainMigrationAgentConfig(finalPlan);
+    }
+    const finalIntegrity = buildPlanIntegrity(
+      finalPlan,
+      params.migration.packageFiles,
+      params.migration.retainAgentConfig
+        ? digestRetainedAgentConfig(params.config, params.migration.plan.agentId)
+        : undefined,
+    );
     if (finalIntegrity !== params.migration.plan.planIntegrity) {
       throw new ClawMigrationError(
         "migration_changed",
@@ -549,7 +594,7 @@ export async function applyClawMigrationPlan(params: {
     await assertWorkspaceSnapshotUnchanged(
       currentWorkspace,
       params.migration.ownershipFiles,
-      readSelectedWorkspaceFiles,
+      readWorkspace,
     );
     const finalOwnershipFiles = params.migration.ownershipFiles.map((file) => ({
       ...file,

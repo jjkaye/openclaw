@@ -1788,22 +1788,58 @@ jobs:
             echo "Selected release candidate predates plugins:assets:check; skipping unavailable check."
           fi
 
-      - name: Package published-driver candidate
+      - name: Package native CI candidate
         id: published_driver_package
-        if: needs.preflight.outputs.run_published_driver_update == 'true' && needs.preflight.outputs.checkout_revision == github.sha
+        if: (needs.preflight.outputs.run_published_driver_update == 'true' || github.event_name == 'pull_request') && needs.preflight.outputs.checkout_revision == github.sha
+        env:
+          CHECKOUT_REVISION: ${{ needs.preflight.outputs.checkout_revision }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          WORKFLOW_REVISION: ${{ github.workflow_sha }}
         run: |
-          node scripts/package-openclaw-for-docker.mjs --skip-build \
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CHECKOUT_REVISION"
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import { readFileSync } from "node:fs";
+          const buildInfo = JSON.parse(readFileSync("dist/build-info.json", "utf8"));
+          assert.equal(buildInfo.commit, process.env.CHECKOUT_REVISION, "built candidate must match selected checkout");
+          NODE
+          node scripts/package-openclaw-for-docker.mjs --skip-build --bundle-plugin codex \
             --allow-unreleased-changelog --output-dir .artifacts/published-driver-package \
             --output-name openclaw-candidate.tgz
-          echo "sha256=$(sha256sum .artifacts/published-driver-package/openclaw-candidate.tgz | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+          node --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+          const directory = ".artifacts/published-driver-package";
+          const filename = "openclaw-candidate.tgz";
+          const sha256 = (file) => createHash("sha256").update(readFileSync(file)).digest("hex");
+          const packageSha256 = sha256(`${directory}/${filename}`);
+          writeFileSync(`${directory}/SHA256SUMS`, `${packageSha256}  ${filename}\n`);
+          writeFileSync(`${directory}/source-receipt.json`, `${JSON.stringify({
+            repository: process.env.GITHUB_REPOSITORY,
+            checkoutRevision: process.env.CHECKOUT_REVISION,
+            pullRequestHead: process.env.PR_HEAD_SHA || null,
+            workflowRevision: process.env.WORKFLOW_REVISION,
+            runId: process.env.GITHUB_RUN_ID,
+            runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+            packageSha256,
+            lockfileSha256: sha256("pnpm-lock.yaml"),
+            buildProfile: "ci-artifacts",
+            bundledPlugins: ["codex"],
+          }, null, 2)}\n`);
+          appendFileSync(process.env.GITHUB_OUTPUT, `sha256=${packageSha256}\n`);
+          NODE
 
-      - name: Upload published-driver candidate
+      - name: Upload native CI candidate
         id: published_driver_package_upload
-        if: needs.preflight.outputs.run_published_driver_update == 'true' && needs.preflight.outputs.checkout_revision == github.sha
+        if: (needs.preflight.outputs.run_published_driver_update == 'true' || github.event_name == 'pull_request') && needs.preflight.outputs.checkout_revision == github.sha
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: published-driver-candidate-${{ github.sha }}-${{ github.run_attempt }}
-          path: .artifacts/published-driver-package/openclaw-candidate.tgz
+          name: openclaw-candidate-${{ needs.preflight.outputs.checkout_revision }}-${{ github.run_attempt }}
+          path: |
+            .artifacts/published-driver-package/openclaw-candidate.tgz
+            .artifacts/published-driver-package/SHA256SUMS
+            .artifacts/published-driver-package/source-receipt.json
           compression-level: 0
           if-no-files-found: error
           retention-days: 1

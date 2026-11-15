@@ -28,6 +28,7 @@ export type ClawUpdatePlan = {
   planIntegrity: string;
   found: boolean;
   agentId: string;
+  retainsAgentConfig?: true;
   currentClaw?: { name: string; version: string; integrity: string };
   targetClaw?: Pick<ClawSourceIdentity, "name" | "version" | "integrity">;
   summary: {

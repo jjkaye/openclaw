@@ -65,12 +65,15 @@ describe("private MCP search denial", () => {
             await ensureMcpLoopbackServer();
             const runtime = getActiveMcpLoopbackRuntime()!;
             const admittedRunContext = await admission.admit("gateway");
-            const makeGrant = (disabled: boolean) => {
+            const makeGrant = (disabled: boolean, messageToolDisabled = false) => {
               const grant = mintMcpLoopbackClientGrant({
                 context: {
                   sessionKey: "agent:main:main",
                   senderIsOwner: true,
                   ...(disabled ? { webSearchDisabled: true as const } : {}),
+                  ...(messageToolDisabled
+                    ? { messageToolDisabled: true as const, toolsAllow: ["message", "web_search"] }
+                    : {}),
                 },
                 runtimeOwnerToken: runtime.ownerToken,
                 admittedRunContext,
@@ -78,7 +81,7 @@ describe("private MCP search denial", () => {
               const capture = {
                 token: grant.token,
                 runtimeOwnerToken: runtime.ownerToken,
-                captureKey: `search-${disabled}`,
+                captureKey: `search-${disabled}-message-${messageToolDisabled}`,
               };
               expect(activateMcpLoopbackClientGrantCapture(capture)).toBeTruthy();
               return { grant, capture };
@@ -97,6 +100,7 @@ describe("private MCP search denial", () => {
                     "content-type": "application/json",
                     "x-openclaw-cli-capture-key": active.capture.captureKey,
                     "x-openclaw-web-search-disabled": "false",
+                    "x-openclaw-message-tool-disabled": "false",
                   },
                   body: JSON.stringify({
                     jsonrpc: "2.0",
@@ -127,6 +131,20 @@ describe("private MCP search denial", () => {
               false,
             );
             expect(mocks.search).toHaveBeenCalledOnce();
+            const noDirectMessages = makeGrant(false, true);
+            const previousMessages = mocks.message.mock.calls.length;
+            expect(
+              (await request(noDirectMessages, "tools/list")).result?.tools?.map(
+                ({ name }) => name,
+              ),
+            ).toEqual(["web_search"]);
+            expect((await request(noDirectMessages, "tools/call", "message")).result?.isError).toBe(
+              true,
+            );
+            expect(mocks.message).toHaveBeenCalledTimes(previousMessages);
+            expect(
+              (await request(noDirectMessages, "tools/call", "web_search")).result?.isError,
+            ).toBe(false);
             for (const change of ["revoke", "replace"] as const) {
               const active = makeGrant(true);
               const entered = createDeferred();

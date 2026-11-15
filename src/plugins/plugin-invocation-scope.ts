@@ -201,6 +201,7 @@ export function collectRegistryInvocationInstances(
     ...registry.channels.map(({ plugin }) => plugin),
     ...[...registry.contextEngines.values()].map(({ factory }) => factory),
     ...registry.widgetPresenters.map(({ presenter }) => presenter),
+    ...registry.notificationSources.map(({ provider }) => provider),
     ...registry.memoryCorpusSupplements.map(({ supplement }) => supplement),
     ...registry.memoryPromptPreparations.map(({ prepare }) => prepare),
     ...registry.memoryPromptSupplements.map(({ builder }) => builder),

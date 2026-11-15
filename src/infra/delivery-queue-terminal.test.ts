@@ -9,11 +9,14 @@ import { pruneDeliveryQueueTombstones } from "./delivery-queue-sqlite-bound.js";
 import {
   countFailedDeliveryQueueEntries,
   loadDeliveryQueueEntries,
+  listNotificationDeliveryReceipts,
   pruneExpiredDeliveryQueueTombstones,
   terminalizePendingDeliveryQueueEntry,
+  updateNotificationDeliveryReceiptResolution,
 } from "./delivery-queue-sqlite.js";
 import {
   completeDeliveryQueueEntryInDatabase,
+  getDeliveryQueueEntryOwnersInDatabase,
   prepareDeliveryQueueTerminalEntry,
   terminalizePendingDeliveryQueueEntryInDatabase,
   updateDeliveryQueueEntryInDatabase,
@@ -23,9 +26,16 @@ import {
   loadDeliveryQueueEntry,
   seedDeliveryQueueEntry,
 } from "./delivery-queue-sqlite.test-support.js";
-import type { DeliveryQueueCompletionRetention } from "./delivery-queue-sqlite.types.js";
+import {
+  NOTIFICATION_RECEIPT_RESOLVED_RETENTION_MS,
+  type DeliveryQueueCompletionRetention,
+  type DeliveryQueueEntryState,
+} from "./delivery-queue-sqlite.types.js";
 import { requireNodeSqlite } from "./node-sqlite.js";
+import type { QueuedDeliveryPayload } from "./outbound/delivery-queue-types.js";
 import { resolvePreferredOpenClawTmpDir } from "./tmp-openclaw-dir.js";
+
+type NotificationQueueFixture = DeliveryQueueEntryState & QueuedDeliveryPayload;
 
 describe("delivery queue pending terminal transition", () => {
   let rootDir: string;
@@ -72,6 +82,258 @@ describe("delivery queue pending terminal transition", () => {
       }),
     ).toThrow("Delivery queue entry id mismatch");
     expect(fs.readdirSync(stateDir)).toEqual([]);
+  });
+
+  it("strips notification bodies while retaining open-topic custody beyond normal receipt limits", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-07-20T10:00:00.000Z"));
+      const id = `${boundedRetention.idPrefix}notification`;
+      const notificationReceipt = {
+        ownerKey: "e".repeat(64),
+        topicKey: "a".repeat(64),
+        revisionKey: "b".repeat(64),
+        slot: 0,
+        localDate: "2026-07-20",
+      } as const;
+      const queuedEntry: NotificationQueueFixture = {
+        id,
+        enqueuedAt: Date.now(),
+        retryCount: 0,
+        completionRetention: boundedRetention,
+        notificationReceipts: [notificationReceipt],
+        payloads: [{ text: "private notification body" }],
+        channel: "telegram",
+        to: "private recipient",
+      };
+      seedDeliveryQueueEntry({ queueName, entry: queuedEntry, stateDir });
+      completeDeliveryQueueEntryInDatabase(
+        openOpenClawStateDatabase({ env: { ...process.env, OPENCLAW_STATE_DIR: stateDir } }),
+        queueName,
+        id,
+      );
+      expect(loadDeliveryQueueEntry(queueName, id, stateDir, "all")).toEqual({
+        id,
+        enqueuedAt: Date.now(),
+        retryCount: 0,
+        acknowledgedAt: Date.now(),
+        completionRetention: "permanent",
+        notificationReceipts: [notificationReceipt],
+        recoveryState: "completed_notification",
+      });
+
+      for (const suffix of ["one", "two", "three"]) {
+        const siblingId = `${boundedRetention.idPrefix}${suffix}`;
+        seedDeliveryQueueEntry({
+          queueName,
+          entry: {
+            id: siblingId,
+            enqueuedAt: Date.now(),
+            retryCount: 0,
+            completionRetention: boundedRetention,
+          },
+          stateDir,
+        });
+        completeDeliveryQueueEntryInDatabase(
+          openOpenClawStateDatabase({ env: { ...process.env, OPENCLAW_STATE_DIR: stateDir } }),
+          queueName,
+          siblingId,
+        );
+      }
+      vi.setSystemTime(Date.now() + 90 * 24 * 60 * 60_000);
+      const { db } = openOpenClawStateDatabase({
+        env: { ...process.env, OPENCLAW_STATE_DIR: stateDir },
+      });
+      pruneDeliveryQueueTombstones(db, Date.now());
+      expect(getDeliveryQueueEntryStatus(queueName, id, stateDir)).toBe("completed");
+      expect(loadDeliveryQueueEntries(queueName, stateDir, "all").map((entry) => entry.id)).toEqual(
+        [id],
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["exact lookup", "maintenance"] as const)(
+    "expires an old resolved notification through %s without pruning a recent resolution",
+    async (mode) => {
+      const id = `notification-resolved-${mode}`;
+      const now = Date.now();
+      const notificationReceipt = {
+        ownerKey: "f".repeat(64),
+        topicKey: "c".repeat(64),
+        revisionKey: "d".repeat(64),
+        slot: 2,
+        localDate: "2026-07-20",
+        resolvedAt: now,
+      } as const;
+      const database = openOpenClawStateDatabase({
+        env: { ...process.env, OPENCLAW_STATE_DIR: stateDir },
+      });
+      const seedResolved = (resolvedAt: number) => {
+        seedDeliveryQueueEntry({
+          queueName,
+          entry: {
+            id,
+            enqueuedAt: now,
+            retryCount: 0,
+            notificationReceipts: [{ ...notificationReceipt, resolvedAt }],
+          },
+          stateDir,
+        });
+        completeDeliveryQueueEntryInDatabase(database, queueName, id);
+      };
+      // Worker clocks are independent of Vitest's fake clock. Exact millisecond
+      // expiry is covered by the in-memory retention contract.
+      seedResolved(now);
+      await pruneExpiredDeliveryQueueTombstones(stateDir);
+      expect(getDeliveryQueueEntryStatus(queueName, id, stateDir)).toBe("completed");
+      seedResolved(now - NOTIFICATION_RECEIPT_RESOLVED_RETENTION_MS - 1);
+      if (mode === "maintenance") {
+        await pruneExpiredDeliveryQueueTombstones(stateDir);
+        expect(loadDeliveryQueueEntry(queueName, id, stateDir, "all")).toBeNull();
+      } else {
+        expect(getDeliveryQueueEntryStatus(queueName, id, stateDir)).toBeUndefined();
+      }
+    },
+  );
+
+  it("preserves malformed notification custody rather than guessing its expiry", async () => {
+    const { db } = openOpenClawStateDatabase({
+      env: { ...process.env, OPENCLAW_STATE_DIR: stateDir },
+    });
+    const id = "notification-malformed";
+    db.prepare(
+      `INSERT INTO delivery_queue_entries (
+        queue_name, id, status, retry_count, recovery_state, entry_json, enqueued_at, updated_at
+      ) VALUES (?, ?, 'completed', 0, 'completed_notification', ?, 1, 1)`,
+    ).run(
+      queueName,
+      id,
+      JSON.stringify({
+        id,
+        notificationReceipts: [{ topicKey: "not-a-hash", resolvedAt: 0 }],
+      }),
+    );
+    await pruneExpiredDeliveryQueueTombstones(stateDir);
+    expect(getDeliveryQueueEntryStatus(queueName, id, stateDir)).toBe("completed");
+  });
+
+  it("publishes opaque topic custody across revisions while retaining pending and partial work", async () => {
+    const now = Date.now();
+    const receipt = {
+      ownerKey: "e".repeat(64),
+      topicKey: "a".repeat(64),
+      revisionKey: "b".repeat(64),
+      slot: 0,
+      localDate: "2026-10-27",
+    } as const;
+    const seed = (id: string, entry: Partial<NotificationQueueFixture> = {}, status?: "failed") => {
+      const queuedEntry: NotificationQueueFixture = {
+        id,
+        enqueuedAt: now,
+        retryCount: 0,
+        notificationReceipts: [receipt],
+        payloads: [{ text: "private body" }],
+        channel: "telegram",
+        to: "private recipient",
+        ...entry,
+      };
+      seedDeliveryQueueEntry({
+        queueName,
+        stateDir,
+        status,
+        entry: queuedEntry,
+      });
+    };
+    seed("completed");
+    const database = openOpenClawStateDatabase({
+      env: { ...process.env, OPENCLAW_STATE_DIR: stateDir },
+    });
+    completeDeliveryQueueEntryInDatabase(database, queueName, "completed");
+    seed("pending", {
+      notificationReceipts: [{ ...receipt, revisionKey: "c".repeat(64) }],
+      recoveryState: "unknown_after_send",
+    });
+    seed("partial", { recoveryState: "settlement_pending" }, "failed");
+    seed("unrelated", { notificationReceipts: [{ ...receipt, topicKey: "d".repeat(64) }] });
+
+    const terminal = await listNotificationDeliveryReceipts({}, stateDir);
+    expect(terminal.map((entry) => entry.id)).toEqual(["completed"]);
+    const topic = await listNotificationDeliveryReceipts(
+      { topicKey: receipt.topicKey, includePending: true },
+      stateDir,
+    );
+    expect(topic.map((entry) => [entry.id, entry.status, entry.recoveryState])).toEqual([
+      ["completed", "completed", "completed_notification"],
+      ["partial", "failed", "settlement_pending"],
+      ["pending", "pending", "unknown_after_send"],
+    ]);
+    expect(JSON.stringify(topic)).not.toContain("private body");
+    const owner = getDeliveryQueueEntryOwnersInDatabase(database, [queueName], "completed").get(
+      queueName,
+    );
+    expect(owner).toMatchObject({
+      status: "completed",
+      notificationReceipts: [receipt],
+      acknowledgedAt: expect.any(Number),
+    });
+  });
+
+  it("starts source-owned receipt expiry once and clears it only on verified reopen", async () => {
+    const now = Date.now();
+    const id = "notification-resolution";
+    const receipt = {
+      ownerKey: "e".repeat(64),
+      topicKey: "a".repeat(64),
+      revisionKey: "b".repeat(64),
+      slot: 0,
+      localDate: "2026-10-27",
+    } as const;
+    seedDeliveryQueueEntry({
+      queueName,
+      stateDir,
+      entry: { id, enqueuedAt: now, retryCount: 0, notificationReceipts: [receipt] },
+    });
+    completeDeliveryQueueEntryInDatabase(
+      openOpenClawStateDatabase({ env: { ...process.env, OPENCLAW_STATE_DIR: stateDir } }),
+      queueName,
+      id,
+    );
+    const resolution = { ownerKey: receipt.ownerKey, resolvedAt: now };
+    expect(await updateNotificationDeliveryReceiptResolution(resolution, stateDir)).toBe(1);
+    expect(
+      await updateNotificationDeliveryReceiptResolution(
+        { ...resolution, resolvedAt: now + 1 },
+        stateDir,
+      ),
+    ).toBe(0);
+    expect(
+      (await listNotificationDeliveryReceipts({}, stateDir))[0]?.notificationReceipt.resolvedAt,
+    ).toBe(now);
+    expect(
+      await updateNotificationDeliveryReceiptResolution(
+        { ...resolution, ownerKey: "f".repeat(64) },
+        stateDir,
+      ),
+    ).toBe(0);
+    expect(
+      await updateNotificationDeliveryReceiptResolution(
+        { ...resolution, resolvedAt: null },
+        stateDir,
+      ),
+    ).toBe(1);
+    expect(
+      (await listNotificationDeliveryReceipts({}, stateDir))[0]?.notificationReceipt.resolvedAt,
+    ).toBeUndefined();
+    expect(
+      await updateNotificationDeliveryReceiptResolution(
+        { ...resolution, resolvedAt: now - NOTIFICATION_RECEIPT_RESOLVED_RETENTION_MS - 1 },
+        stateDir,
+      ),
+    ).toBe(1);
+    await pruneExpiredDeliveryQueueTombstones(stateDir);
+    expect(await listNotificationDeliveryReceipts({}, stateDir)).toEqual([]);
   });
 
   it("expires a bounded failed fence during its exact replay lookup", () => {

@@ -4,6 +4,10 @@ export const CLAW_INSTALL_RECORD_ADOPTED_SCHEMA_VERSION = "openclaw.clawInstallR
 
 export type ClawAgentOrigin = "created" | "adopted";
 
+export function retainsClawAgentConfig(origin: ClawAgentOrigin, paths: readonly string[]): boolean {
+  return origin === "adopted" && paths.length === 0;
+}
+
 type AdoptedAgentPaths = {
   origin: "adopted";
   paths: string[];

@@ -60,6 +60,16 @@ const compactionTarget = {
 };
 
 describe("executeAgentTurn: run lifecycle and ownership", () => {
+  it("carries the host message-tool exclusion through real candidate assembly", async () => {
+    const opts: InternalGetReplyOptions = { disableMessageTool: true };
+    const params = createMinimalRunAgentTurnParams({ opts });
+    params.followupRun.run.sourceReplyDeliveryMode = "message_tool_only";
+    await execution.executeAgentTurn(params);
+    expectMockCallArgFields(state.runEmbeddedAgentMock, 0, "embedded run", {
+      disableMessageTool: true,
+      forceMessageTool: false,
+    });
+  });
   it("classifies cancellation raised by the real deferred lifecycle owner", async () => {
     state.runEmbeddedAgentMock.mockImplementationOnce(
       async (params: RunEmbeddedAgentInternalParams) => {

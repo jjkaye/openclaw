@@ -45,6 +45,19 @@ function expectCases(
 }
 
 describe("cron protocol validators", () => {
+  it("accepts a durable boolean notification policy on creates and patches", () => {
+    expect(
+      validateCronAddParams(
+        add({ delivery: { mode: "announce", requireNotificationReference: true } }),
+      ),
+    ).toBe(true);
+    expect(
+      validateCronUpdateParams(update({ delivery: { requireNotificationReference: false } })),
+    ).toBe(true);
+    expect(
+      validateCronUpdateParams(update({ delivery: { requireNotificationReference: "false" } })),
+    ).toBe(false);
+  });
   it("accepts minimal add params", () => {
     expectCases(validateCronAddParams, true, [minimalAddParams]);
   });

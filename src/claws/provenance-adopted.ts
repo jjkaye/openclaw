@@ -10,6 +10,7 @@ import {
   type OpenClawStateDatabaseOptions,
 } from "../state/openclaw-state-db.js";
 import { digestClawValue } from "./digest.js";
+import { retainsClawAgentConfig } from "./provenance-agent-origin.js";
 import { readClawInstallRecordFromDatabase } from "./provenance-read.kernel.js";
 import { prepareClawInstallRecord } from "./provenance-record.js";
 import {
@@ -120,6 +121,7 @@ export function persistClawMigrationOwnership(
     record.schemaVersion,
     record.agentConfigDigest,
     options,
+    retainsClawAgentConfig(record.agentOrigin, record.agentOwnedPaths),
   );
   return record;
 }

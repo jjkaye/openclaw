@@ -39,6 +39,15 @@ import {
 import { createAttachedChannelResultAdapter } from "./channel-send-result.js";
 import { createCachedLazyValueGetter } from "./lazy-value.js";
 export type {
+  NotificationSourceReference,
+  NotificationResolveContext,
+  NotificationSourceStatus,
+  NotificationSourceState,
+  NotificationReceiptState,
+  NotificationReceiptResolveContext,
+  NotificationSourceV1,
+} from "../notifications/source-types.js";
+export type {
   AgentPromptGuidance,
   AgentPromptGuidanceEntry,
   AgentPromptSurfaceKind,

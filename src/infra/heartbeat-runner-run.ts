@@ -161,6 +161,9 @@ export async function runHeartbeatOnce(opts: HeartbeatRunOptions): Promise<Heart
       replyOptions: withReplySystemEventContext<InternalGetReplyOptions>(
         {
           isHeartbeat: true,
+          disableMessageTool:
+            heartbeat?.requireNotificationReference === true &&
+            !prepared.hasRelayableExecCompletion,
           useHeartbeatFailureCopy: prepared.useHeartbeatFailureCopy,
           // Isolated heartbeats mint a fresh session ID per run, so nothing later
           // reuses this run's bundle MCP runtime; retire it at settlement.

@@ -294,6 +294,41 @@ export function createNetworkRegistrars(state: PluginRegistryState) {
     registry.mcpServerConnectionResolvers.push(registration);
   };
 
+  const registerNotificationSource = (
+    record: PluginRecord,
+    source: Parameters<OpenClawPluginApi["registerNotificationSource"]>[0],
+  ) => {
+    const id = normalizeOptionalString(source?.id);
+    if (
+      !id ||
+      id !== source.id ||
+      id.includes("/") ||
+      source.contractVersion !== 1 ||
+      typeof source.resolve !== "function" ||
+      (source.resolveReceipt !== undefined && typeof source.resolveReceipt !== "function")
+    ) {
+      reportRegistrationError(record, "invalid version 1 notification source contract");
+      return;
+    }
+    const existingIndex = registry.notificationSources.findIndex(
+      (entry) => entry.provider.id === id,
+    );
+    const existing = registry.notificationSources[existingIndex];
+    if (existing && existing.pluginId !== record.id) {
+      reportRegistrationError(
+        record,
+        `notification source "${id}" already registered by plugin "${existing.pluginId}"`,
+      );
+      return;
+    }
+    const registration = createRegistration(record, { provider: source });
+    if (existingIndex >= 0) {
+      registry.notificationSources[existingIndex] = registration;
+    } else {
+      registry.notificationSources.push(registration);
+    }
+  };
+
   const registerChannel = (
     record: PluginRecord,
     registration: Parameters<OpenClawPluginApi["registerChannel"]>[0],
@@ -391,6 +426,7 @@ export function createNetworkRegistrars(state: PluginRegistryState) {
     registerHttpRoute,
     registerHostedMediaResolver,
     registerMcpServerConnectionResolver,
+    registerNotificationSource,
     registerChannel,
   };
 }

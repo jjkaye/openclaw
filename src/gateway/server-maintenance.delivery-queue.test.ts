@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { withinTest } from "../../test/helpers/promise.js";
 import type { GatewayScheduler } from "../infra/gateway-scheduler.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import {
@@ -16,11 +17,13 @@ const { pruneExpiredDeliveryQueueTombstonesMock, pruneOrphanedDeliveryQueueMedia
   }),
 );
 
+// mock-isolation: Exercise maintenance ordering without reading or pruning real queue storage.
 vi.mock("../infra/delivery-queue-sqlite.js", async () => {
   const { captureDeliveryQueueStateContext } =
     await import("../infra/delivery-queue-state-context.js");
   return {
     captureDeliveryQueueStateContext,
+    listNotificationDeliveryReceipts: vi.fn(async () => []),
     pruneExpiredDeliveryQueueTombstones: pruneExpiredDeliveryQueueTombstonesMock,
   };
 });
@@ -78,21 +81,29 @@ describe("delivery queue maintenance", () => {
     await stopMaintenanceTimers(timers);
   });
 
-  it("joins queue storage and media cleanup before shutdown and rejects later ticks", async () => {
+  it("joins queue storage and media cleanup before shutdown and rejects later ticks", async ({
+    signal,
+  }) => {
+    const expiryStarted = createDeferredCore();
     const expiry = createDeferredCore();
     const media = createDeferredCore();
-    pruneExpiredDeliveryQueueTombstonesMock.mockReturnValueOnce(expiry.promise);
+    pruneExpiredDeliveryQueueTombstonesMock.mockImplementationOnce(() => {
+      expiryStarted.resolve();
+      return expiry.promise;
+    });
     pruneOrphanedDeliveryQueueMediaMock.mockReturnValueOnce(media.promise);
     const deps = createMaintenanceTimerDeps();
     const timers = startGatewayMaintenanceTimers(deps);
     let stopped = false;
-    await waitForMediaCleanupDrainsToSettle();
-    void clock.advanceBy(0);
-    const stopping = timers.stopMediaCleanup().then((result) => {
-      stopped = true;
-      return result;
-    });
+    let stopping: ReturnType<typeof timers.stopMediaCleanup> | undefined;
     try {
+      await withinTest(waitForMediaCleanupDrainsToSettle(), signal);
+      void clock.advanceBy(0);
+      await withinTest(expiryStarted.promise, signal);
+      stopping = timers.stopMediaCleanup().then((result) => {
+        stopped = true;
+        return result;
+      });
       await Promise.resolve();
       expect(stopped).toBe(false);
       expect(pruneOrphanedDeliveryQueueMediaMock).not.toHaveBeenCalled();

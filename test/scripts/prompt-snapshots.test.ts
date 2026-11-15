@@ -84,11 +84,13 @@ describe("happy path prompt snapshots", () => {
     }
   });
 
-  it("reconstructs complete Codex tool catalogs from readable full-tool overrides", async () => {
+  it("reconstructs complete Codex tool catalogs from full catalogs and readable overrides", async () => {
     const scenarios = [
       { name: "telegram-direct", replacements: [] },
       { name: "discord-group", replacements: ["sessions_spawn"] },
-      { name: "heartbeat-turn", replacements: ["openclaw_direct"] },
+      // Heartbeats omit delegation tools, so their top-level catalog differs
+      // from the base and cannot be represented by replacement-only overrides.
+      { name: "heartbeat-turn", replacements: [] },
     ];
 
     for (const { name, replacements } of scenarios) {
@@ -102,6 +104,7 @@ describe("happy path prompt snapshots", () => {
             base: string;
             replace: Record<string, { name: string; inputSchema?: unknown; tools?: unknown[] }>;
           };
+      expect(Array.isArray(committed)).toBe(name !== "discord-group");
       if (Array.isArray(committed)) {
         expect(replacements).toEqual([]);
       } else {
@@ -115,6 +118,26 @@ describe("happy path prompt snapshots", () => {
 
       const materialized = await materializeCodexDynamicToolSnapshot(name);
       expect(JSON.parse(materialized)).toEqual(JSON.parse(expected!.content));
+
+      if (name === "heartbeat-turn") {
+        const specs = JSON.parse(materialized) as Array<{
+          type: "function" | "namespace";
+          name: string;
+          tools?: Array<{ name: string; deferLoading?: boolean }>;
+        }>;
+        const names = specs.flatMap((spec) =>
+          spec.type === "namespace" ? (spec.tools ?? []).map((tool) => tool.name) : [spec.name],
+        );
+        expect(names).not.toContain("sessions_spawn");
+        expect(names).not.toContain("sessions_yield");
+        const directNamespace = specs.find(
+          (spec) => spec.type === "namespace" && spec.name === "openclaw_direct",
+        );
+        expect(directNamespace?.tools).toEqual([
+          expect.objectContaining({ name: "heartbeat_respond" }),
+        ]);
+        expect(directNamespace?.tools?.[0]).not.toHaveProperty("deferLoading");
+      }
 
       if (name === "telegram-direct") {
         const specs = JSON.parse(expected!.content) as Array<{

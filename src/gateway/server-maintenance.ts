@@ -26,6 +26,7 @@ import { pruneOrphanedDeliveryQueueMedia } from "../infra/outbound/delivery-queu
 import { generateSecureInt } from "../infra/secure-random.js";
 import { checkTelemetryUpdate } from "../infra/telemetry.js";
 import { cleanOldMedia, pruneOutboundMedia, prunePlaybackTranscodeCache } from "../media/store.js";
+import { reconcileNotificationReceiptResolution } from "../notifications/receipt-cleanup.js";
 import {
   getGatewayRestartDrainSignal,
   isGatewayWorkAdmissionClosed,
@@ -272,6 +273,7 @@ export function startGatewayMaintenanceTimers(params: {
     (async () => {
       const context = captureDeliveryQueueStateContext();
       try {
+        await reconcileNotificationReceiptResolution(undefined, context);
         await pruneExpiredDeliveryQueueTombstones(undefined, context);
       } finally {
         await pruneOrphanedDeliveryQueueMedia(undefined, context);

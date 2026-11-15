@@ -16,6 +16,11 @@ import { resolveDatabasePath } from "../state/openclaw-state-db.paths.js";
 import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
 import { runOpenClawStateWorkerOperation } from "../state/openclaw-state-worker-store.js";
 import {
+  CLAW_INSTALL_RECORD_ADOPTED_SCHEMA_VERSION,
+  decodeClawAgentOwnership,
+  retainsClawAgentConfig,
+} from "./provenance-agent-origin.js";
+import {
   readClawInstallSchemaVersionRows,
   type ClawInstallSchemaVersionRow,
 } from "./provenance-runtime-read.kernel.js";
@@ -26,6 +31,7 @@ type ClawInstallSchemaVersionRead =
       kind: "ok";
       schemaVersion: ReturnType<typeof parseClawInstallRecordSchemaVersion>;
       agentConfigDigest: string;
+      retainsAgentConfig?: true;
     }
   | { kind: "error"; error: unknown };
 
@@ -68,10 +74,18 @@ function decodeSchemaVersions(
   const schemaVersions = new Map<string, ClawInstallSchemaVersionRead>();
   for (const row of rows) {
     try {
+      const schemaVersion = parseClawInstallRecordSchemaVersion(row.schemaVersion);
+      const ownership =
+        schemaVersion === CLAW_INSTALL_RECORD_ADOPTED_SCHEMA_VERSION
+          ? decodeClawAgentOwnership(row.agentOwnedPathsJson, schemaVersion)
+          : undefined;
       schemaVersions.set(row.agentId, {
         kind: "ok",
-        schemaVersion: parseClawInstallRecordSchemaVersion(row.schemaVersion),
+        schemaVersion,
         agentConfigDigest: row.agentConfigDigest,
+        ...(ownership && retainsClawAgentConfig(ownership.origin, ownership.paths)
+          ? { retainsAgentConfig: true }
+          : {}),
       });
     } catch (error) {
       schemaVersions.set(row.agentId, { kind: "error", error });
@@ -325,12 +339,18 @@ export function cacheClawInstallSchemaVersion(
   schemaVersion: ReturnType<typeof parseClawInstallRecordSchemaVersion>,
   agentConfigDigest: string,
   options: OpenClawStateDatabaseOptions = {},
+  retainsAgentConfig = false,
 ): void {
   const snapshot = snapshotsByPath.get(resolveSnapshotPath(options));
   if (snapshot?.kind !== "ready") {
     return;
   }
-  snapshot.schemaVersions.set(agentId, { kind: "ok", schemaVersion, agentConfigDigest });
+  snapshot.schemaVersions.set(agentId, {
+    kind: "ok",
+    schemaVersion,
+    agentConfigDigest,
+    ...(retainsAgentConfig ? { retainsAgentConfig: true } : {}),
+  });
   snapshotsByPath.set(resolveSnapshotPath(options), { ...snapshot });
   notifySnapshotListeners();
 }

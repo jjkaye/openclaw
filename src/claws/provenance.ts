@@ -23,7 +23,7 @@ import {
   type PersistedClawPackageRef,
 } from "./package-extension-provenance.js";
 import { updateClawPackageRefStatusInDatabase } from "./package-status.kernel.js";
-import type { ClawAgentOrigin } from "./provenance-agent-origin.js";
+import { retainsClawAgentConfig, type ClawAgentOrigin } from "./provenance-agent-origin.js";
 import {
   readClawInstallRecordFromDatabase,
   readClawInstallRecordsInDatabase,
@@ -161,6 +161,7 @@ export function persistClawInstallRecord(
     persistedRecord.schemaVersion,
     persistedRecord.agentConfigDigest,
     options,
+    retainsClawAgentConfig(persistedRecord.agentOrigin, persistedRecord.agentOwnedPaths),
   );
   return persistedRecord;
 }
@@ -242,8 +243,12 @@ export function updateClawInstallRecord(
         `No Claw install record exists for agent ${JSON.stringify(plan.agent.finalId)}.`,
       );
     }
-    const nextRecord = prepareClawInstallRecord(plan, {
-      agentConfigDigest,
+    const retainsConfig = retainsClawAgentConfig(current.agentOrigin, current.agentOwnedPaths);
+    const nextPlan = retainsConfig
+      ? { ...plan, actions: plan.actions.filter((action) => action.kind !== "agent") }
+      : plan;
+    const nextRecord = prepareClawInstallRecord(nextPlan, {
+      agentConfigDigest: retainsConfig ? current.agentConfigDigest : agentConfigDigest,
       agentOrigin: current.agentOrigin,
       bootstrap: bootstrapProvenance(plan) ?? current.bootstrap,
       status,
@@ -271,6 +276,7 @@ export function updateClawInstallRecord(
     record.schemaVersion,
     record.agentConfigDigest,
     options,
+    retainsClawAgentConfig(record.agentOrigin, record.agentOwnedPaths),
   );
   return record;
 }

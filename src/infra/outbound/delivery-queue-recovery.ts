@@ -5,6 +5,7 @@ import type {
   ChannelMessageUnknownSendReconciliationResult,
 } from "../../channels/message/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { isNotificationCanceledError } from "../../notifications/cancellation.js";
 import {
   captureDeliveryQueueStateContext,
   type DeliveryQueueStateContext,
@@ -263,6 +264,7 @@ async function settleQueuedFailure(
     error: string;
     claimedAttemptId?: string;
     rejectionError?: string;
+    notificationCanceled?: true;
     events?: readonly IndexedMessageSentEvent[];
     terminals?: ReturnType<typeof failedOutboundAuditTerminals>;
   },
@@ -273,6 +275,7 @@ async function settleQueuedFailure(
     const unknownSend = needsUnknownSendReconciliation(params.entry);
     const settlement: DeliveryFailureSettlement = params.entry.settlement ?? {
       error: params.error,
+      ...(params.notificationCanceled ? { notificationCanceled: true as const } : {}),
       ...(params.terminals ? { terminals: params.terminals } : {}),
       ...(unknownSend ? { unknownSendCleanup: true as const } : {}),
       ...(params.rejectionError !== undefined
@@ -844,7 +847,13 @@ async function drainQueuedEntry(
       try {
         await (results.length === 0 && typeof entry.completionRetention === "object"
           ? owner.ack({ suppressCompletionReceipt: true })
-          : owner.ack());
+          : owner.ack(
+              results.length === 0 &&
+                entry.notificationReceipts &&
+                areOutboundPayloadsIntentionallySuppressed(payloadOutcomes)
+                ? { suppressCompletionReceipt: true }
+                : undefined,
+            ));
         postSendState = "acked";
       } catch (ackErr) {
         const ackError = `failed to ack recovered delivery: ${formatErrorMessage(ackErr)}`;
@@ -936,6 +945,7 @@ async function drainQueuedEntry(
           ...(permanentPlatformRejection
             ? { rejectionError: permanentPlatformRejection.message }
             : {}),
+          ...(isNotificationCanceledError(err) ? { notificationCanceled: true } : {}),
           events: messageSentEvents,
           // Identified results already exited through hasSendEvidence. These
           // canonical no-send decisions retain suppression reasons across restart.

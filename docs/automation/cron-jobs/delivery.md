@@ -31,6 +31,9 @@ When `gateway.publicOrigin` is configured and the Control UI is enabled, chat
 notifications include an `Inspect` link into the Control UI. Command and script
 completion announcements open the automation run; isolated agent announcements
 open the run's session.
+Source-backed notification envelopes omit the automatic link so ordinary
+proactive copy stays conversational; the native run inspection record remains
+available in the Control UI.
 
 For a `current` job using `announce` (the default), the final assistant result is a first-class session completion, not a WebChat-specific outbound message. OpenClaw waits for active turns in the creation-bound conversation, verifies that the same session generation still owns the key, and commits the result through the canonical transcript writer with cron job/run provenance and a job/run idempotency key. A retry cannot append the same result twice.
 
@@ -86,6 +89,49 @@ For announce delivery in the Control UI Automations editor, choose a channel and
 On hosts with multiple configured channels, isolated announce jobs created with `automations add|create` or changed with `automations edit` must set `--channel <channel-plugin-id>` unless a provider-prefixed `--to` or a preserved session route selects the channel. Use `--best-effort-deliver` only when unresolved fallback delivery is acceptable; it does not choose a channel, and a delivery failure does not fail the job.
 
 Channel announcements retry transient failures only when no payload may have reached the recipient. A successful retry records delivery without retaining the earlier attempt's error, including with best-effort delivery. Partial or ambiguous sends are not replayed by the announcement retry loop.
+
+For source-backed task briefings, set `delivery.requireNotificationReference: true`
+through the job's create/update API. It defaults to false and is preserved when
+other delivery fields change. Final channel announcements then require a current
+task/topic reference even when the source plugin is absent. Untagged output stays
+internal; missing metadata does not grant permission to send it. The shared
+delivery owner revalidates source state and uses the same topic receipts as
+heartbeat alerts. This flag governs final channel announcements, not webhook
+events or the separate host-owned failure-notification path.
+
+A source-backed final is explicitly tagged:
+
+```json
+{
+  "$schema": "openclaw.notification.v1",
+  "notification": {
+    "sourceId": "task-source",
+    "ownerId": "task-1",
+    "topicId": "next-action",
+    "purpose": "decision",
+    "expectedRevision": "current-source-revision"
+  },
+  "text": "The recommendation and specific decision."
+}
+```
+
+Obtain the reference from the authorized source; a model-invented ID or revision
+cannot establish eligibility. A briefing may instead contain `notifications`,
+an array of 1–16 `{ notification, text }` objects. Each topic is admitted
+independently, then the eligible blocks are combined in their original order into
+one briefing. Multi-topic envelopes must be text-only; attach media to a single
+explicit topic. Jobs requiring notification references synthesize speech after
+source admission selects and combines the eligible blocks. Suppressed topics are
+excluded from both text and speech. Recovery reuses the prepared briefing and
+audio rather than running speech generation again. Malformed tagged envelopes fail closed rather than becoming
+visible control JSON. Untagged jobs retain their normal output behavior when the
+requirement is off. See [notification sources](/plugins/sdk-overview/capabilities#notification-sources-contract-version-1).
+
+A source-confirmed policy suppression records `deliveryStatus: "not-delivered"`
+with `deliverySuppressionReason: "notification_policy"`. It completes the review
+quietly without claiming recipient delivery or generating a delivery-failure
+repair request. Unknown or partial platform effects retain their recovery state;
+missing or invalid required references remain internal delivery failures.
 
 When announce delivery uses `channel: "last"` or omits `channel`, a provider-prefixed target such as `telegram:123` can select the channel before the scheduler falls back to session history or a single configured channel. Only prefixes advertised by the loaded plugin are provider selectors. If `delivery.channel` is explicit, the target prefix must name the same provider; `channel: "whatsapp"` with `to: "telegram:123"` is rejected instead of letting WhatsApp interpret the Telegram ID as a phone number. Target-kind and service prefixes (`channel:<id>`, `user:<id>`, `imessage:<handle>`, `sms:<number>`) stay channel-owned target syntax, not provider selectors.
 

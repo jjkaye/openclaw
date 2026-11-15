@@ -1,3 +1,6 @@
+import { realpath } from "node:fs/promises";
+import { withAgentDeletion } from "../agents/agent-lifecycle-registry.js";
+import { digestClawValue } from "../claws/digest.js";
 import { assertExperimentalClawsEnabled } from "../claws/experimental.js";
 import { readClawStatus } from "../claws/lifecycle-state.js";
 import { withAuthoredAgentRoster } from "../claws/migrate-validation.js";
@@ -10,7 +13,9 @@ import {
   ClawUpdateMutationError,
 } from "../claws/update-apply.js";
 import { buildClawUpdatePlan, CLAW_UPDATE_PLAN_SCHEMA_VERSION } from "../claws/update-plan.js";
+import { readConfigFileSnapshot } from "../config/config.js";
 import { listConfiguredMcpServers } from "../config/mcp-config.js";
+import { withConfigSourceLocks } from "../config/write-lock.js";
 import { defaultRuntime, writeRuntimeJson, type RuntimeEnv } from "../runtime.js";
 import { openExistingOpenClawStateDatabaseReadOnly } from "../state/openclaw-state-db.js";
 import {
@@ -172,29 +177,81 @@ export async function runClawsUpdateCommand(
   }
 
   try {
-    const result = await applyClawUpdatePlan(
-      plan,
-      {
-        targetManifest: loaded.manifest,
-        targetClawMarkdownBody: loaded.clawMarkdownBody,
-        targetOpenClawProfile: loaded.openClawProfile,
-        targetSource: loaded.source,
-      },
-      {
-        config,
-        reloadPlugins: await resolvePluginBatchReload(),
-        sourceMcpServers: listedMcpServers.mcpServers,
-        consentPlanIntegrity: opts.planIntegrity,
-        packagePreflight: preflightClawPackage,
-        runtime: opts.json ? { ...runtime, log: () => undefined } : runtime,
-        cronGateway: {
-          waitUntilAgentAvailable: waitUntilGatewayAgentAvailable,
-          add: async (input) => await callGatewayFromCli("cron.add", {}, input),
-          get: async (id) => await callGatewayFromCli("cron.get", {}, { id }),
-          remove: async (id) => await callGatewayFromCli("cron.remove", {}, { id }),
+    const apply = async (assertCurrentConfig?: () => Promise<void>) =>
+      await applyClawUpdatePlan(
+        plan,
+        {
+          targetManifest: loaded.manifest,
+          targetClawMarkdownBody: loaded.clawMarkdownBody,
+          targetOpenClawProfile: loaded.openClawProfile,
+          targetSource: loaded.source,
         },
-      },
-    );
+        {
+          config,
+          assertCurrentConfig,
+          reloadPlugins: plan.retainsAgentConfig ? undefined : await resolvePluginBatchReload(),
+          sourceMcpServers: listedMcpServers.mcpServers,
+          consentPlanIntegrity: opts.planIntegrity,
+          packagePreflight: preflightClawPackage,
+          runtime: opts.json ? { ...runtime, log: () => undefined } : runtime,
+          cronGateway: {
+            waitUntilAgentAvailable: waitUntilGatewayAgentAvailable,
+            add: async (input) => await callGatewayFromCli("cron.add", {}, input),
+            get: async (id) => await callGatewayFromCli("cron.get", {}, { id }),
+            remove: async (id) => await callGatewayFromCli("cron.remove", {}, { id }),
+          },
+        },
+      );
+    let result;
+    if (plan.retainsAgentConfig) {
+      const readSources = async () => {
+        const snapshot = await readConfigFileSnapshot({ observe: false, isolateEnv: true });
+        if (!snapshot.exists || !snapshot.valid) {
+          throw new ClawUpdateMutationError(
+            "update_changed",
+            "The host configuration is unavailable.",
+          );
+        }
+        return {
+          paths: [
+            ...new Set([
+              snapshot.path,
+              await realpath(snapshot.path),
+              ...(snapshot.includedPaths ?? []),
+            ]),
+          ].toSorted(),
+          config: digestClawValue(
+            withAuthoredAgentRoster(snapshot.runtimeConfig, snapshot.sourceConfigBeforeMigrations),
+          ),
+        };
+      };
+      const expected = await readSources();
+      const expectedConfig = digestClawValue(config);
+      result = await withAgentDeletion(
+        plan.agentId,
+        async () =>
+          await withConfigSourceLocks(expected.paths, async (assertCurrent) => {
+            const assertCurrentConfig = async () => {
+              assertCurrent();
+              const current = await readSources();
+              assertCurrent();
+              if (
+                current.config !== expectedConfig ||
+                digestClawValue(current.paths) !== digestClawValue(expected.paths)
+              ) {
+                throw new ClawUpdateMutationError(
+                  "update_changed",
+                  "Host configuration changed after planning; build a fresh Claw update plan.",
+                );
+              }
+            };
+            await assertCurrentConfig();
+            return await apply(assertCurrentConfig);
+          }),
+      );
+    } else {
+      result = await apply();
+    }
     if (opts.json) {
       writeRuntimeJson(runtime, result);
       return;

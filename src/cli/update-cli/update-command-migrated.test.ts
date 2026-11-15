@@ -23,6 +23,8 @@ import {
 } from "../../infra/runtime-worker-url.js";
 import * as temporaryState from "../../infra/tmp-openclaw-dir.js";
 import { readUpdateStateSchemaVersions } from "../../infra/update-candidate-state.js";
+import * as candidateState from "../../infra/update-candidate-state.js";
+import { materializeUpdateCandidateStateWorker } from "../../infra/update-candidate-state.test-support.js";
 import {
   adoptUpdateRun,
   createUpdateRun,
@@ -31,6 +33,7 @@ import {
 } from "../../infra/update-run-ledger.js";
 import * as childCommands from "../../process/exec.js";
 import { defaultRuntime } from "../../runtime.js";
+import { recordAgentDeletionRecoveryHolds } from "../../state/agent-deletion-journal-recovery.js";
 import { OPENCLAW_AGENT_SCHEMA_VERSION } from "../../state/openclaw-agent-db-contract.js";
 import {
   closeOpenClawAgentDatabasesForTest,
@@ -64,8 +67,11 @@ vi.mock("../../state/openclaw-state-db-contract.js", async (importOriginal) => {
 
 const runtimeFixture = createFixtureLifetime();
 let candidateRoot: string;
+let migrationInspectionRoot: string;
 let candidateContract: Awaited<ReturnType<typeof childCommands.runUtf8CommandWithTimeout>>;
 beforeAll(async () => {
+  migrationInspectionRoot = runtimeFixture.createTempDir("migration-inspection-candidate-");
+  await materializeUpdateCandidateStateWorker(migrationInspectionRoot);
   const runtime = await runtimeFixture.run(() =>
     prepareCandidateAuthorityRuntime(runtimeFixture.createTempDir("migrated-candidate-runtime-")),
   );
@@ -417,6 +423,125 @@ it("refuses state inspection when activation leaves no known runtime root", asyn
     steps: [expect.objectContaining({ name: "state-schema-verification", exitCode: 1 })],
   });
 });
+
+it.each([
+  "retained",
+  "recovery-held",
+  "missing-journal",
+  "unreadable-journal",
+  "surviving-owner",
+  "surviving-alias",
+  "legacy-worker",
+] as const)(
+  "checks active migration targets without changing a %s old agent store",
+  async (disposition) => {
+    const stateDir = await fs.realpath(dirs.make("update-retained-agent-"));
+    const env = { OPENCLAW_STATE_DIR: stateDir };
+    const shared = openOpenClawStateDatabase({ env });
+    const agentDir = path.join(stateDir, "agents", "heldfixture", "agent");
+    const agentPath = path.join(agentDir, "openclaw-agent.sqlite");
+    await fs.mkdir(agentDir, { recursive: true });
+    const agent = new DatabaseSync(agentPath);
+    agent.exec(
+      "PRAGMA user_version=3; CREATE TABLE evidence(value TEXT); INSERT INTO evidence VALUES ('keep');",
+    );
+    agent.close();
+    shared.db
+      .prepare(
+        `INSERT INTO agent_deletion_journal
+       (agent_id, agent_dir, workspace_dir, sessions_dir, database_paths_json, created_at, cleanup_completed, delete_files)
+       VALUES ('heldfixture', ?, '', '', ?, 1, 1, 0)`,
+      )
+      .run(agentDir, JSON.stringify([agentPath]));
+    if (disposition === "recovery-held") {
+      shared.db.exec("DELETE FROM agent_deletion_journal; BEGIN IMMEDIATE");
+      try {
+        recordAgentDeletionRecoveryHolds(shared, [{ agentId: "heldfixture", path: agentPath }]);
+        shared.db.exec("COMMIT");
+      } catch (error) {
+        shared.db.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    if (disposition === "missing-journal") {
+      shared.db.exec("DROP TABLE agent_deletion_journal");
+    } else if (disposition === "unreadable-journal") {
+      shared.db.exec("UPDATE agent_deletion_journal SET database_paths_json='invalid'");
+    }
+    const survivorDir = path.join(stateDir, "agents", "survivor", "agent");
+    if (disposition === "surviving-alias") {
+      await fs.mkdir(survivorDir, { recursive: true });
+      await fs.link(agentPath, path.join(survivorDir, "openclaw-agent.sqlite"));
+    }
+    const config =
+      disposition === "surviving-owner" || disposition === "surviving-alias"
+        ? {
+            agents: {
+              entries: {
+                survivor: { agentDir: disposition === "surviving-alias" ? survivorDir : agentDir },
+              },
+            },
+          }
+        : {};
+    const journalBefore =
+      disposition === "missing-journal"
+        ? undefined
+        : shared.db.prepare("SELECT * FROM agent_deletion_journal").all();
+    const beforeBytes = await fs.readFile(agentPath);
+    const recoveryBefore = shared.db.prepare("SELECT * FROM migration_sources").all();
+    const schemaVersions = await readUpdateStateSchemaVersions({ stateDir, config, env });
+    expect(schemaVersions.find((entry) => entry.path === agentPath)?.migrationDisposition).toBe(
+      ["retained", "recovery-held", "legacy-worker"].includes(disposition) ? "retained" : undefined,
+    );
+    if (disposition === "legacy-worker") {
+      // Released workers omit this optional classification. The new consumer
+      // must retain the original guard, not infer a hold from a path or version.
+      vi.spyOn(candidateState, "readUpdateStateSchemaVersions").mockResolvedValueOnce(
+        schemaVersions.map(({ migrationDisposition: _disposition, ...entry }) => entry),
+      );
+    }
+    const result = {
+      status: "ok" as const,
+      mode: "npm" as const,
+      root: migrationInspectionRoot,
+      steps: [],
+      durationMs: 0,
+    };
+    await runtimeFixture.track(
+      inspectActivatedUpdateState({
+        result,
+        root: migrationInspectionRoot,
+        schemaVersions,
+        candidateSchemaVersions: {
+          state: OPENCLAW_STATE_SCHEMA_VERSION,
+          agent: OPENCLAW_AGENT_SCHEMA_VERSION,
+        },
+        config,
+        env,
+      }),
+    );
+    if (disposition === "retained" || disposition === "recovery-held") {
+      expect(result).toMatchObject({ status: "ok", steps: [] });
+    } else {
+      expect(result).toMatchObject({
+        status: "error",
+        reason: "openclaw doctor",
+        steps: [
+          expect.objectContaining({
+            stderrTail: expect.stringContaining("Agent database migration did not finish:"),
+          }),
+        ],
+      });
+    }
+    expect((await fs.readFile(agentPath)).equals(beforeBytes)).toBe(true);
+    expect(shared.db.prepare("SELECT * FROM migration_sources").all()).toEqual(recoveryBefore);
+    if (journalBefore) {
+      expect(shared.db.prepare("SELECT * FROM agent_deletion_journal").all()).toEqual(
+        journalBefore,
+      );
+    }
+  },
+);
 
 it.each([
   { beforeContent: false, publish: false, blocked: "state-migrated-no-rollback" },

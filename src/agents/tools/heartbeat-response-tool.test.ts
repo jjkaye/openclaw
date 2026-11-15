@@ -142,4 +142,21 @@ describe("createHeartbeatResponseTool", () => {
       }),
     ).rejects.toThrow("notify required");
   });
+
+  it("accepts a source notification proposal and rejects a malformed proposal before one-shot acceptance", async () => {
+    const tool = createHeartbeatResponseTool();
+    const notification = {
+      sourceId: "fixture-tasks",
+      ownerId: "task-1",
+      topicId: "next-action",
+      purpose: "decision",
+      expectedRevision: "material-1",
+    };
+    const args = { outcome: "needs_attention", notify: true, summary: "A decision is ready." };
+    await expect(
+      tool.execute("bad-reference", { ...args, notification: { ...notification, topicId: "" } }),
+    ).rejects.toThrow("Invalid heartbeat response");
+    const accepted = await tool.execute("current-reference", { ...args, notification });
+    expect(accepted.details).toMatchObject({ status: "accepted", notification });
+  });
 });

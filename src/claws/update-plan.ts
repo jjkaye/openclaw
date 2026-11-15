@@ -1,7 +1,8 @@
 import { lstat } from "node:fs/promises";
-import { listAgentIds } from "../agents/agent-scope-config.js";
+import { listAgentIds, resolveAgentWorkspaceDir } from "../agents/agent-scope-config.js";
 import { normalizeConfiguredMcpServers } from "../config/mcp-config-normalize.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { resolveIdentityPathViaExistingAncestorSync } from "../infra/boundary-path.js";
 import { root as fsSafeRoot } from "../infra/fs-safe.js";
 import {
   openExistingOpenClawStateDatabaseReadOnly,
@@ -20,10 +21,13 @@ import { digestClawValue as digest } from "./digest.js";
 import { readClawStatus } from "./lifecycle-state.js";
 import { buildClawAddPlan } from "./lifecycle.js";
 import { digestClawMcpServer, readClawMcpServerRefsByName } from "./mcp.js";
+import { clawMigrationPathsOverlap } from "./migrate-safety.js";
 import { normalizeWorkspaceConfig, resolveMigrationAgentSettings } from "./migrate-validation.js";
 import type { PackageRemovalDeps } from "./package-remove.js";
 import { digestClawPackageRef } from "./package-update-provenance.js";
+import { retainsClawAgentConfig } from "./provenance-agent-origin.js";
 import { readClawPackageRefs } from "./provenance.js";
+import { isClawGuidancePath } from "./schema-portability.js";
 import {
   CLAW_OUTPUT_STABILITY,
   type ClawDiagnostic,
@@ -150,6 +154,39 @@ export async function buildClawUpdatePlan(params: {
         diagnostics: params.diagnostics,
       });
     }
+    const retainsConfig = retainsClawAgentConfig(
+      record.install.agentOrigin,
+      record.install.agentOwnedPaths,
+    );
+    if (
+      retainsConfig &&
+      (params.targetManifest.agent.id !== agentId ||
+        Object.keys(params.targetManifest.agent).length !== 1 ||
+        params.targetOpenClawProfile !== undefined ||
+        params.targetManifest.packages.length > 0 ||
+        Object.keys(params.targetManifest.mcpServers).length > 0 ||
+        params.targetManifest.cronJobs.length > 0 ||
+        params.targetManifest.workspace.files.some((file) => !isClawGuidancePath(file.path)))
+    ) {
+      return makeEmptyClawUpdatePlan({
+        agentId,
+        source: params.targetSource,
+        found: true,
+        currentClaw: {
+          name: record.install.claw.name,
+          version: record.install.claw.version,
+          integrity: record.install.claw.integrity,
+        },
+        blockers: [
+          diagnostic(
+            "host_owned_agent_config",
+            "$.agent",
+            "This Claw owns authored workspace guidance only. Keep the agent id, use Markdown at the workspace root or Markdown/JSON under brain/ or docs/, and omit agent settings, packages, MCP servers, and cron jobs.",
+          ),
+        ],
+        diagnostics: params.diagnostics,
+      });
+    }
 
     const packagePreflights = new Map<string, ClawPackagePreflightResult>();
     const currentPackages = new Map(
@@ -176,12 +213,35 @@ export async function buildClawUpdatePlan(params: {
       },
     });
     const blockers = targetPlan.blockers.filter(isApplicationUpdateBlocker);
+    if (
+      retainsConfig &&
+      listAgentIds(params.config).some(
+        (id) =>
+          id !== agentId &&
+          clawMigrationPathsOverlap(
+            record.install.workspace,
+            resolveIdentityPathViaExistingAncestorSync(
+              resolveAgentWorkspaceDir(params.config, id, params.stateOptions?.env),
+            ),
+          ),
+      )
+    ) {
+      blockers.push(
+        diagnostic(
+          "workspace_ownership_ambiguous",
+          "$.workspace",
+          "The enrolled workspace overlaps another configured agent. Reconcile workspace ownership before updating.",
+        ),
+      );
+    }
     const actions: ClawUpdateAction[] = [];
     const capabilityChanges: ClawUpdateCapabilityChange[] = [];
 
     let desiredAgentDigest = digest(targetPlan.agent.config);
     let adoptedSettingsUnsupported = false;
-    if (record.install.agentOrigin === "adopted") {
+    if (retainsConfig) {
+      desiredAgentDigest = record.install.agentConfigDigest;
+    } else if (record.install.agentOrigin === "adopted") {
       try {
         desiredAgentDigest = digest(
           normalizeWorkspaceConfig(
@@ -194,7 +254,9 @@ export async function buildClawUpdatePlan(params: {
       }
     }
     const agentAction =
-      record.agentState === "modified" || adoptedSettingsUnsupported
+      record.agentState === "modified" ||
+      adoptedSettingsUnsupported ||
+      (retainsConfig && record.agentState !== "present")
         ? "manual"
         : record.agentState === "missing"
           ? "change"
@@ -207,8 +269,11 @@ export async function buildClawUpdatePlan(params: {
       action: agentAction,
       target: `agents.entries[${JSON.stringify(agentId)}]`,
       blocked: agentAction === "manual",
-      reason:
-        agentAction === "manual"
+      reason: retainsConfig
+        ? agentAction === "manual"
+          ? "The host-owned agent is missing or no longer resolves to its enrolled workspace."
+          : "Agent configuration remains under host ownership."
+        : agentAction === "manual"
           ? adoptedSettingsUnsupported
             ? "Current inherited agent defaults cannot be represented by the installed Claw v1 package. Reconcile those settings manually."
             : "Live agent config changed after installation and must be reconciled manually."
@@ -222,12 +287,14 @@ export async function buildClawUpdatePlan(params: {
         : { currentDigest: record.install.agentConfigDigest }),
       desiredDigest: desiredAgentDigest,
     });
-    pushResolvedAgentCapabilityChanges({
-      changes: capabilityChanges,
-      agentId,
-      config: params.config,
-      desiredAgent: targetPlan.agent.config,
-    });
+    if (!retainsConfig) {
+      pushResolvedAgentCapabilityChanges({
+        changes: capabilityChanges,
+        agentId,
+        config: params.config,
+        desiredAgent: targetPlan.agent.config,
+      });
+    }
 
     const targetFiles = clawWorkspaceActionsById(targetPlan.actions);
     const currentFiles = new Map(record.workspaceFiles.map((file) => [file.path, file] as const));
@@ -646,6 +713,7 @@ export async function buildClawUpdatePlan(params: {
       mutationAllowed: false,
       found: true,
       agentId,
+      ...(retainsConfig ? { retainsAgentConfig: true } : {}),
       currentClaw: {
         name: record.install.claw.name,
         version: record.install.claw.version,

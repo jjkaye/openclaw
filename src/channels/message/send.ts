@@ -85,6 +85,7 @@ export type DurableMessageBatchSendResult =
     }
   | {
       status: "failed";
+      deliveryIntent?: OutboundDeliveryIntent;
       error: unknown;
       stage?: DurableMessageFailureStage;
       payloadOutcomes?: DurableMessagePayloadDeliveryOutcome[];
@@ -275,7 +276,7 @@ async function withMessageSendContext<T>(
               sentBeforeError: true,
               ...(deliveryIntent ? { deliveryIntent } : {}),
             }
-          : { ...failure, status: "failed", stage };
+          : { ...failure, status: "failed", stage, ...(deliveryIntent ? { deliveryIntent } : {}) };
       };
       try {
         const results = await deliver({
@@ -327,7 +328,7 @@ async function withMessageSendContext<T>(
         if (isOutboundDeliveryError(error)) {
           return failed(error, error.stage, error.results, error.payloadOutcomes);
         }
-        return { status: "failed", error };
+        return { status: "failed", error, ...(deliveryIntent ? { deliveryIntent } : {}) };
       }
     },
     edit: async (receipt, rendered): Promise<MessageReceipt> => {

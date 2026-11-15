@@ -5,6 +5,7 @@ import { deriveDurableFinalDeliveryRequirementsForBatch } from "../../channels/m
 import { createRenderedMessageBatchPlan } from "../../channels/message/rendered-batch.js";
 import type { ChannelMessageDeferredDeliveryAdmissionResult } from "../../channels/message/types.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { hasNotificationProposal, runNotificationDelivery } from "../../notifications/outbound.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import {
   captureDeliveryQueueStateContext,
@@ -58,6 +59,21 @@ import { normalizeOutboundReplyFacts } from "./reply-policy.js";
 
 const log = createSubsystemLogger("outbound/deliver");
 
+function acceptExistingNotificationCustody(
+  params: InternalDeliverOutboundPayloadsParams,
+): OutboundDeliveryResult[] {
+  if (params.notificationBlocks?.length) {
+    params.payloads.forEach((_payload, index) =>
+      params.onPayloadDeliveryOutcome?.({
+        index,
+        status: "suppressed",
+        reason: "notification_policy",
+      }),
+    );
+  }
+  return [];
+}
+
 function isReusablePreparedDeliveryOwner(
   owner: Awaited<ReturnType<typeof findDeliveryIntentOwner>>,
 ): boolean {
@@ -92,6 +108,13 @@ export async function runStructuredOutboundDeliveryInternal(
   },
 ): Promise<OutboundDeliveryResult[]> {
   const { plan, ...params } = input;
+  if (
+    input.requireNotificationReference ||
+    input.notificationBlocks ||
+    plan.some((entry) => hasNotificationProposal(entry.payload))
+  ) {
+    throw new Error("Source-backed notifications require direct message preparation");
+  }
   // This batch owns the supplied entries; queue outcome indexes refer to this
   // batch rather than the earlier producer array from which entries were selected.
   const batchPlan = plan.map((entry, sourceIndex) => Object.assign({}, entry, { sourceIndex }));
@@ -112,30 +135,41 @@ async function runDelivery(
     captureDeliveryQueueStateContext(
       initialInput.deliveryQueueId ? initialInput.deliveryQueueStateDir : undefined,
     );
-  const input = {
+  const input: InternalDeliverOutboundPayloadsParams = {
     ...initialInput,
     deliveryQueueStateContext: context,
     deliveryQueueStateDir: context.stateDir,
   };
-  const owner =
-    input.deliveryQueueOwner ??
-    (input.deliveryQueueId
-      ? createQueuedDeliveryOwner(
-          {
-            queueId: input.deliveryQueueId,
-            stateDir: input.deliveryQueueStateDir,
-            expectedPlatformSendAttemptId: input.deliveryProducerClaimId,
-          },
-          input.deliveryQueueStateContext,
-        )
-      : undefined);
-  try {
-    return await runWithQuestionChannelDeliveries(input.payloads.map(readAskUserQuestionId), () =>
-      runOutboundDeliveryWithIntent({ ...input, deliveryQueueOwner: owner }, prepare),
-    );
-  } catch (error) {
-    throw owner ? owner.project(error) : error;
+  const execute = async (params: InternalDeliverOutboundPayloadsParams) => {
+    const owner =
+      params.deliveryQueueOwner ??
+      (params.deliveryQueueId
+        ? createQueuedDeliveryOwner(
+            {
+              queueId: params.deliveryQueueId,
+              stateDir: params.deliveryQueueStateDir,
+              expectedPlatformSendAttemptId: params.deliveryProducerClaimId,
+            },
+            params.deliveryQueueStateContext,
+          )
+        : undefined);
+    try {
+      return await runWithQuestionChannelDeliveries(
+        params.payloads.map(readAskUserQuestionId),
+        () => runOutboundDeliveryWithIntent({ ...params, deliveryQueueOwner: owner }, prepare),
+      );
+    } catch (error) {
+      throw owner ? owner.project(error) : error;
+    }
+  };
+  if (
+    input.requireNotificationReference ||
+    input.notificationBlocks ||
+    input.payloads.some(hasNotificationProposal)
+  ) {
+    return runNotificationDelivery(input, execute);
   }
+  return execute(input);
 }
 
 async function runOutboundDeliveryWithIntent(
@@ -155,7 +189,11 @@ async function runOutboundDeliveryWithIntent(
         {
           id: stableIntentId,
           stateDir: params.deliveryQueueStateDir,
-          run: async (owner) => await runOutboundDeliveryWithQueue(params, prepare, true, owner),
+          preclaimed: params.notificationPreparation,
+          run: async (owner) => {
+            await params.validateNotificationPreparation?.();
+            return runOutboundDeliveryWithQueue(params, prepare, true, owner);
+          },
         },
         params.deliveryQueueStateContext,
       );
@@ -165,6 +203,11 @@ async function runOutboundDeliveryWithIntent(
     });
     if (claim.status === "claimed") {
       return claim.value;
+    }
+    if (params.notificationBlocks?.length) {
+      throwIfAborted(params.abortSignal);
+      params.deliveryQueueStateContext?.workerContext.admission.assertCurrent();
+      return acceptExistingNotificationCustody(params);
     }
     const owner = params.reusePendingDeliveryIntent
       ? await findDeliveryIntentOwner(
@@ -176,7 +219,7 @@ async function runOutboundDeliveryWithIntent(
     throwIfAborted(params.abortSignal);
     params.deliveryQueueStateContext?.workerContext.admission.assertCurrent();
     if (isReusablePreparedDeliveryOwner(owner)) {
-      return [];
+      return acceptExistingNotificationCustody(params);
     }
     throw new Error(`Stable delivery intent is already queued: ${stableIntentId}`);
   }
@@ -342,7 +385,7 @@ async function runOutboundDeliveryWithQueue(
     assertDeliveryCurrent();
     if (owner) {
       if (params.reusePendingDeliveryIntent && isReusablePreparedDeliveryOwner(owner)) {
-        return [];
+        return acceptExistingNotificationCustody(params);
       }
       throw new Error(
         owner.namespace === "legacy"
@@ -365,9 +408,22 @@ async function runOutboundDeliveryWithQueue(
     preparedBatch =
       existingStableDelivery?.preparedBatch ??
       params.preparedBatch ??
-      (await prepare(params, {
-        onBeforeFirstModifier: stablePreparationOwner?.beforeFirstModifier,
-      }));
+      (await (async () => {
+        let preparationParams = params;
+        if (params.notificationBlocks?.length && params.prepareNotificationPayload) {
+          const inputPayload = params.payloads[0];
+          if (!inputPayload) {
+            throw new Error("Notification preparation is missing its composed payload");
+          }
+          await params.validateNotificationPreparation?.();
+          await stablePreparationOwner?.beforeFirstModifier();
+          const payload = await params.prepareNotificationPayload(inputPayload);
+          preparationParams = { ...params, payloads: [payload] };
+        }
+        return prepare(preparationParams, {
+          onBeforeFirstModifier: stablePreparationOwner?.beforeFirstModifier,
+        });
+      })());
     await stablePreparationOwner?.markPrepared();
   } catch (error) {
     emitPreparationFailure(error);
@@ -556,7 +612,7 @@ async function runOutboundDeliveryWithQueue(
       return claimResult.value;
     }
     if (params.reusePendingDeliveryIntent) {
-      return [];
+      return acceptExistingNotificationCustody(params);
     }
     throw new Error(`Delivery intent is already claimed: ${queueId}`);
   } catch (error) {

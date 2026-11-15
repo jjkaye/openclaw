@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, realpath, rm, rmdir, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, realpath, rm, rmdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, relative, resolve, sep } from "node:path";
 import { assertNoSymlinkParents } from "@openclaw/fs-safe/advanced";
@@ -14,7 +14,7 @@ import { CLAW_BOOTSTRAP_FILE_NAMES } from "./types.js";
 import type { ClawManifest, ClawOpenClawProfile } from "./types.js";
 
 export type CapturedWorkspaceFile = {
-  name: (typeof CLAW_BOOTSTRAP_FILE_NAMES)[number];
+  name: string;
   content: Buffer;
   digest: string;
 };
@@ -58,6 +58,7 @@ export function generatedPackage(
   packageFiles: Map<string, Buffer>;
 } {
   const bootstrapFiles: ClawManifest["workspace"]["bootstrapFiles"] = {};
+  const files: ClawManifest["workspace"]["files"] = [];
   const packageFiles = new Map<string, Buffer>();
   let body: Buffer | undefined;
   for (const file of params.files) {
@@ -65,17 +66,21 @@ export function generatedPackage(
       body = file.content;
       continue;
     }
-    bootstrapFiles[file.name] = {
-      source: `workspace/${file.name}`,
-    };
-    packageFiles.set(`workspace/${file.name}`, file.content);
+    const source = `workspace/${file.name}`;
+    const bootstrap = CLAW_BOOTSTRAP_FILE_NAMES.find((name) => name === file.name);
+    if (bootstrap) {
+      bootstrapFiles[bootstrap] = { source };
+    } else {
+      files.push({ source, path: file.name });
+    }
+    packageFiles.set(source, file.content);
   }
   const agent = portableAgent(params.agent, params.avatar);
   const profile = portableOpenClawProfile(params.agent, []);
   const manifest: ClawManifest = {
     schemaVersion: 1,
     agent,
-    workspace: { bootstrapFiles, files: [] },
+    workspace: { bootstrapFiles, files },
     packages: [],
     mcpServers: {},
     cronJobs: [],
@@ -159,14 +164,20 @@ export async function createGeneratedPackage(
   });
   await mkdir(root, { recursive: false });
   try {
+    const output = await fsSafeRoot(root, {
+      hardlinks: "reject",
+      symlinks: "reject",
+      mutationSymlinks: "reject",
+    });
+    if (output.rootReal !== root) {
+      throw new ClawMigrationError(
+        "package_destination_changed",
+        "The generated package directory changed after creation.",
+        "$.packageRoot",
+      );
+    }
     for (const [path, content] of packageFiles) {
-      const target = resolve(root, path);
-      const child = relative(root, target);
-      if (child === ".." || child.startsWith(`..${sep}`)) {
-        throw new Error("Generated package path escaped its destination.");
-      }
-      await mkdir(dirname(target), { recursive: true });
-      await writeFile(target, content, { flag: "wx" });
+      await output.write(path, content, { mkdir: true, overwrite: false });
     }
   } catch (error) {
     await removeGeneratedPackageIfUnchanged(root, packageFiles);
@@ -178,28 +189,40 @@ export async function removeGeneratedPackageIfUnchanged(
   root: string,
   packageFiles: Map<string, Buffer>,
 ): Promise<void> {
+  const output = await fsSafeRoot(root, {
+    hardlinks: "reject",
+    maxBytes: MAX_MANAGED_FILE_BYTES,
+    symlinks: "reject",
+    mutationSymlinks: "reject",
+  }).catch(() => undefined);
+  if (!output || output.rootReal !== root) {
+    return;
+  }
+  const directories = new Set<string>();
   for (const [path, expected] of [...packageFiles.entries()].toReversed()) {
     const target = resolve(root, path);
-    const info = await lstatMigrationPathIfExists(target);
-    if (!info || !info.isFile() || info.isSymbolicLink() || info.nlink !== 1) {
-      continue;
+    for (
+      let directory = dirname(target);
+      relative(root, directory);
+      directory = dirname(directory)
+    ) {
+      const child = relative(root, directory);
+      if (child === ".." || child.startsWith(`..${sep}`)) {
+        break;
+      }
+      directories.add(directory);
     }
-    const actual = await fsSafeRoot(dirname(target))
-      .then((parent) =>
-        parent.read(target.slice(dirname(target).length + 1), {
-          hardlinks: "reject",
-          maxBytes: MAX_MANAGED_FILE_BYTES,
-          symlinks: "reject",
-        }),
-      )
+    const actual = await output.readBytes(path).catch(() => undefined);
+    if (actual && digestClawBytes(actual) === digestClawBytes(expected)) {
+      await output.remove(path).catch(() => undefined);
+    }
+  }
+  for (const directory of [...directories].toSorted((left, right) => right.length - left.length)) {
+    await assertNoSymlinkParents({ rootDir: root, targetPath: directory, allowMissing: false })
+      .then(() => rmdir(directory))
       .catch(() => undefined);
-    if (actual && digestClawBytes(actual.buffer) === digestClawBytes(expected)) {
-      await unlink(target).catch(() => undefined);
-    }
   }
-  for (const directory of [resolve(root, "profiles"), resolve(root, "workspace"), root]) {
-    await rmdir(directory).catch(() => undefined);
-  }
+  await rmdir(root).catch(() => undefined);
 }
 
 export async function createPackagePreview(packageFiles: Map<string, Buffer>): Promise<string> {

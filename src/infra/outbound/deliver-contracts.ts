@@ -12,10 +12,12 @@ import type { ReplyToMode } from "../../config/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { MessagePresentation, ReplyPayloadDeliveryPin } from "../../interactive/payload.js";
 import type { OutboundMediaAccess } from "../../media/load-options.js";
+import type { NotificationBlock } from "../../notifications/proposal.js";
 import type {
   DeliveryQueueCompletionRetention,
   DeliveryQueueStateContext,
 } from "../delivery-queue-sqlite.js";
+import type { DeliveryQueueNotificationReceipt } from "../delivery-queue-sqlite.types.js";
 import type { QueuedDeliveryOwner } from "./deliver-queue-state.js";
 import type {
   OutboundDeliveryQueuePolicy,
@@ -25,6 +27,7 @@ import type {
 } from "./deliver-types.js";
 import type { ConversationDeliveryTarget } from "./delivery-completion.js";
 import type { QueuedReplyPayloadSendingHook } from "./delivery-queue-storage.js";
+import type { StableDeliveryPreparation } from "./delivery-queue-storage.types.js";
 import type { DurableDeliveryCompletion } from "./delivery-queue-types.js";
 import type { OutboundDeliveryFormattingOptions } from "./formatting.js";
 import type { OutboundIdentity } from "./identity.js";
@@ -185,6 +188,14 @@ export type ChannelHandlerParams = OutboundChannelContext & {
 
 export type DeliverOutboundPayloadsCoreParams = OutboundChannelContext & {
   payloads: ReplyPayload[];
+  /** Current-source reference retained only while delivery is pending. */
+  notificationBlocks?: readonly NotificationBlock[];
+  /** Opaque policy custody retained after terminal payload projection. */
+  notificationReceipts?: readonly DeliveryQueueNotificationReceipt[];
+  /** Transforms only admitted copy inside its native preparation owner. */
+  prepareNotificationPayload?: (payload: ReplyPayload) => Promise<ReplyPayload>;
+  /** Selected proactive producers fail closed when the source reference is absent. */
+  requireNotificationReference?: boolean;
   /** Admitted run correlation copied into the prepared durable batch. */
   runId?: string;
   /** @internal Exact admitted execution provenance copied into durable custody. */
@@ -256,6 +267,9 @@ export type DeliverOutboundPayloadsParams = DeliverOutboundPayloadsCoreParams & 
 
 /** Private owner facts excluded from SDK delivery parameters and stored payloads. */
 export type InternalDeliverOutboundPayloadsParams = DeliverOutboundPayloadsParams & {
+  /** Native worker-reserved group; never supplied by a model. */
+  notificationPreparation?: StableDeliveryPreparation;
+  validateNotificationPreparation?: () => Promise<void>;
   /** Host-captured session generation retained independently by this delivery intent. */
   sessionGeneration?: SessionDeliveryGeneration;
   conversationDeliveryTarget?: ConversationDeliveryTarget;

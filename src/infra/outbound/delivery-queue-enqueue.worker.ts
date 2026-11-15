@@ -8,7 +8,10 @@ import {
   upsertDeliveryQueueEntryOnceAcrossNamespacesInDatabase,
 } from "../delivery-queue-sqlite-namespace.kernel.js";
 import { upsertDeliveryQueueEntryInDatabase } from "../delivery-queue-sqlite.kernel.js";
-import type { DeliveryQueueEntryState } from "../delivery-queue-sqlite.types.js";
+import {
+  parseDeliveryQueueNotificationReceipts,
+  type DeliveryQueueEntryState,
+} from "../delivery-queue-sqlite.types.js";
 import { stageSqliteTransactionState } from "../sqlite-post-commit.js";
 import {
   DELIVERY_QUEUE_MEDIA_STAGING_QUEUE_NAME,
@@ -66,12 +69,32 @@ export function executeDeliveryQueueEnqueue(
           return "created";
         }
         if (input.kind === "prepared") {
+          // SAFETY: The host serializes its typed preparation snapshot before yielding.
+          const expectedSourceEntry = JSON.parse(input.preparationJson) as DeliveryQueueEntryState;
+          if (
+            expectedSourceEntry.notificationReceipts !== undefined ||
+            entry.notificationReceipts !== undefined
+          ) {
+            const reserved = parseDeliveryQueueNotificationReceipts(
+              expectedSourceEntry.notificationReceipts,
+            );
+            const published = parseDeliveryQueueNotificationReceipts(entry.notificationReceipts);
+            if (
+              !reserved ||
+              !published ||
+              JSON.stringify(reserved) !== JSON.stringify(published) ||
+              entry.completionRetention !== "permanent"
+            ) {
+              throw new Error("Notification preparation receipts changed before publication");
+            }
+          }
           return movePendingDeliveryQueueEntryNamespaceInDatabase(database, {
             sourceQueueName: OUTBOUND_DELIVERY_PREPARATION_QUEUE_NAME,
             destinationQueueName: queueName,
             conflictQueueNames,
-            // SAFETY: The host serializes its typed preparation snapshot before yielding.
-            expectedSourceEntry: JSON.parse(input.preparationJson) as DeliveryQueueEntryState,
+            // The move's exact JSON CAS also proves the current source carries
+            // the same validated receipt set, without a second source read.
+            expectedSourceEntry,
             destinationEntry: entry,
             ...(input.mediaStageId
               ? {

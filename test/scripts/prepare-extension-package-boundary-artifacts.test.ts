@@ -448,9 +448,16 @@ describe("prepare-extension-package-boundary-artifacts", () => {
           "process.on('SIGTERM', () => {});",
           "setInterval(() => {}, 1000);",
         ].join("\n");
+        // Match the native artifact entry: observe rejection after cleanup while
+        // preserving the signal exit code recorded by runNodeStep's finally.
         const runnerScript = [
           `import { runNodeStep } from ${JSON.stringify(moduleHref)};`,
+          "try {",
           `await runNodeStep("signal-group-prep", ["--eval", ${JSON.stringify(parentScript)}], 60_000, { abortKillGraceMs: 100 });`,
+          "} catch (error) {",
+          "console.error(error);",
+          "process.exitCode ||= 1;",
+          "}",
         ].join("\n");
         const runner = spawn(process.execPath, ["--input-type=module", "--eval", runnerScript], {
           stdio: ["ignore", "pipe", "ignore"],

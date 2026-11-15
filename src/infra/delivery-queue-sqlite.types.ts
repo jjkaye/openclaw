@@ -5,6 +5,107 @@ export type DeliveryQueueCompletionRetention =
   | "permanent"
   | Readonly<{ idPrefix: string; maxAgeMs: number; maxEntries: number }>;
 
+export const NOTIFICATION_RECEIPT_RESOLVED_RETENTION_MS = 30 * 24 * 60 * 60_000;
+export const NOTIFICATION_TERMINAL_STATES = [
+  "completed_notification",
+  "completed_notification_canceled",
+  "completed_notification_suppressed",
+] as const;
+
+/** Opaque admission identity only; completed receipts never retain notification copy. */
+export type DeliveryQueueNotificationReceipt = Readonly<{
+  ownerKey: string;
+  topicKey: string;
+  revisionKey: string;
+  slot: 0 | 1 | 2;
+  localDate: string;
+  resolvedAt?: number;
+}>;
+
+export type DeliveryQueueNotificationReceiptSnapshot = Readonly<{
+  queueName: string;
+  id: string;
+  status: "pending" | "completed" | "failed";
+  notificationReceipt: DeliveryQueueNotificationReceipt;
+  acknowledgedAt?: number;
+  recoveryState?: string;
+}>;
+
+export type DeliveryQueueNotificationReceiptQuery = Readonly<{
+  topicKey?: string;
+  includePending?: boolean;
+}>;
+
+/** A current source may close receipt custody or explicitly reopen its owner. */
+export type DeliveryQueueNotificationResolution = Readonly<{
+  ownerKey: string;
+  resolvedAt: number | null;
+}>;
+
+/** Reject malformed or content-bearing metadata before it becomes durable custody. */
+export function parseDeliveryQueueNotificationReceipt(
+  value: unknown,
+): DeliveryQueueNotificationReceipt | undefined {
+  const receipt = asNullableRecord(value);
+  if (
+    !receipt ||
+    Object.keys(receipt).some(
+      (key) =>
+        !["ownerKey", "topicKey", "revisionKey", "slot", "localDate", "resolvedAt"].includes(key),
+    ) ||
+    typeof receipt.ownerKey !== "string" ||
+    !/^[a-f0-9]{64}$/.test(receipt.ownerKey) ||
+    typeof receipt.topicKey !== "string" ||
+    !/^[a-f0-9]{64}$/.test(receipt.topicKey) ||
+    typeof receipt.revisionKey !== "string" ||
+    !/^[a-f0-9]{64}$/.test(receipt.revisionKey) ||
+    (receipt.slot !== 0 && receipt.slot !== 1 && receipt.slot !== 2) ||
+    typeof receipt.localDate !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(receipt.localDate)
+  ) {
+    return undefined;
+  }
+  const date = new Date(`${receipt.localDate}T00:00:00.000Z`);
+  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== receipt.localDate) {
+    return undefined;
+  }
+  const resolvedAt = receipt.resolvedAt;
+  if (
+    resolvedAt !== undefined &&
+    (typeof resolvedAt !== "number" || !Number.isSafeInteger(resolvedAt) || resolvedAt < 0)
+  ) {
+    return undefined;
+  }
+  return {
+    ownerKey: receipt.ownerKey,
+    topicKey: receipt.topicKey,
+    revisionKey: receipt.revisionKey,
+    slot: receipt.slot,
+    localDate: receipt.localDate,
+    ...(resolvedAt !== undefined ? { resolvedAt } : {}),
+  };
+}
+
+/** One physical notification owns a bounded, unambiguous set of topic receipts. */
+export function parseDeliveryQueueNotificationReceipts(
+  value: unknown,
+): readonly DeliveryQueueNotificationReceipt[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 16) {
+    return undefined;
+  }
+  const receipts: DeliveryQueueNotificationReceipt[] = [];
+  const topics = new Set<string>();
+  for (const item of value) {
+    const receipt = parseDeliveryQueueNotificationReceipt(item);
+    if (!receipt || topics.has(receipt.topicKey)) {
+      return undefined;
+    }
+    topics.add(receipt.topicKey);
+    receipts.push(receipt);
+  }
+  return receipts;
+}
+
 /** Parse only the shipped completion-retention shape for one exact producer ID. */
 export function parseDeliveryQueueCompletionRetention(
   value: unknown,
@@ -47,6 +148,9 @@ export function inferDeliveryQueueFailureRetention(
   queueName?: string,
   legacyAmbiguousSendEvidence = false,
 ): DeliveryQueueCompletionRetention | undefined {
+  if (parseDeliveryQueueNotificationReceipts(entry.notificationReceipts)) {
+    return "permanent";
+  }
   const explicit =
     parseDeliveryQueueCompletionRetention(entry.completionRetention, id) ??
     parseDeliveryQueueCompletionRetention(entry.failureRetention, id);
@@ -94,6 +198,9 @@ export type DeliveryQueueEntryState = {
   /** Durable delivery-call count reserved before invoking the provider path. */
   attemptCount?: number;
   completionRetention?: DeliveryQueueCompletionRetention;
+  notificationReceipts?: readonly DeliveryQueueNotificationReceipt[];
+  notificationCanceled?: true;
+  notificationSuppressed?: true;
   /** Failure-only ownership fence; successful acknowledgement ignores this field. */
   retainOnFailure?: true;
   acknowledgedAt?: number;
@@ -130,25 +237,48 @@ export function hasLiveDeliveryQueueClaim(
 
 /** Strip a terminal queue row to the producer policy needed for admission. */
 export function projectDeliveryQueueTerminalEntry(
-  entry: Pick<DeliveryQueueEntryState, "id" | "retryCount">,
+  entry: Pick<
+    DeliveryQueueEntryState,
+    "id" | "retryCount" | "notificationReceipts" | "notificationCanceled" | "notificationSuppressed"
+  > & {
+    settlement?: { notificationCanceled?: true };
+  },
   terminalAt: number,
   terminal: "completed" | "failed",
   completionRetention?: DeliveryQueueCompletionRetention,
 ): DeliveryQueueEntryState {
+  const notificationReceipts = parseDeliveryQueueNotificationReceipts(entry.notificationReceipts);
+  if (entry.notificationReceipts !== undefined && !notificationReceipts) {
+    throw new Error("Invalid notification delivery receipts");
+  }
+  const retainedPolicy = notificationReceipts ? "permanent" : completionRetention;
   const retryCount =
     Number.isSafeInteger(entry.retryCount) && entry.retryCount >= 0 ? entry.retryCount : 0;
-  const recoveryState =
-    completionRetention === "permanent"
+  const canceled =
+    notificationReceipts && (entry.notificationCanceled || entry.settlement?.notificationCanceled);
+  const suppressed = notificationReceipts && entry.notificationSuppressed;
+  const recoveryState = notificationReceipts
+    ? canceled
+      ? "completed_notification_canceled"
+      : suppressed
+        ? "completed_notification_suppressed"
+        : "completed_notification"
+    : retainedPolicy === "permanent"
       ? "completed_permanent"
-      : completionRetention
+      : retainedPolicy
         ? "completed_bounded"
         : undefined;
   return {
     id: entry.id,
     enqueuedAt: terminalAt,
     retryCount,
-    ...(terminal === "completed" ? { acknowledgedAt: terminalAt } : { failedAt: terminalAt }),
-    ...(completionRetention ? { completionRetention } : {}),
+    ...(terminal === "completed"
+      ? !canceled && !suppressed
+        ? { acknowledgedAt: terminalAt }
+        : {}
+      : { failedAt: terminalAt }),
+    ...(retainedPolicy ? { completionRetention: retainedPolicy } : {}),
+    ...(notificationReceipts ? { notificationReceipts } : {}),
     ...(recoveryState ? { recoveryState } : {}),
   };
 }

@@ -22,6 +22,7 @@ import { prepareUpdateCandidateRehearsal } from "./update-candidate-rehearsal.js
 import {
   readUpdateStateSchemaVersions,
   updateStateSchemaVersionsMatch,
+  type UpdateStateSchemaVersion,
 } from "./update-candidate-state.js";
 import {
   materializeUpdateCandidateStateWorker,
@@ -58,6 +59,23 @@ function runSnapshotWorker(
     candidateRoot: path.join(root, "candidate-host"),
   });
 }
+
+it("keeps retained stores in rollback equality despite their migration exemption", () => {
+  const held: UpdateStateSchemaVersion = {
+    path: path.join(root, "held.sqlite"),
+    userVersion: 3,
+    migrationDisposition: "retained",
+  };
+  const comparison = {
+    sharedPath: path.join(root, "shared.sqlite"),
+    candidateSchemaVersions: { state: 20, agent: 25 },
+  };
+  expect(updateStateSchemaVersionsMatch([held], [held], comparison)).toBe(true);
+  expect(updateStateSchemaVersionsMatch([held], [{ ...held, userVersion: 25 }], comparison)).toBe(
+    false,
+  );
+  expect(updateStateSchemaVersionsMatch([held], [], comparison)).toBe(false);
+});
 
 it.each(["DELETE"])(
   "copies registered databases in %s mode without source process leases or source artifact changes",

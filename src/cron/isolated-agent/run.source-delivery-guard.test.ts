@@ -10,6 +10,7 @@ import { finalizeCronPromptForResolvedTools } from "./run-delivery-trace.js";
 import { setupRunCronIsolatedAgentTurnSuite } from "./run.suite-helpers.js";
 import {
   loadRunCronIsolatedAgentTurn,
+  isCliProviderMock,
   makeCronSession,
   makeCronSessionEntry,
   mockRunCronFallbackPassthrough,
@@ -19,6 +20,7 @@ import {
   resolveCronSessionMock,
   resolveDeliveryTargetMock,
   runEmbeddedAgentMock,
+  runCliAgentMock,
 } from "./run.test-harness.js";
 
 const { resolveCronDeliveryPlan } =
@@ -91,6 +93,42 @@ describe("cron source delivery policy", () => {
         : {}),
     });
   });
+
+  it.each(["embedded", "cli"] as const)(
+    "routes required-reference %s jobs through host final delivery with direct messaging unavailable",
+    async (runtime) => {
+      if (runtime === "cli") {
+        isCliProviderMock.mockReturnValue(true);
+        runCliAgentMock.mockResolvedValue({ payloads: [{ text: "Prepared." }], meta: {} });
+      }
+      resolveDeliveryTargetMock.mockResolvedValue({ ok: true, channel: "messagechat", to: "123" });
+      const result = await runCronIsolatedAgentTurn(
+        makeIsolatedAgentParamsFixture({
+          job: makeIsolatedAgentJobFixture({
+            delivery: {
+              mode: "announce",
+              channel: "messagechat",
+              to: "123",
+              requireNotificationReference: true,
+            },
+          }),
+        }),
+      );
+      expect(result.status, result.error).toBe("ok");
+      const run = (runtime === "cli" ? runCliAgentMock : runEmbeddedAgentMock).mock.calls[0]?.[0];
+      expect(run).toMatchObject({ disableMessageTool: true });
+      if (runtime === "embedded") {
+        expect(run.forceMessageTool).toBe(false);
+      }
+      const prompt = run.finalizePromptForResolvedTools({
+        prompt: "Prepare a useful decision.",
+        messageToolAvailable: true,
+      });
+      expect(prompt).toContain("openclaw.notification.v1");
+      expect(prompt).toContain("The message tool is unavailable");
+      expect(prompt).not.toContain("Use the message tool if");
+    },
+  );
 
   it("rejects required message-tool delivery when the runtime cannot expose the tool", () => {
     expect(() =>

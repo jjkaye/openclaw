@@ -1,9 +1,15 @@
 // Database-bound delivery queue serialization and mutations used by shared transactions.
 import type { DatabaseSync } from "node:sqlite";
+import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import type { RawBuilder, Selectable } from "kysely";
 import type { OpenClawStateDatabase } from "../state/openclaw-state-db-contract.js";
 import type { DB as OpenClawStateKyselyDatabase } from "../state/openclaw-state-db.generated.js";
-import type { DeliveryQueueEntryState } from "./delivery-queue-sqlite.types.js";
+import {
+  NOTIFICATION_RECEIPT_RESOLVED_RETENTION_MS,
+  NOTIFICATION_TERMINAL_STATES,
+  parseDeliveryQueueNotificationReceipts,
+  type DeliveryQueueEntryState,
+} from "./delivery-queue-sqlite.types.js";
 import {
   createSqliteQueryCache,
   executeSqliteQuerySync,
@@ -90,7 +96,8 @@ export function pruneDeliveryQueueTombstones(
     )`)
       .run(prefix ? { now, ...prefix } : { now });
   const ordinaryPruned = prefix ? false : pruneOrdinaryDeliveryReceipts(db, now);
-  return result.changes > 0 || ordinaryPruned;
+  const notificationsPruned = prefix ? false : pruneNotificationDeliveryReceipts(db, now);
+  return result.changes > 0 || ordinaryPruned || notificationsPruned;
 }
 
 /** Cheap maintenance cleanup: age predicates only, with no window sort. */
@@ -100,6 +107,62 @@ export function pruneDeliveryQueueTombstoneAges(db: DatabaseSync, now: number): 
     SELECT receipt_rowid FROM (${BOUNDED_DELIVERY_RECEIPTS_SQL})
     WHERE enqueued_at < @now - max_age_ms)`).run({ now });
   pruneOrdinaryDeliveryReceipts(db, now);
+  pruneNotificationDeliveryReceipts(db, now);
+}
+
+/** Task resolution starts receipt expiry; open topics never inherit a count or age cap. */
+export function pruneNotificationDeliveryReceipts(
+  db: DatabaseSync,
+  now: number,
+  exact?: { queueName: string; id: string },
+): boolean {
+  const queueDb = getNodeSqliteKysely<DeliveryQueueDatabase>(db);
+  let query = queueDb
+    .selectFrom("delivery_queue_entries")
+    .select(["queue_name", "id", "entry_json"])
+    .where("status", "in", ["completed", "failed"])
+    .where("recovery_state", "in", NOTIFICATION_TERMINAL_STATES);
+  if (exact) {
+    query = query.where("queue_name", "=", exact.queueName).where("id", "=", exact.id);
+  }
+  let changed = false;
+  for (const row of executeSqliteQuerySync(db, query).rows) {
+    let entry: unknown;
+    try {
+      entry = JSON.parse(row.entry_json);
+    } catch {
+      continue;
+    }
+    const record = asNullableRecord(entry);
+    const receipts = parseDeliveryQueueNotificationReceipts(record?.notificationReceipts);
+    if (!record || !receipts) {
+      continue;
+    }
+    const retained = receipts.filter(
+      (receipt) =>
+        receipt.resolvedAt === undefined ||
+        receipt.resolvedAt > now - NOTIFICATION_RECEIPT_RESOLVED_RETENTION_MS,
+    );
+    if (retained.length === receipts.length) {
+      continue;
+    }
+    const expected = { queue_name: row.queue_name, id: row.id, entry_json: row.entry_json };
+    const mutation = retained.length
+      ? queueDb
+          .updateTable("delivery_queue_entries")
+          .set({ entry_json: JSON.stringify({ ...record, notificationReceipts: retained }) })
+          .where((eb) => eb.and(expected))
+          .where("status", "in", ["completed", "failed"])
+          .where("recovery_state", "in", NOTIFICATION_TERMINAL_STATES)
+      : queueDb
+          .deleteFrom("delivery_queue_entries")
+          .where((eb) => eb.and(expected))
+          .where("status", "in", ["completed", "failed"])
+          .where("recovery_state", "in", NOTIFICATION_TERMINAL_STATES);
+    const result = executeSqliteQuerySync(db, mutation);
+    changed = (result.numAffectedRows ?? 0n) > 0n || changed;
+  }
+  return changed;
 }
 
 /** CAS-compacts one exact row, or deletes it when no fence is authored. */
@@ -148,7 +211,11 @@ function pruneOrdinaryDeliveryReceipts(db: DatabaseSync, now: number): boolean {
       .where((eb) =>
         eb.or([
           eb("recovery_state", "is", null),
-          eb("recovery_state", "not in", ["completed_permanent", "completed_bounded"]),
+          eb("recovery_state", "not in", [
+            "completed_permanent",
+            "completed_bounded",
+            ...NOTIFICATION_TERMINAL_STATES,
+          ]),
         ]),
       ),
   );

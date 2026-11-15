@@ -33,6 +33,7 @@ import {
   resolveFileMutationQueueKey,
   withFileMutationQueueKeysResolution,
 } from "./sessions/tools/file-mutation-queue.js";
+import { withToolEffectBoundary } from "./tool-effect-receipt.js";
 
 const BEGIN_PATCH_MARKER = "*** Begin Patch";
 const END_PATCH_MARKER = "*** End Patch";
@@ -95,6 +96,7 @@ function createPatchAbortError(signal: AbortSignal): Error {
 
 type ApplyPatchOptions = ApplyPatchFileOptions & {
   patchInputPaths?: ReadonlyMap<string, string>;
+  onEffectsStart?: () => void;
 };
 
 type ResolvedPatchTarget = Awaited<ReturnType<typeof resolvePatchPath>>;
@@ -147,43 +149,45 @@ export function createApplyPatchTool(
     description: "Patch one/many files. Input requires *** Begin Patch and *** End Patch.",
     parameters: applyPatchSchema,
     outputSchema: ApplyPatchToolOutputSchema,
-    execute: async (_toolCallId, args, signal) => {
-      const executionSignal = options.abortSignal
-        ? AbortSignal.any(signal ? [signal, options.abortSignal] : [options.abortSignal])
-        : signal;
-      const params = args as { input?: string };
-      const input = typeof params.input === "string" ? params.input : "";
-      if (!input.trim()) {
-        throw new Error("Provide a patch input.");
-      }
-      if (executionSignal?.aborted) {
-        throw createPatchAbortError(executionSignal);
-      }
+    execute: async (_toolCallId, args, signal) =>
+      withToolEffectBoundary(async (onEffectsStart) => {
+        const executionSignal = options.abortSignal
+          ? AbortSignal.any(signal ? [signal, options.abortSignal] : [options.abortSignal])
+          : signal;
+        const params = args as { input?: string };
+        const input = typeof params.input === "string" ? params.input : "";
+        if (!input.trim()) {
+          throw new Error("Provide a patch input.");
+        }
+        if (executionSignal?.aborted) {
+          throw createPatchAbortError(executionSignal);
+        }
 
-      let result: Awaited<ReturnType<typeof applyPatch>>;
-      try {
-        result = await applyPatch(input, {
-          cwd,
-          root,
-          sandbox,
-          workspaceOnly,
-          memoryWriteProvenance: options.memoryWriteProvenance,
-          signal: executionSignal,
-        });
-      } catch (error) {
-        throw withApplyPatchContainmentHint(
-          error,
-          workspaceOnly ? options.containmentSource : undefined,
-        );
-      }
+        let result: Awaited<ReturnType<typeof applyPatch>>;
+        try {
+          result = await applyPatch(input, {
+            cwd,
+            root,
+            sandbox,
+            workspaceOnly,
+            memoryWriteProvenance: options.memoryWriteProvenance,
+            signal: executionSignal,
+            onEffectsStart,
+          });
+        } catch (error) {
+          throw withApplyPatchContainmentHint(
+            error,
+            workspaceOnly ? options.containmentSource : undefined,
+          );
+        }
 
-      // A no-op patch is not terminal — the model may still be mid-task and
-      // needs a continuation, not an ended turn.
-      return {
-        content: [{ type: "text", text: result.text }],
-        details: { summary: result.summary },
-      };
-    },
+        // A no-op patch is not terminal — the model may still be mid-task and
+        // needs a continuation, not an ended turn.
+        return {
+          content: [{ type: "text", text: result.text }],
+          details: { summary: result.summary },
+        };
+      }),
   };
 }
 
@@ -239,11 +243,13 @@ async function applyPatch(input: string, options: ApplyPatchOptions): Promise<Ap
         throw createPatchAbortError(patchOptions.signal);
       }
       if (hunk.kind === "delete") {
+        patchOptions.onEffectsStart?.();
         await fileOps.remove(target.resolved);
         changedPaths.deleted.add(target.display);
         continue;
       }
       if (hunk.kind === "add") {
+        patchOptions.onEffectsStart?.();
         await ensureDir(target.resolved, fileOps);
         await createPatchTarget({
           target,
@@ -257,6 +263,7 @@ async function applyPatch(input: string, options: ApplyPatchOptions): Promise<Ap
 
       const applied = await applyUpdateHunk(target.resolved, hunk.chunks, fileOps);
       if (hunk.movePath && moveTarget) {
+        patchOptions.onEffectsStart?.();
         await ensureDir(moveTarget.resolved, fileOps);
       }
       if (moveTarget && moveTarget.queueKey !== target.queueKey) {
@@ -276,6 +283,7 @@ async function applyPatch(input: string, options: ApplyPatchOptions): Promise<Ap
         noOpPaths.add(target.display);
       } else {
         noOpPaths.delete(target.display);
+        patchOptions.onEffectsStart?.();
         await fileOps.writeFile(target.resolved, applied);
         changedPaths.modified.add(target.display);
       }
