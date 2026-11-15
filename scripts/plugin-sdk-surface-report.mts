@@ -216,7 +216,8 @@ export function readPluginSdkSurfaceBudgets(env: NodeJS.ProcessEnv = process.env
       // -8: retired Skill Workshop proposal hook types.
       // +3: approved async session entry reads and typed incognito refusal on the existing subpath.
       // +1: deprecated createSessionHeaderLink retained from shipped 2026.10.1.
-      3645,
+      // +15: existing notification source contract (seven types on core/plugin-entry, one owner-key helper).
+      3660,
       env,
     ),
     publicFunctionExports: readPluginSdkSurfaceBudgetEnv(
@@ -231,7 +232,8 @@ export function readPluginSdkSurfaceBudgets(env: NodeJS.ProcessEnv = process.env
       // +2: approved async upstream-link writes with released sync compatibility.
       // +3: approved async session entry reads and typed incognito refusal on the existing subpath.
       // +1: the same deprecated createSessionHeaderLink.
-      2115,
+      // +1: the existing notificationOwnerKey helper on plugin-entry.
+      2116,
       env,
     ),
     publicDeprecatedExports: readPluginSdkSurfaceBudgetEnv(
