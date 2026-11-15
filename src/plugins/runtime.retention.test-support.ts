@@ -330,7 +330,7 @@ switch (process.argv[2]) {
   }
   case "cache": {
     const { cache, signal, reference } = await retireCapturedCallback();
-    await collect();
+    await collect(reference);
     assert.equal(reference.deref(), undefined, "Retired cache retained its callback capture");
     assert.equal(getPluginCacheRetirementSignal(cache), signal);
     assert.equal(signal.aborted, true);
