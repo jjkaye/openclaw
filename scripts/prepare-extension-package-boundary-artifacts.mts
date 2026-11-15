@@ -241,6 +241,47 @@ export async function runNodeSteps(steps: NodeStep[], env: NodeJS.ProcessEnv = p
   }
 }
 
+/** Discovery owns a real compiler child, so cancellation must join its entire group. */
+export async function runBoundaryDiscovery(extensionIds: string[], preparedSdk = false) {
+  let output = "";
+  let outputExceededLimit = false;
+  await runNodeStep(
+    "extension boundary discovery",
+    [
+      resolve(repoRoot, "scripts/lib/extension-boundary-projects.mts"),
+      JSON.stringify(extensionIds),
+      ...(preparedSdk ? ["--prepared-sdk"] : []),
+    ],
+    420_000,
+    {
+      onStdoutLine(line) {
+        if (output.length + line.length > 1024 * 1024) {
+          outputExceededLimit = true;
+        } else if (!outputExceededLimit) {
+          output += line;
+        }
+        return false;
+      },
+    },
+  );
+  if (outputExceededLimit) {
+    throw new Error("Extension boundary discovery output exceeded its limit");
+  }
+  const preparation: unknown = JSON.parse(output);
+  if (
+    !preparation ||
+    typeof preparation !== "object" ||
+    !("sdkRoots" in preparation) ||
+    !("pluginIds" in preparation) ||
+    !Array.isArray(preparation.sdkRoots) ||
+    !Array.isArray(preparation.pluginIds) ||
+    ![...preparation.sdkRoots, ...preparation.pluginIds].every((value) => typeof value === "string")
+  ) {
+    throw new Error("Invalid extension boundary discovery result");
+  }
+  return preparation as Awaited<ReturnType<typeof resolveExtensionBoundaryPreparation>>;
+}
+
 async function prepareExtensionPackageBoundaryArtifacts(argv: string[] = process.argv.slice(2)) {
   const preparationStartedAt = performance.now();
   const startPhase = (label: string) => {
@@ -259,7 +300,6 @@ async function prepareExtensionPackageBoundaryArtifacts(argv: string[] = process
   await ensureKyselyTypes(repoRoot);
   const selectedArgument = argv.find((arg) => arg.startsWith("--extensions="));
   let selected: string[] | undefined;
-  let discoverPreparation: typeof resolveExtensionBoundaryPreparation | undefined;
   let preparation: Awaited<ReturnType<typeof resolveExtensionBoundaryPreparation>> | undefined;
   if (selectedArgument) {
     const requested: unknown = JSON.parse(selectedArgument.slice("--extensions=".length));
@@ -272,10 +312,8 @@ async function prepareExtensionPackageBoundaryArtifacts(argv: string[] = process
       throw new Error("Invalid selected extension preparation request");
     }
     selected = requested;
-    ({ resolveExtensionBoundaryPreparation: discoverPreparation } =
-      await import("./lib/extension-boundary-projects.mts"));
     const finishDiscovery = startPhase("initial discovery");
-    preparation = await discoverPreparation(repoRoot, selected);
+    preparation = await runBoundaryDiscovery(selected);
     finishDiscovery();
     process.stdout.write(
       `selected preparation: ${preparation.sdkRoots.length} SDK roots; plugin producers: ${preparation.pluginIds.join(", ") || "none"}\n`,
@@ -446,9 +484,7 @@ async function prepareExtensionPackageBoundaryArtifacts(argv: string[] = process
     // Only admitted SDK output may reveal declaration-only producer edges. Expand
     // their SDK inputs before compiling any producer or selected package.
     const finishDiscovery = startPhase("prepared SDK discovery");
-    const discovered = await discoverPreparation!(repoRoot, selected!, {
-      preparedSdk: true,
-    });
+    const discovered = await runBoundaryDiscovery(selected!, true);
     finishDiscovery();
     if (sharedSdk) {
       if (discovered.sdkRoots.length) {
