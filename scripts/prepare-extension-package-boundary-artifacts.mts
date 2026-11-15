@@ -169,9 +169,9 @@ export async function runNodeStep(
     stdoutWriter.flush();
     stderrWriter.flush();
     activeNodeSteps.delete(command);
-    // The last sibling exits only after all managed cancellation has joined.
+    // Let artifact ownership unwind after the last managed cancellation joins.
     if (nodeStepParentSignal && activeNodeSteps.size === 0) {
-      process.exit(signalExitCode(nodeStepParentSignal));
+      process.exitCode = signalExitCode(nodeStepParentSignal);
     }
   }
 }

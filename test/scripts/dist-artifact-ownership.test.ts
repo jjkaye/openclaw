@@ -600,6 +600,48 @@ describe.skipIf(process.platform === "win32")("dist artifact ownership", () => {
     expect(fs.existsSync(path.join(resolveDistArtifactLockPath(root), "unjoined"))).toBe(false);
   });
 
+  it("releases the artifact claim after signaled declaration work joins", async ({ signal }) => {
+    await withProcesses(async ({ start }) => {
+      const root = createCheckout();
+      installScripts(root, ["prepare-extension-package-boundary-artifacts.mts", "run-tsgo.mts"], {
+        dependencies: ["@openclaw/fs-safe"],
+      });
+      const entry = write(
+        root,
+        "signal-entry.mts",
+        String.raw`
+          import { runNodeStep } from './scripts/prepare-extension-package-boundary-artifacts.mts';
+          await runNodeStep('signaled declaration', ['--eval',
+            "setInterval(() => {}, 1000); process.stdout.write('ready\\n');"
+          ], 30_000, {
+            onStdoutLine(line) {
+              if (line.trim() === 'ready') process.kill(process.pid, 'SIGTERM');
+              return false;
+            },
+          });
+          `,
+      );
+      const runner = write(
+        root,
+        "signal-runner.mts",
+        `
+          import { withDistArtifactOwnership, distArtifactEntryArgs } from './scripts/lib/dist-artifact-ownership.mts';
+          import { runManagedCommand } from './scripts/lib/managed-child-process.mts';
+          process.exitCode = await withDistArtifactOwnership(process.cwd(), () => runManagedCommand({
+            bin: process.execPath,
+            args: distArtifactEntryArgs(${JSON.stringify(entry)}, [], { native: true }),
+            requireProcessTreeExit: true,
+          }));
+          `,
+      );
+      const result = await start(root, runner).done;
+      expect(result.code, result.output).toBe(143);
+      const lock = resolveDistArtifactLockPath(root);
+      expect(fs.existsSync(path.join(lock, "owner.json")), result.output).toBe(false);
+      expect(fs.readdirSync(lock).filter((name) => name.startsWith("child-"))).toEqual([]);
+    }, signal);
+  });
+
   it.for([false, true])(
     "retains ownership when recording uncertainty fails (nested=%s)",
     async (nested, { signal }) => {
