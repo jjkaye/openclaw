@@ -1804,7 +1804,7 @@ jobs:
           const buildInfo = JSON.parse(readFileSync("dist/build-info.json", "utf8"));
           assert.equal(buildInfo.commit, process.env.CHECKOUT_REVISION, "built candidate must match selected checkout");
           NODE
-          node scripts/package-openclaw-for-docker.mjs --skip-build \
+          node scripts/package-openclaw-for-docker.mjs --skip-build --bundle-plugin codex \
             --allow-unreleased-changelog --output-dir .artifacts/published-driver-package \
             --output-name openclaw-candidate.tgz
           node --input-type=module <<'NODE'
@@ -1825,6 +1825,7 @@ jobs:
             packageSha256,
             lockfileSha256: sha256("pnpm-lock.yaml"),
             buildProfile: "ci-artifacts",
+            bundledPlugins: ["codex"],
           }, null, 2)}\n`);
           appendFileSync(process.env.GITHUB_OUTPUT, `sha256=${packageSha256}\n`);
           NODE
