@@ -144,6 +144,36 @@ describe("maybeResolveIMessageApprovalPollVote", () => {
     );
   });
 
+  it("passes only the matched native group poll conversation to the account runtime", async () => {
+    const pollGuid = "household-native-poll";
+    await iMessageApprovalPollTargets.register({
+      accountId: "default",
+      conversation: { chatId: 42 },
+      pollGuid,
+      approvalId: "plugin:household-poll",
+      approvalKind: "plugin",
+      optionDecisions: [[ALLOW_ONCE_OPTION, "allow-once"]],
+      expiresAtMs: Date.now() + 60_000,
+    });
+    const gatewayRuntime = { request: vi.fn() } as never;
+    const message = { ...buildVote({ pollGuid }), is_group: true, chat_id: 42 };
+    await expect(resolveVote({ ...message, chat_id: 43 }, { gatewayRuntime })).resolves.toBe(false);
+    expect(resolverMocks.resolveApprovalOverGateway).not.toHaveBeenCalled();
+    await expect(resolveVote(message, { gatewayRuntime })).resolves.toBe(true);
+    expect(resolverMocks.resolveApprovalOverGateway).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approvalId: "plugin:household-poll",
+        approvalKind: "plugin",
+        decision: "allow-once",
+        channel: "imessage",
+        accountId: "default",
+        senderId: APPROVER,
+        conversationId: "chat_id:42",
+        gatewayRuntime,
+      }),
+    );
+  });
+
   it("selects the transport actor from a multi-participant complete vote set", async () => {
     expect(await bind()).toBe(true);
 

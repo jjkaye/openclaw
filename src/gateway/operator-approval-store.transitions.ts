@@ -4,6 +4,7 @@ import { mintMcpToolGrantLocked } from "../infra/exec-approvals-sqlite.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import type { OpenClawStateDatabaseOptions } from "../state/openclaw-state-db-contract.js";
 import { runOpenClawStateWriteTransaction } from "../state/openclaw-state-db.js";
+import { decodePluginApprovalBinding } from "./operator-approval-plugin-binding.js";
 import { mintCronStandingGrantLocked } from "./operator-approval-standing-grants.js";
 import type { CronStandingGrantMintSpec } from "./operator-approval-standing-grants.types.js";
 import { operatorApprovalTerminalFields } from "./operator-approval-store.fields.js";
@@ -32,6 +33,7 @@ import type {
   ForceDenyOperatorApprovalResult,
   TerminalizeOperatorApprovalsResult,
   ConsumeOperatorApprovalResult,
+  PluginApprovalActor,
 } from "./operator-approval-store.types.js";
 
 export function resolveOperatorApprovalInDatabase(params: {
@@ -41,6 +43,8 @@ export function resolveOperatorApprovalInDatabase(params: {
   expectedKind?: OperatorApprovalKind;
   runtimeEpoch?: string;
   nowMs?: number;
+  /** Internal native ingress only; persisted in the same first-answer CAS. */
+  verifiedPluginActor?: PluginApprovalActor;
   mcpToolGrant?: { agentId: string; server: string; tool: string };
   /** Cron-context allow-always mints this scoped grant in the same transaction. */
   standingGrant?: { kind: "cron" } & CronStandingGrantMintSpec & {
@@ -87,6 +91,27 @@ export function resolveOperatorApprovalInDatabase(params: {
       return { outcome: "decision-not-allowed", record };
     }
 
+    let pluginBindingJson = row.plugin_binding_json ?? null;
+    if (params.verifiedPluginActor !== undefined) {
+      const binding =
+        record.pluginBinding &&
+        decodePluginApprovalBinding(
+          JSON.stringify({ ...record.pluginBinding, actor: params.verifiedPluginActor }),
+          OPERATOR_APPROVAL_TERMINAL_RETENTION_MS,
+        );
+      if (
+        !binding?.actor ||
+        params.resolver.kind !== "channel" ||
+        resolverId !== `${binding.actor.channel}:${binding.actor.accountId}` ||
+        !isValidTimestamp(nowMs) ||
+        nowMs < binding.scope.validFromMs ||
+        nowMs >= binding.scope.validUntilMs
+      ) {
+        throw new Error("native approval actor requires a current bound channel approval");
+      }
+      pluginBindingJson = JSON.stringify(binding);
+    }
+
     const auditTimestampMs = clampAuditTimestamp(nowMs, record.createdAtMs);
     const stateDb = getNodeSqliteKysely<OperatorApprovalDatabase>(database.db);
     let resolveQuery = stateDb
@@ -100,6 +125,7 @@ export function resolveOperatorApprovalInDatabase(params: {
           { kind: params.resolver.kind, id: resolverId },
         ),
       )
+      .set({ plugin_binding_json: pluginBindingJson })
       .where("approval_id", "=", id)
       .where("status", "=", "pending")
       .where("expires_at_ms", ">", nowMs);
@@ -431,8 +457,11 @@ export function pruneTerminalOperatorApprovals(params: {
   databaseOptions?: OpenClawStateDatabaseOptions;
 }): number {
   const retentionMs = params.retentionMs ?? OPERATOR_APPROVAL_TERMINAL_RETENTION_MS;
-  if (!Number.isSafeInteger(retentionMs) || retentionMs < 0) {
-    throw new Error("operator approval retention must be a non-negative safe integer");
+  // A still-valid plugin scope must never outlive the canonical rows that prove it.
+  if (!Number.isSafeInteger(retentionMs) || retentionMs < OPERATOR_APPROVAL_TERMINAL_RETENTION_MS) {
+    throw new Error(
+      "operator approval retention cannot be shorter than the native retention window",
+    );
   }
   return runOpenClawStateWriteTransaction((database) => {
     const nowMs = params.nowMs ?? Date.now();

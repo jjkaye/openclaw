@@ -1,3 +1,4 @@
+import type { PluginApprovalBinding } from "../gateway/operator-approval-store.types.js";
 import type { ApprovalScope } from "../infra/approval-scope.js";
 
 export const PluginApprovalResolutions = {
@@ -19,6 +20,8 @@ export type PluginHookBeforeToolCallResult = {
     title: string;
     description: string;
     scope?: ApprovalScope;
+    /** Private exact-plan binding; native host provenance is required to persist it. */
+    receiptBinding?: Pick<PluginApprovalBinding, "scope" | "intent">;
     severity?: "info" | "warning" | "critical";
     timeoutMs?: number;
     /** Override timeout text and return the timeout as a blocked tool result. */

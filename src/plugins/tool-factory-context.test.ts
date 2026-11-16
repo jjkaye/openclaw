@@ -123,6 +123,29 @@ describe("plugin tool declaration membership", () => {
 });
 
 describe("versioned plugin tool authority", () => {
+  it("offers private receipt reads only through V2 and retires them with the plugin", async () => {
+    const legacy = register(() => null);
+    expect(
+      createPluginToolFactoryContext({ ...legacy, context: {} }).approvalReceipts,
+    ).toBeUndefined();
+    const owned = register({ contextVersion: 2, create: () => null });
+    const context = createPluginToolFactoryContext({
+      ...owned,
+      context: { agentId: "nora", sessionKey: "agent:nora:imessage:group:42" },
+      assertInvocationCurrent: () => {},
+    });
+    expect(context.approvalReceipts?.read).toBeTypeOf("function");
+    markPluginRegistryRetired(owned.registry);
+    await expect(
+      context.approvalReceipts!.read({
+        generation: "week-1",
+        digest: "a".repeat(64),
+        validFromMs: 900,
+        validUntilMs: 9_000,
+      }),
+    ).rejects.toThrow(/no longer active/u);
+  });
+
   it.each([false, true])(
     "does not promote legacy continuation factories, preserving direct owner=%s",
     (directOwner) => {

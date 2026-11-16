@@ -114,6 +114,7 @@ function hasExactLegacyOperatorApprovalSchema(db: DatabaseSync): boolean {
     return false;
   }
   const exactStrictLegacy = canonicalOperatorApprovalCreateSql()
+    .replace("\n  plugin_binding_json TEXT,", "")
     // sqlite_master stores the CREATE statement without "IF NOT EXISTS".
     .replace("CREATE TABLE IF NOT EXISTS operator_approvals (", "CREATE TABLE operator_approvals (")
     .replace(/'exec',\s*'plugin',\s*'system-agent'/, "'exec', 'plugin'");

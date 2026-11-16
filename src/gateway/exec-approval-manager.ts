@@ -271,6 +271,7 @@ export class ExecApprovalManager<
             decision,
             resolver,
             expectedKind: this.approvalKind,
+            verifiedPluginActor: options.verifiedPluginActor,
             runtimeEpoch: persistence.runtimeEpoch,
             databaseOptions: persistence.databaseOptions,
             onCommitted: (key) => {

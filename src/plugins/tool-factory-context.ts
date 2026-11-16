@@ -1,3 +1,4 @@
+import { createPluginApprovalReceipts } from "./approval-receipts.js";
 import { assertMemoryAudienceSession } from "./memory-audience.js";
 import { resolveMemoryCapabilityRegistration } from "./memory-state.js";
 import { capturePluginLifecycleAuthority } from "./registry-lifecycle.js";
@@ -60,5 +61,14 @@ export function createPluginToolFactoryContext(params: {
       return continuation ? continuation.isCurrent() : context.senderIsOwner;
     },
     assertInvocationCurrent,
+    approvalReceipts:
+      entry.contextVersion === 2
+        ? createPluginApprovalReceipts({
+            pluginId: entry.pluginId,
+            agentId: context.agentId,
+            sessionKey: context.sessionKey,
+            assertCurrent: assertInvocationCurrent,
+          })
+        : undefined,
   };
 }

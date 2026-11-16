@@ -5,6 +5,15 @@ import type { ApprovalRequest, ApprovalResolved, ChannelApprovalKind } from "./a
 export type GatewayApprovalRequest = ApprovalRequest;
 export type GatewayApprovalResolved = ApprovalResolved;
 
+export type GatewayNativeApprovalRequestOptions = {
+  clientDisplayName?: string;
+  /** Provider conversation from a matched native control; never a public RPC claim. */
+  conversationId?: string;
+  /** Native account lifetime; the host accepts only its opaque internal guard. */
+  commitGuard?: () => void;
+  signal?: AbortSignal;
+};
+
 export type GatewayApprovalEventSubscriber = {
   eventKinds: ReadonlySet<ChannelApprovalKind>;
   shouldHandle: (request: GatewayApprovalRequest) => boolean;
@@ -17,7 +26,7 @@ export type GatewayNativeApprovalRuntime = {
   request: <T = unknown>(
     method: GatewayNativeApprovalMethod,
     params: Record<string, unknown>,
-    options?: { clientDisplayName?: string },
+    options?: GatewayNativeApprovalRequestOptions,
   ) => Promise<T>;
   requestRoute: <T = unknown>(method: "send", params: Record<string, unknown>) => Promise<T>;
   routeCoordinator: ApprovalNativeRouteCoordinator;

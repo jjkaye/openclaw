@@ -5,6 +5,7 @@ import type { ConversationReadInvocationOrigin } from "../channels/plugins/conve
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { HookEntry } from "../hooks/types.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
+import type { PluginApprovalReceipts } from "./approval-receipts.js";
 import type { MemoryAudience } from "./memory-provider-types.js";
 
 export type OpenClawPluginActiveModelContext = {
@@ -59,6 +60,8 @@ type OpenClawPluginToolContextBase = {
   deliveryContext?: DeliveryContext;
   /** Host-bound current-route delivery. Retained copies fail after the owning turn closes. */
   delivery?: OpenClawPluginToolDelivery;
+  /** V2-only private canonical assent facts for this plugin and admitted original session. */
+  approvalReceipts?: PluginApprovalReceipts;
   /** Trusted platform-native conversation id for the active inbound turn. */
   nativeChannelId?: string;
   /** Trusted sender id from inbound context (runtime-provided, not tool args). */

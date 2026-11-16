@@ -39,6 +39,46 @@ export type OperatorApprovalResolver = {
   id: string | null;
 };
 
+/** Private host-owned provenance; never part of the reviewer or model protocol. */
+export type PluginApprovalActor = {
+  channel: string;
+  accountId: string;
+  senderId: string;
+  conversationId: string;
+};
+
+export type PluginApprovalBinding = {
+  version: 1;
+  pluginId: string;
+  scope: {
+    generation: string;
+    digest: string;
+    validFromMs: number;
+    validUntilMs: number;
+  };
+  intent: "approve" | "revoke";
+  actor: PluginApprovalActor | null;
+};
+
+export type ReadPluginApprovalReceiptsInput = {
+  agentId: string;
+  sessionKey: string;
+  pluginId: string;
+  scope: PluginApprovalBinding["scope"];
+  nowMs?: number;
+};
+
+export type PluginApprovalReceipt = Pick<
+  OperatorApprovalRecord,
+  "id" | "status" | "decision" | "terminalReason" | "createdAtMs" | "resolvedAtMs"
+> &
+  Pick<PluginApprovalBinding, "intent" | "actor">;
+
+/** Complete historical facts only; this result never grants execution authority. */
+export type ReadPluginApprovalReceiptsResult =
+  | { outcome: "complete"; receipts: PluginApprovalReceipt[] }
+  | { outcome: "held"; reason: "invalid-scope" | "expired" | "overflow" | "corrupt" };
+
 export type OperatorApprovalRecord = {
   id: string;
   resolutionRef: string;
@@ -59,6 +99,7 @@ export type OperatorApprovalRecord = {
   resolver: OperatorApprovalResolver | null;
   consumedAtMs: number | null;
   consumedBy: string | null;
+  pluginBinding?: PluginApprovalBinding;
 };
 
 export type NewOperatorApproval = {
@@ -73,6 +114,7 @@ export type NewOperatorApproval = {
   createdAtMs: number;
   expiresAtMs: number;
   executionIdentityToken?: ExecutionIdentityAdmissionToken;
+  pluginBinding?: Omit<PluginApprovalBinding, "actor"> & { actor: null };
 };
 
 export type InsertOperatorApprovalResult =

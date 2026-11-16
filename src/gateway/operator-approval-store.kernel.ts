@@ -12,6 +12,7 @@ import { createSqliteSchemaEnsurer } from "../infra/sqlite-schema-ensure.js";
 import type { OpenClawStateDatabaseOptions } from "../state/openclaw-state-db-contract.js";
 import { tableExists } from "../state/openclaw-state-db-schema-helpers.js";
 import { runOpenClawStateWriteTransaction } from "../state/openclaw-state-db.js";
+import { decodePluginApprovalBinding } from "./operator-approval-plugin-binding.js";
 import { matchesOperatorApprovalReviewerBinding } from "./operator-approval-reviewer-binding.js";
 import {
   OPERATOR_APPROVAL_TERMINAL_RETENTION_MS,
@@ -83,10 +84,33 @@ export function insertOperatorApprovalInDatabase(params: {
     );
   }
   const audienceSessionKeysJson = JSON.stringify(audienceSessionKeys);
+  const pluginBinding =
+    input.pluginBinding === undefined
+      ? undefined
+      : decodePluginApprovalBinding(
+          JSON.stringify(input.pluginBinding),
+          OPERATOR_APPROVAL_TERMINAL_RETENTION_MS,
+        );
+  if (
+    pluginBinding === null ||
+    (pluginBinding !== undefined &&
+      (pluginBinding.actor !== null ||
+        input.kind !== "plugin" ||
+        input.presentation.kind !== "plugin" ||
+        input.presentation.pluginId !== pluginBinding.pluginId ||
+        !input.source?.agentId?.trim() ||
+        !input.source.sessionKey?.trim() ||
+        input.createdAtMs < pluginBinding.scope.validFromMs ||
+        input.createdAtMs > pluginBinding.scope.validUntilMs))
+  ) {
+    throw new Error("operator approval plugin binding is invalid");
+  }
+  const pluginBindingJson = pluginBinding ? JSON.stringify(pluginBinding) : null;
   const serialized = {
     presentationJson,
     reviewerDeviceIdsJson,
     audienceSessionKeysJson,
+    pluginBindingJson,
   };
   const executionIdentityBinding = normalizeExecutionIdentityBinding(input);
 
@@ -114,6 +138,7 @@ export function insertOperatorApprovalInDatabase(params: {
           kind: input.kind,
           status: "pending",
           presentation_json: presentationJson,
+          plugin_binding_json: pluginBindingJson,
           requested_by_device_id: normalizeNullableString(input.requester?.deviceId),
           requested_by_client_id: normalizeNullableString(input.requester?.clientId),
           requested_by_device_token_auth: input.requester?.deviceTokenAuth === true ? 1 : 0,

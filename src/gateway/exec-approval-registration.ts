@@ -127,6 +127,7 @@ export async function prepareExecApprovalRegistration<TPayload>(params: {
     runtimeEpoch: params.runtimeEpoch,
     createdAtMs: record.createdAtMs,
     expiresAtMs: record.expiresAtMs,
+    ...(record.pluginBinding ? { pluginBinding: record.pluginBinding } : {}),
     ...(record.executionIdentityToken
       ? { executionIdentityToken: record.executionIdentityToken }
       : {}),

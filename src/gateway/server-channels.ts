@@ -25,7 +25,6 @@ import {
 } from "../channels/status/account-state.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { withGatewayNativeApprovalRuntime } from "../infra/approval-gateway-runtime-context.js";
-import type { GatewayNativeApprovalMethod } from "../infra/approval-gateway-runtime-methods.js";
 import type { GatewayNativeApprovalRuntime } from "../infra/approval-gateway-runtime.types.js";
 import { startChannelApprovalHandlerBootstrap } from "../infra/approval-handler-bootstrap.js";
 import { type BackoffPolicy, sleepWithAbort } from "../infra/backoff.js";
@@ -80,6 +79,7 @@ import {
   type ChannelAccountLifetime,
   type ChannelAccountStopOutcome,
 } from "./server-channel-account-lifetime.js";
+import { createChannelApprovalRuntime } from "./server-channel-approval-runtime.js";
 import { createChannelAutostartRecovery } from "./server-channel-autostart-recovery.js";
 import type {
   ChannelAccountStartOutcome,
@@ -846,22 +846,19 @@ export function createChannelManager(opts: ChannelManagerOptions): ChannelManage
             }
             const gatewayApprovalRuntime = opts.getNativeApprovalRuntime?.();
             if (channelRuntimeForTask && gatewayApprovalRuntime) {
-              const approvalRuntime: Pick<GatewayNativeApprovalRuntime, "request"> = {
-                request: async <T>(
-                  method: GatewayNativeApprovalMethod,
-                  requestParams: Record<string, unknown>,
-                  requestOptions?: { clientDisplayName?: string },
-                ): Promise<T> => {
-                  if (method !== "approval.resolve") {
-                    throw new Error(`channel approval runtime cannot dispatch ${method}`);
+              const approvalRuntime = createChannelApprovalRuntime({
+                runtime: gatewayApprovalRuntime,
+                channelId,
+                accountId: id,
+                signal: abort.signal,
+                assertCurrent: () => {
+                  capabilityLease.assertActive("approval resolution");
+                  abort.signal.throwIfAborted();
+                  if (startCancelled() || !isCurrentTask()) {
+                    throw new Error("channel approval account is no longer active");
                   }
-                  return await gatewayApprovalRuntime.request<T>(
-                    "approval.resolve",
-                    requestParams,
-                    requestOptions,
-                  );
                 },
-              };
+              });
               registerChannelRuntimeContext({
                 channelRuntime: channelRuntimeForTask,
                 channelId,

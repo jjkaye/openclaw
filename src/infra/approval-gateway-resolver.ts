@@ -12,6 +12,7 @@ import { withOperatorApprovalsGatewayClient } from "../gateway/operator-approval
 import { isApprovalNotFoundError } from "./approval-errors.js";
 import { getGatewayNativeApprovalRuntime } from "./approval-gateway-runtime-context.js";
 import type { GatewayNativeApprovalMethod } from "./approval-gateway-runtime-methods.js";
+import type { GatewayNativeApprovalRequestOptions } from "./approval-gateway-runtime.types.js";
 import type { ChannelApprovalKind } from "./approval-types.js";
 import type { SystemAgentApprovalRequest } from "./system-agent-approvals.js";
 
@@ -30,7 +31,7 @@ type ApprovalGatewayRuntime = {
   request: (
     method: "approval.resolve",
     params: ApprovalResolveParams,
-    options?: { clientDisplayName?: string },
+    options?: Pick<GatewayNativeApprovalRequestOptions, "clientDisplayName" | "conversationId">,
   ) => Promise<ApprovalResolveResult>;
 };
 
@@ -38,6 +39,8 @@ type CanonicalResolveApprovalOverGatewayParams = ResolveApprovalOverGatewayBaseP
   /** Explicit owner required by the canonical approval resolver. */
   approvalKind: ChannelApprovalKind;
   gatewayRuntime?: ApprovalGatewayRuntime;
+  /** Matched native control provenance; forwarded only to the explicit account capability. */
+  conversationId?: string;
   allowPluginFallback?: never;
   resolveMethod?: never;
 };
@@ -136,13 +139,13 @@ export async function resolveApprovalOverGateway(
     ...(reviewer ? { reviewer } : {}),
   });
 
-  const canonicalGatewayRuntime = (params as CanonicalResolveApprovalOverGatewayParams)
-    .gatewayRuntime;
+  const { gatewayRuntime: canonicalGatewayRuntime, conversationId } =
+    params as CanonicalResolveApprovalOverGatewayParams;
   if (canonicalGatewayRuntime && canonicalKind) {
     return await canonicalGatewayRuntime.request(
       "approval.resolve",
       canonicalResolveParams(canonicalKind),
-      { clientDisplayName },
+      { clientDisplayName, ...(conversationId !== undefined ? { conversationId } : {}) },
     );
   }
 
